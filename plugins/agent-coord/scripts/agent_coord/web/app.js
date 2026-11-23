@@ -47,7 +47,12 @@ async function api(path, body, requestOptions = {}) {
   for (let attempt = 0; ; ++attempt) {
     let response, unreadable = false;
     try {
-      response = await fetch(base + path, options);
+      // Several windows share the same loopback HTTP connection pool. Wait
+      // for other windows' background visit writes before occupying a socket.
+      // On page exit a keepalive fetch must be registered before the page dies.
+      if (path === "activity/events" && state.config?.interactionContinuity && !options.keepalive && globalThis.navigator?.locks) {
+        response = await navigator.locks.request("ribbon-field-activity-write", () => fetch(base + path, options));
+      } else response = await fetch(base + path, options);
       if (response.status === 401 && location.protocol === "https:") location.reload();
       if (response.status === 304 && entity?.value) return entity.value;
       let result;
@@ -64,7 +69,8 @@ async function api(path, body, requestOptions = {}) {
             : "Could not refresh the workspace: the server returned an unreadable response. Try again shortly.");
       }
       if (viewMutation) ++listRequest;
-      if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status});
+      if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status, code: result.code});
+      if (response.headers?.get("X-Ribbon-Transfer-Read-Source") === "serving") result.transferReadSource = "serving";
       if (entity) Object.assign(entity, {tag: response.headers?.get("ETag") || null, value: result});
       return result;
     } catch (error) {
@@ -1111,6 +1117,7 @@ function retainConversation() {
   (state.conversationPositions ||= new Map()).set(state.selected, {scroll: entry.scroll, following: entry.following});
 }
 function sameConversation(first, second) {
+  if (first && first.transferReadSource !== second.transferReadSource) return false;
   if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
     JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
   return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.reviews, first.work_thread.browser_session, first.work_thread.client]) ===
@@ -1151,6 +1158,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
   state.selected = id;
+  state.updateSubmissions?.select(id);
   if (!state.paneMode) state.activity?.select(id, activitySource);
   state.scratchpad?.select(id);
   if (dock) state.threadTabs?.suspend();
@@ -1217,7 +1225,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   }
   // Streamed updates can invalidate the snapshot without changing the provider.
   // Load its controls even when another detail refresh is already scheduled.
-  if (state.detail?.work_thread.browser_session) loadSessionModels();
+  if (state.detail?.work_thread.browser_session && state.detail.transferReadSource !== "saved") loadSessionModels();
   if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
@@ -1228,8 +1236,11 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp, forConversation: true});
     return select(id, {rollUp});
   }
-  if (!dock) await api(threadPath(id), {seen: true, seen_checkpoint_id: displayed.checkpoint?.id || 0,
-    seen_completion_id: displayed.turn_completion?.id || 0});
+  const checkpoint = displayed.checkpoint?.id || 0, completion = displayed.turn_completion?.id || 0;
+  if (!dock && !state.detail?.deferReadAcknowledgment &&
+      (checkpoint > (displayed.seen_checkpoint_id || 0) || completion > (displayed.seen_completion_id || 0))) {
+    await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion});
+  }
   if (refreshInventory) await refreshList();
   if (state.selected !== id) return;
   if (state.detail?.work_thread.browser_session) {
@@ -1323,6 +1334,7 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
     state.detail = detail;
+    state.updateSubmissions?.receive(id, detail.transferSubmissions);
     state.detailRefreshing = changed;
     if (state.dispatchDock?.active === id && (!detail.work_thread.dispatcher || detail.work_thread.attention === "archived")) {
       for (const key of ["sessions", "viewThreads"]) if (state[key]) state[key] = state[key].map(t => t.thread_id === id ? detail.work_thread : t);
@@ -1331,10 +1343,10 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     renderThread();
     if (!same || state.timelineThread !== id || state.timelineRender?.id === id) renderTimeline();
     renderRequests(); renderQueuedMessages(); renderStatus();
-    if (recovering && detail.work_thread.browser_session) loadSessionModels();
+    if (recovering && detail.work_thread.browser_session && detail.transferReadSource !== "saved") loadSessionModels();
     // Opening a tab sends its own receipt. Also acknowledge replies rendered
     // while the user stays in the conversation, using only this snapshot's IDs.
-    if (markSeen && !state.paneMode && detail.work_thread.unread_result && !document.hidden && document.hasFocus() &&
+    if (markSeen && !detail.deferReadAcknowledgment && !state.paneMode && detail.work_thread.unread_result && !document.hidden && document.hasFocus() &&
         !$("conversation").hidden && (!state.dispatchDock?.active || state.dispatchDock.expanded)) {
       await api(threadPath(id), {seen: true, seen_checkpoint_id: detail.work_thread.checkpoint?.id || 0,
         seen_completion_id: detail.work_thread.turn_completion?.id || 0});
@@ -1900,24 +1912,63 @@ class OutgoingMessages {
     this.itemText = itemText;
     this.threads = new Map();
     this.sequence = 0;
+    this.transferStates = new Map();
   }
 
   list(id) { return this.threads.get(id) || []; }
 
   // Dispatcher requests settle by their durable request ID; other messages
   // settle when a user message that was not already present carries the text.
-  add(id, {text, images = 0, requestId = null, detail = null}) {
+  add(id, {text, images = 0, requestId = null, submissionId = null, detail = null, transfer = false}) {
     const known = new Set();
     for (const turn of detail?.thread?.turns || []) {
       for (const item of turn.items || []) if (item.type === "userMessage") known.add(item.id);
     }
     const entry = {key: "outgoing-" + ++this.sequence, text, images, match: text.trim(),
-      requestId, known, status: "sending", error: ""};
-    this.threads.set(id, [...this.list(id).filter(item => item.status !== "failed"), entry]);
+      requestId, submissionId, known, status: "sending", error: "", transfer};
+    this.threads.set(id, [...this.list(id).filter(item => transfer || item.transfer || item.status !== "failed"), entry]);
     return entry;
   }
 
-  accepted(entry) { entry.status = "sent"; }
+  accepted(entry) { if (!entry.transfer) entry.status = "sent"; }
+
+  // A native timeline item and a coordinator-transfer receipt have distinct
+  // identities. Update local and remote copies of one intake by its request ID.
+  transfers(id, records, detail) {
+    if (!Array.isArray(records) || !records.length) return false;
+    const states = this.transferStates.get(id) || new Map();
+    this.transferStates.set(id, states);
+    let changed = false;
+    for (const record of records) {
+      if (!record || record.threadId !== id || typeof record.requestId !== "string" || !record.requestId ||
+          typeof record.message !== "string" || !["queued", "uncertain", "committed", "failed"].includes(record.state)) continue;
+      const previous = states.get(record.requestId);
+      if (previous === record.state || previous === "committed" || previous === "failed" ||
+          (previous === "uncertain" && record.state === "queued")) continue;
+      states.set(record.requestId, record.state);
+      let entry = this.list(id).find(row => row.submissionId === record.requestId);
+      // A new or reconnected window uses ordinary history for past deliveries.
+      if (!entry && record.state === "committed") continue;
+      entry ||= this.add(id, {submissionId: record.requestId, text: record.message, images: record.imageCount || 0,
+        detail, transfer: true});
+      entry.transfer = true;
+      entry.transferSequence = record.sequence;
+      entry.transferReceipt = record;
+      // An SSE receipt can precede the first history snapshot for this thread.
+      if (!detail && entry.status === "sending") entry.needsHistoryBaseline = true;
+      entry.status = {queued: "queued", uncertain: "uncertain", committed: "sent", failed: "failed"}[record.state];
+      if (entry.status === "failed") entry.error = record.reason === "request_id_conflict"
+        ? "This request ID was already used." : "The backend rejected the message.";
+      changed = true;
+    }
+    if (changed) {
+      const entries = this.list(id);
+      const ordered = entries.filter(entry => entry.transfer).sort((a, b) => a.transferSequence - b.transferSequence);
+      let next = 0;
+      this.threads.set(id, entries.map(entry => entry.transfer ? ordered[next++] : entry));
+    }
+    return changed;
+  }
 
   rejected(entry, message) { entry.status = "failed"; entry.error = message; }
 
@@ -1929,7 +1980,15 @@ class OutgoingMessages {
     const messages = (detail.thread?.turns || []).flatMap(turn => turn.items || [])
       .filter(item => item.type === "userMessage");
     const remaining = entries.filter(entry => {
-      if (entry.status === "failed") return true;
+      if (entry.needsHistoryBaseline) {
+        // A cold window may already contain older identical messages. Never
+        // count its initial history as evidence of a new delivery.
+        if (entry.status === "sent" && detail.transferReadSource === "serving") return false;
+        for (const item of messages) entry.known.add(item.id);
+        entry.needsHistoryBaseline = false;
+      }
+      if (entry.status === "failed" || (entry.transfer && (entry.status !== "sent" || detail.transferReadSource === "saved")) ||
+          (entry.submissionId && entry.status === "sending")) return true;
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
       const match = messages.find(item => {
         if (entry.known.has(item.id)) return false;
@@ -1966,7 +2025,9 @@ class OutgoingMessages {
     const status = document.createElement("span");
     status.className = "message-time outgoing-status";
     status.setAttribute("role", "status");
-    status.textContent = entry.status === "failed" ? "Not sent · " + entry.error : entry.status === "sent" ? "Sent" : "Sending…";
+    const statusText = {sent: "Sent", sending: "Sending…", queued: "Queued during update",
+      uncertain: "Delivery unconfirmed", failed: "Not sent · " + entry.error};
+    status.textContent = statusText[entry.status];
     message.append(body, status);
     return message;
   }
@@ -1981,6 +2042,73 @@ class OutgoingMessages {
     for (const old of timeline.querySelectorAll("article[data-outgoing]")) old.remove();
     if (this.list(id).length) timeline.querySelector(":scope > p.empty:only-child")?.remove();
     this.append(document, timeline, id);
+  }
+}
+// The normal provider stream invalidates these private, thread-scoped reads.
+class UpdateSubmissionChanges {
+  constructor({load, receive}) {
+    this.load = load;
+    this.receive = receive;
+    this.cursors = new Map();
+    this.selection = null;
+  }
+
+  select(id) {
+    if (this.selection?.id === id) return;
+    if (this.selection) {
+      clearTimeout(this.selection.retryTimer);
+      this.selection.controller?.abort();
+    }
+    this.selection = id && id !== "new-session" ? {id, dirty: false, retries: 0} : null;
+    this.refresh();
+  }
+
+  refresh(retry = false) {
+    const selected = this.selection;
+    if (!selected) return;
+    clearTimeout(selected.retryTimer);
+    selected.retryTimer = null;
+    if (!retry) selected.retries = 0;
+    selected.dirty = true;
+    if (!selected.pending) selected.pending = this.read(selected).finally(() => {
+      selected.pending = null;
+      if (this.selection === selected && selected.dirty && !selected.retryTimer) this.refresh();
+    });
+    return selected.pending;
+  }
+
+  async read(selected) {
+    while (selected === this.selection && selected.dirty) {
+      selected.dirty = false;
+      const cursor = this.cursors.get(selected.id) || 0;
+      const controller = selected.controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 6000);
+      try {
+        const page = await this.load(selected.id, cursor, controller.signal);
+        if (this.selection !== selected) return;
+        if (page?.threadId !== selected.id || !Array.isArray(page.submissions) ||
+            !Number.isSafeInteger(page.cursor) || page.cursor < cursor || typeof page.more !== "boolean" ||
+            ((page.more || page.submissions.length) && page.cursor === cursor)) {
+          throw new Error("Invalid update receipt page.");
+        }
+        this.receive(selected.id, page.submissions);
+        this.cursors.set(selected.id, page.cursor);
+        selected.retries = 0;
+        selected.dirty ||= page.more;
+      } catch (error) {
+        // A transient failure can consume the notification for this revision.
+        // Retry that read only; idle windows do not poll.
+        selected.dirty = false;
+        if (this.selection === selected && selected.retries < 3 &&
+            (error.status == null || error.status >= 500)) {
+          selected.retryTimer = setTimeout(() => this.refresh(true), 500 * 2 ** selected.retries++);
+        }
+        return;
+      } finally {
+        clearTimeout(deadline);
+        selected.controller = null;
+      }
+    }
   }
 }
 const TIMELINE_WINDOW_TURNS = 40;
@@ -2033,6 +2161,11 @@ function renderTimeline() {
   }
   state.timelineThread = state.selected;
   const fragment = globalThis.ResponseActions?.buffer() || document.createDocumentFragment();
+  if (state.detail?.transferReadSource === "saved") {
+    const notice = node("p", "Showing saved conversation during update.", "empty");
+    notice.setAttribute("role", "status");
+    fragment.append(notice);
+  }
   if (state.detail?.thread.historyUnavailable) {
     const notice = node("p", "Conversation history couldn’t be fully loaded. Reload to try again.", "empty");
     notice.setAttribute("role", "status");
@@ -2544,10 +2677,19 @@ function scheduleDetail() {
 function connect() {
   const events = new EventSource(base + "events?after=" + (state.config.eventCursor ?? 0)
     + "&completion_after=" + state.config.completionCursor);
+  if (state.updateSubmissions) {
+    // Broadcast only invalidation to this window and its same-origin panes.
+    // Receipt contents are read using the selected conversation's own route.
+    const changed = () => window.dispatchEvent(new Event("agent-coord-update-submissions"));
+    events.addEventListener("update-submission-change", changed);
+    events.addEventListener("open", changed);
+  }
   events.onopen = () => { for (const entry of state.conversations?.values() || []) entry.revision++; $("connection").replaceChildren(node("span", "Connected locally", "sr-only")); $("connection").title = "Connected locally"; $("connection").dataset.state = "connected"; scheduleList(); if (state.selected) scheduleDetail(); };
   events.onerror = () => { $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…"; $("connection").dataset.state = "reconnecting"; };
+  let resumeCursor;
   events.onmessage = message => {
     const batch = JSON.parse(message.data);
+    resumeCursor = {eventCursor: batch.seq, completionCursor: batch.completionSeq};
     globalThis.agentCoordSpeech?.receive(batch.completions || []);
     globalThis.agentCoordPanes?.receive(batch);
     // Completions apply to every thread, including when this tab is hidden.
@@ -2568,7 +2710,18 @@ function connect() {
       if (changesThreadList(event)) scheduleList();
     }
   };
-  window.addEventListener("pagehide", () => events.close(), {once: true});
+  window.addEventListener("pagehide", event => {
+    events.close();
+    if (event.persisted && state.updateSubmissions) {
+      // The page cache restores the same document with its old stream closed.
+      window.addEventListener("pageshow", restored => {
+        if (restored.persisted) {
+          Object.assign(state.config, resumeCursor);
+          connect();
+        }
+      }, {once: true});
+    }
+  }, {once: true});
 }
 // Per-item provider events change the open conversation, not the inventory.
 // They arrive several times a second; the five-second metadata refresh still
@@ -2901,14 +3054,15 @@ function renderModelPicker() {
   const effective = effectiveSessionSettings(session);
   const clients = sessionModelClients();
   const catalogs = state.modelCatalogs ||= new Map();
-  const signature = JSON.stringify([clients, session.model, [...catalogs], effective]);
+  const saved = state.detail.transferReadSource === "saved";
+  const signature = JSON.stringify([clients, session.model, [...catalogs], effective, saved]);
   if (picker.dataset.signature !== signature) {
     picker.dataset.signature = signature;
     picker.replaceChildren();
     for (const provider of clients) {
       const group = node("optgroup"); group.label = provider === "muse" ? "Muse Code" : provider === "kimi" ? "Kimi Code" : provider === "antigravity" ? "Google Antigravity" : provider === "claude" ? "Claude Code" : "Codex";
       if (draft || !session.model || session.model === "default") group.append(new Option(provider === client ?
-        effective.modelLabel || (effective.unavailable ? "Model unavailable" : "Loading model…") : group.label + " configured model", modelValue(provider, "")));
+        effective.modelLabel || (effective.unavailable ? "Model unavailable" : saved ? "Configured model" : "Loading model…") : group.label + " configured model", modelValue(provider, "")));
       const models = catalogs.get(provider) || [];
       for (const model of models) group.append(new Option(model.displayName || model.model, modelValue(provider, model.model)));
       if (provider === client && session.model && !models.some(model => model.model === session.model)) {
@@ -2924,7 +3078,9 @@ function renderModelPicker() {
   if (["antigravity", "kimi", "muse"].includes(client) && state.modelErrors?.has(client)) $("model-picker-status").textContent = state.modelErrors.get(client);
   globalThis.modelPicker?.sync();
   renderEffortPicker();
-  loadSessionDefaults(session);
+  // Looking up an inherited setting starts a provider RPC. A saved view can
+  // display its stored choice immediately and resolve defaults on picker focus.
+  if (!saved) loadSessionDefaults(session);
 }
 function renderEffortPicker() {
   const session = state.detail?.session, picker = $("effort-picker");
@@ -3021,6 +3177,7 @@ async function newSession() {
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
   };
   state.selected = "new-session";
+  state.updateSubmissions?.select(null);
   if (!state.paneMode) state.activity?.select(null);
   state.scratchpad?.select(null);
   state.detail = state.newSessionDraft;
@@ -3208,6 +3365,7 @@ function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = 
   retainConversation();
   state.dispatchDock?.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
+  state.updateSubmissions?.select(null);
   state.activity?.select(null);
   state.scratchpad?.select(null);
   state.asks?.showThread(null);
@@ -3655,15 +3813,28 @@ async function sendMessage(mode = "steer") {
     // Queued, reviewed, and command input have their own displays.
     echo = !text.trim().startsWith("/") && body.review == null && (dispatcher || mode !== "queue")
       ? state.outgoing?.add(id, {text, images: images.length, requestId: dispatcher ? body.requestId : null,
-        detail: conversationEntry(id).detail || detail}) : null;
+        submissionId: state.config?.interactionContinuity ? body.requestId : null, detail: conversationEntry(id).detail || detail}) : null;
     if (echo) {
       if (id === state.selected && $("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       showOutgoing();
       if (id === state.selected) state.timelineScroll?.latest();
     }
-    const result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    let result;
+    try {
+      result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
+    } catch (error) {
+      // The authenticated stream can confirm durable intake before an HTTP response is lost.
+      if (!echo?.transferReceipt) throw error;
+      result = {transferSubmission: echo.transferReceipt};
+    }
+    if (result.transferSubmission) {
+      const receipt = result.transferSubmission;
+      if (receipt.threadId !== id || receipt.requestId !== body.requestId || !["queued", "uncertain", "committed", "failed"].includes(receipt.state))
+        throw new Error("Message receipt could not be confirmed.");
+      state.outgoing.transfers(id, [receipt], conversationEntry(id).detail || detail);
+      showOutgoing();
+    } else if (echo) { state.outgoing.accepted(echo); showOutgoing(); }
     sessionStorage.removeItem("dispatch-request:" + id);
-    if (echo) { state.outgoing.accepted(echo); showOutgoing(); }
     state.reviewUI?.sent(id);
     dispatchReceived = !!result.dispatched;
     commandCompleted = !!result.command;
@@ -3681,6 +3852,7 @@ async function sendMessage(mode = "steer") {
       if ($("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       else state.drafts.set(id, $("message").value);
     } else if (state.drafts.get(id) === text) state.drafts.delete(id);
+    if (result.transferSubmission && result.transferSubmission.state !== "committed") return;
     // Acceptance releases the composer. Neither transcript reconciliation nor
     // an unrelated inventory read is part of sending the user's message.
     const refreshFailed = error => showError(new Error("Your message was received, but the view could not refresh. " + error.message));
@@ -3695,7 +3867,11 @@ async function sendMessage(mode = "steer") {
       console.warn("Dispatcher accepted request before UI refresh failed", error);
       throw new Error("Your request was received, but the view could not refresh. Do not send it again.");
     }
-    if (echo?.status === "sending") {
+    if (echo?.status === "sending" && state.config?.interactionContinuity &&
+        (error.status == null || error.status >= 500)) {
+      echo.status = "uncertain";
+      showOutgoing();
+    } else if (echo?.status === "sending") {
       // Not accepted: say so where the message appeared and return the text.
       state.outgoing.rejected(echo, error.message || String(error));
       if (id === state.selected) { if (!$("message").value.trim()) $("message").value = text; }
@@ -4222,6 +4398,32 @@ async function boot() {
     history.replaceState(history.state, "", clean.pathname + clean.search + clean.hash);
   }
   state.config = await api("config");
+  if (state.config.interactionContinuity === true) {
+    state.updateSubmissions = new UpdateSubmissionChanges({
+      load: (id, after, signal) => api("update-submissions?thread=" + encodeURIComponent(id) +
+        "&after=" + after, undefined, {signal}),
+      receive: (id, records) => {
+        if (id !== state.selected) return;
+        const detail = state.conversations?.get(id)?.detail;
+        if (state.outgoing.transfers(id, records, detail) && state.timelineThread === id)
+          state.outgoing.update(document, $("timeline"), id, detail);
+      }
+    });
+    // Tiled conversations share the workspace window's existing provider stream.
+    const owner = state.paneMode ? window.parent : window;
+    const refreshReceipts = () => state.updateSubmissions.refresh();
+    owner.addEventListener("agent-coord-update-submissions", refreshReceipts);
+    state.updateSubmissions.select(state.selected);
+    window.addEventListener("pagehide", () => {
+      owner.removeEventListener("agent-coord-update-submissions", refreshReceipts);
+      state.updateSubmissions.select(null);
+    });
+    window.addEventListener("pageshow", event => {
+      if (!event.persisted) return;
+      owner.addEventListener("agent-coord-update-submissions", refreshReceipts);
+      state.updateSubmissions.select(state.selected);
+    });
+  }
   state.activity = globalThis.ActivityCollector?.bind({window, document, state, api});
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
     supportsRecurrence: state.config.recurringSchedules === true,
@@ -4314,9 +4516,14 @@ async function boot() {
   // temporary native conversation windows keep their working set in session storage.
   const workspaceStorage = state.conversationWindow ? windowStorage : preferences || windowStorage;
   const legacyWorkspaceStorage = state.conversationWindow ? null : windowStorage;
-  const publishDesktopProjects = snapshot => api("desktop-projects", {
-    windowId: state.sourceWindowId, projects: snapshot.projects, active: snapshot.active,
-  });
+  const publishDesktopProjects = async snapshot => {
+    try {
+      await api("desktop-projects", {windowId: state.sourceWindowId, projects: snapshot.projects, active: snapshot.active});
+    } catch (error) {
+      // The local selection stays in the window and publishes on reconnection.
+      if (error.code !== "coordinator_offline") throw error;
+    }
+  };
   state.folders = new WorkingFolders({storage: workspaceStorage, fallbackStorage: legacyWorkspaceStorage, preferences,
     key: (state.conversationWindow ? desktop.windowId : desktop?.folderSlot) || "browser", scope: state.config.workspaceRoot || "", api,
     onChange: desktop ? snapshot => publishDesktopProjects(snapshot).catch(showError) : null});

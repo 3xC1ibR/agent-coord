@@ -206,6 +206,19 @@ class ProjectionTests(unittest.TestCase):
         self.projection.load()
         self.assertEqual(self.sessions.claude.turns[self.identity]["items"][0]["text"], text + "new output")
 
+    def test_short_append_reuses_complete_segments_when_another_stream_has_the_same_prefix(self):
+        from agent_coord.coordinator_projection import PAYLOAD_SEGMENT_CHARACTERS
+        prefix = "a" * (3 * PAYLOAD_SEGMENT_CHARACTERS)
+        items = [{"id": "first", "text": prefix + "one"}, {"id": "second", "text": prefix + "two"}]
+        self.sessions.claude.turns[self.identity] = {"id": "active", "items": items}
+        self.projection.checkpoint()
+        items[0]["text"] += "!"
+        with patch("agent_coord.coordinator_projection.hashlib.sha256", wraps=hashlib.sha256) as digest:
+            self.projection.checkpoint()
+        self.assertEqual([len(call.args[0]) for call in digest.call_args_list], [4])
+        self.projection.load()
+        self.assertEqual(self.sessions.claude.turns[self.identity]["items"], items)
+
     def test_streams_with_shared_prefixes_and_partial_tails_restore_exact_text(self):
         prefix = "a" * (64 * 1024)
         items = [{"id": "first", "text": prefix + "α"}, {"id": "second", "text": prefix + "β"}]
@@ -234,6 +247,35 @@ class ProjectionTests(unittest.TestCase):
                 VALUES(?,?,?,1,1)""", (identity, self.temporary.name, "Saved"))
             db.execute("INSERT INTO browser_history VALUES (?,?)", (identity, json.dumps(history)))
         return identity
+
+    def test_stream_reads_committed_events_during_an_unrelated_projection(self):
+        self.sessions._publish("browser/changed", {"threadId": "committed"})
+        previous = self.sessions.sequence
+        entered, release = threading.Event(), threading.Event()
+        prepare = self.projection.prepare_checkpoint
+
+        def hold_checkpoint():
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("Projection checkpoint was not released")
+            return prepare()
+
+        event = self.event(1, "item/started", item={"id": "pending", "type": "agentMessage", "text": ""})
+        with patch.object(self.projection, "prepare_checkpoint", side_effect=hold_checkpoint), ThreadPoolExecutor(2) as pool:
+            writing = pool.submit(self.projection.project, event)
+            try:
+                self.assertTrue(entered.wait(2))
+                pending = pool.submit(self.sessions.events_after, previous - 1, 0)
+                batch = pending.result(timeout=.5)
+                self.assertEqual(batch["seq"], previous)
+                self.assertEqual([e["params"]["threadId"] for e in batch["events"]], ["committed"])
+                self.assertEqual(self.sessions.events_after(previous, 0)["events"], [])
+            finally:
+                release.set()
+            writing.result(timeout=2)
+        batch = self.sessions.events_after(previous, 0)
+        self.assertGreater(batch["seq"], previous)
+        self.assertTrue(any(e["method"] == "item/started" for e in batch["events"]))
 
     def test_unloaded_conversation_opens_while_another_provider_checkpoint_is_pending(self):
         identity = self.saved_conversation()

@@ -155,8 +155,12 @@ class CoordinatorProjection:
             raise TransportError("Coordinator projection version is incompatible.")
         sessions = self.sessions
         for name, value in state["browser"].items():
-            setattr(sessions, name, copy.deepcopy(value))
-        sessions.events = deque(copy.deepcopy(state["events"]), maxlen=1500)
+            if name != "sequence":
+                setattr(sessions, name, copy.deepcopy(value))
+        events = deque(copy.deepcopy(state["events"]), maxlen=1500)
+        with sessions.events_changed:
+            sessions.events = events
+            sessions.sequence = state["browser"]["sequence"]
         for name, value in state["claude"].items():
             setattr(sessions.claude, name, copy.deepcopy(value))
         # Stream block entries and active turn items refer to the same objects.
@@ -209,8 +213,10 @@ class CoordinatorProjection:
         with self.store.reading(), self.store._connection() as db:
             rows = db.execute("SELECT event_json FROM coordinator_events ORDER BY sequence").fetchall()
         if rows:
-            self.sessions.events = deque((json.loads(row[0]) for row in rows), maxlen=1500)
-            self.sessions.sequence = self.sessions.events[-1]["seq"]
+            events = deque((json.loads(row[0]) for row in rows), maxlen=1500)
+            with self.sessions.events_changed:
+                self.sessions.events = events
+                self.sessions.sequence = events[-1]["seq"]
         self.cursor = row["cursor"]
         self.recover_commands(operations={"open"})
         with self.store.reading(), self.store._connection() as db:
@@ -301,21 +307,25 @@ class CoordinatorProjection:
         # A growing provider message shares all complete segments with its
         # previous checkpoint. Only new segment contents need compression.
         references, payloads = {}, {}
-        previous_by_prefix = {text[:PAYLOAD_SEGMENT_CHARACTERS]: text for text in self.text_references
-                              if len(text) >= PAYLOAD_SEGMENT_CHARACTERS}
+        previous_by_prefix = {}
+        for previous_text in self.text_references:
+            if len(previous_text) >= PAYLOAD_SEGMENT_CHARACTERS:
+                prefix = previous_text[:PAYLOAD_SEGMENT_CHARACTERS]
+                previous_by_prefix.setdefault(prefix, []).append(previous_text)
 
         def encode_text(text):
             parts = references.get(text) or self.text_references.get(text)
             if parts is None:
                 parts = []
-                previous = previous_by_prefix.get(text[:PAYLOAD_SEGMENT_CHARACTERS])
-                if previous is not None and text.startswith(previous):
-                    # Only a complete prior segment has the same boundaries
-                    # after appending. Rebuild the previous partial tail.
-                    count = len(previous) // PAYLOAD_SEGMENT_CHARACTERS
-                    parts.extend(self.text_references[previous][:count])
-                    for digest in parts:
-                        payloads[digest] = self.payload_cache[digest]
+                # Concurrent outputs can have the same first segment and different tails.
+                # Reuse only a verified previous value's complete segments.
+                for previous in previous_by_prefix.get(text[:PAYLOAD_SEGMENT_CHARACTERS], ()):
+                    if text.startswith(previous):
+                        count = len(previous) // PAYLOAD_SEGMENT_CHARACTERS
+                        parts.extend(self.text_references[previous][:count])
+                        for digest in parts:
+                            payloads[digest] = self.payload_cache[digest]
+                        break
                 for offset in range(len(parts) * PAYLOAD_SEGMENT_CHARACTERS, len(text), PAYLOAD_SEGMENT_CHARACTERS):
                     data = text[offset:offset + PAYLOAD_SEGMENT_CHARACTERS].encode("utf-8", "surrogatepass")
                     digest = hashlib.sha256(data).hexdigest()
@@ -662,11 +672,8 @@ class CoordinatorProjection:
                             self._publish_rows(db, self.in_event.publications)
                             self._save(db, encoded, event["sequence"])
                 self.cursor = event["sequence"]
-                for sequence, payload in self.in_event.publications:
-                    self.sessions.events.append(json.loads(payload))
-                    self.sessions.sequence = sequence
                 if self.in_event.publications:
-                    self.sessions.changed.notify_all()
+                    self.sessions.append_committed_events([json.loads(payload) for _, payload in self.in_event.publications])
                 self.remember_histories(prepared, published_completions)
                 commands = list(self.in_event.commands)
                 completions = list(self.in_event.completions)

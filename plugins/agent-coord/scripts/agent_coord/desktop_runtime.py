@@ -505,13 +505,22 @@ def discover(database, *, timeout=25):
             "client_requests": status.get("client_requests")}
 
 
-def bootstrap(database, resources, *, start_paused=False, require_confirmation=False):
+def bootstrap(database, resources, *, start_paused=False, require_confirmation=False, interaction_continuity=False):
     database = str(Path(database).expanduser().resolve())
     directory = runtime_directory(database)
     launcher = lock_file(directory / "launch.lock", blocking=True)
     try:
         payload = stage_payload(Path(resources), directory)
         selected_payload = payload
+        if interaction_continuity:
+            from . import runtime_gateway_lifecycle as gateway, runtime_update
+            # A reopening desktop can attach to its stable origin even while
+            # the supervisor owns the DB and neither coordinator serves HTTP.
+            update = runtime_update.read(directory)
+            if update and update["phase"] not in runtime_update.TERMINAL:
+                observed = gateway.status(database, {"status": "updating", "update": update})
+                if observed.get("interaction_url"):
+                    return observed
         deadline = time.monotonic() + 20
         while True:
             try:
@@ -527,6 +536,8 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
             if record:
                 if start_paused and not control(record, "status")["paused"]:
                     raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
+                if interaction_continuity:
+                    return gateway.attach(database, record, payload, require_confirmation)
                 return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
             try:
                 owner_fd = lock_file(directory / "owner.lock")
@@ -563,6 +574,8 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
                 record = None
             if record:
                 threading.Thread(target=child.wait, daemon=True).start()
+                if interaction_continuity:
+                    return gateway.attach(database, record, selected_payload, require_confirmation)
                 return control(record, "attach", payload=str(selected_payload))
             time.sleep(.1)
         raise RuntimeError("Runtime startup timed out; ownership remains reserved until it exits.")
@@ -644,7 +657,7 @@ class Runtime:
         return {"database": self.database, "instance": self.instance,
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
                 "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
-                "runtime_update_prompts": 1, "uninterrupted_updates": 1}
+                "runtime_update_prompts": 1, "uninterrupted_updates": 1, "transfer_admission_probe": 1}
 
     def status(self):
         from .database_writer import performance_snapshot
@@ -811,6 +824,13 @@ class Runtime:
             # The control handler has already authenticated token + instance.
             # Readiness is required for handover, not for routing a hook/CLI.
             return self.identity()
+        if action == "transfer-admission":
+            # The caller must check work admission before durably claiming a
+            # message. A per-input check does not need recovery or DB metrics.
+            admission = self.server.browser_sessions.admission
+            with admission.lock:
+                return {**self.identity(), "status": "preparing" if self.trial else "serving",
+                        "paused": admission.paused, "url": f"http://127.0.0.1:{self.server.server_port}/"}
         if action == "client-request":
             from .runtime_requests import execute_request
             from .runtime_metadata import install_operations
@@ -931,6 +951,9 @@ class Runtime:
         store.provider_transport = Client.connect(self.directory / "provider-transport", self.instance)
         # Finish ownership adoption before any automatic worker can claim work.
         self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True)
+        # Only the authenticated local update service may hand an already
+        # accepted ordinary message to this particular coordinator/database.
+        self.server.transfer_receiver = (self.instance, str(self.payload), self.token)
         sessions = self.server.browser_sessions
         # make_ui_server installs these before starting workers; wrapping again
         # is harmless but would not protect startup, so assert the contract.
@@ -1603,6 +1626,8 @@ def main(argv=None):
     parser.add_argument("--db")
     parser.add_argument("--resources")
     parser.add_argument("--runtime-bootstrap", action="store_true")
+    parser.add_argument("--runtime-interaction-gateway", action="store_true")
+    parser.add_argument("--runtime-interaction-continuity", action="store_true")
     parser.add_argument("--runtime-serve", action="store_true")
     parser.add_argument("--runtime-supervise", action="store_true")
     parser.add_argument("--runtime-probe", action="store_true")
@@ -1624,9 +1649,15 @@ def main(argv=None):
         return 0
     if not args.db:
         parser.error("--db is required")
+    if args.runtime_interaction_gateway or args.runtime_interaction_continuity:
+        from . import runtime_gateway_lifecycle as gateway
+    if args.runtime_interaction_gateway:
+        database = str(Path(args.db).expanduser().resolve())
+        return gateway.serve(database, gateway.gateway_directory(database), args.inherit_owner_fd, args.ready_fd)
     if args.runtime_bootstrap:
         print(json.dumps(bootstrap(args.db, args.resources, start_paused=args.runtime_start_paused,
-                                   require_confirmation=args.runtime_confirm_updates)), flush=True)
+                                   require_confirmation=args.runtime_confirm_updates,
+                                   interaction_continuity=args.runtime_interaction_continuity)), flush=True)
         return 0
     if args.runtime_command:
         from . import runtime_update
@@ -1639,7 +1670,10 @@ def main(argv=None):
             if not update or update["phase"] in runtime_update.TERMINAL:
                 raise
             if args.runtime_command == "status":
-                print(json.dumps({"status": "updating", "update": update}), flush=True)
+                result = {"status": "updating", "update": update}
+                if args.runtime_interaction_continuity:
+                    result = gateway.status(args.db, result)
+                print(json.dumps(result), flush=True)
                 return 0
             if args.runtime_command == "stop":
                 guard = lock_file(directory / "update-control.lock", blocking=True)
@@ -1667,10 +1701,16 @@ def main(argv=None):
             raise
         if not record:
             update = runtime_update.read(directory)
+            if args.runtime_interaction_continuity and args.runtime_command == "status" and update and update["phase"] not in runtime_update.TERMINAL:
+                result = gateway.status(args.db, {"status": "updating", "update": update})
+                if result.get("interaction_url"):
+                    print(json.dumps(result), flush=True)
+                    return 0
             if (args.runtime_command == "status" and update and not update.get("cancelled")
                     and not (directory / "stop-proof.json").exists() and owner_available(directory)):
                 selected = args.resources or update["target"]
-                print(json.dumps(bootstrap(args.db, selected, start_paused=bool(update.get("requires_review")))), flush=True)
+                print(json.dumps(bootstrap(args.db, selected, start_paused=bool(update.get("requires_review")),
+                                           interaction_continuity=args.runtime_interaction_continuity)), flush=True)
                 return 0
             proof_path = directory / "stop-proof.json"
             proof = read_json(proof_path) if proof_path.exists() else {}
@@ -1696,7 +1736,12 @@ def main(argv=None):
                 print(json.dumps({"status": "stopped", "compatible": True}))
                 return 0
             raise RuntimeError("No authenticated runtime is available.")
-        result = control(record, args.runtime_command, **values)
+        if args.runtime_command == "activate-update" and args.runtime_interaction_continuity:
+            result = gateway.activate(record, **values)
+        else:
+            result = control(record, args.runtime_command, **values)
+        if args.runtime_command == "status" and args.runtime_interaction_continuity:
+            result = gateway.status(args.db, result)
         if args.runtime_command == "stop":
             for _ in range(300):
                 if confirm_stopped(directory, args.db, record["instance"]):

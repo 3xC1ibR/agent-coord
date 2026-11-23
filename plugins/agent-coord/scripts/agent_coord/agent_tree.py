@@ -9,18 +9,29 @@ def agent_tree(sessions, thread_id):
     # This must not resume a provider, mark messages read, or recover usage logs.
     selected = sessions.work_thread(thread_id, history=False)
     creators = sessions._app_agent_creators()
+    with sessions.store.reading(), sessions.store._connection() as db:
+        parents = family_parents(db, creators, supervision_overrides(db))
+    return project_family(selected, parents, lambda ident: sessions.work_thread(ident, history=False, _creators=creators))
+
+
+def family_parents(db, creators, overrides):
     parents = {child: creator["thread_id"] for child, creator in creators.items()
                if creator["mode"] == "orchestration"}
-    with sessions.store._connection() as db:
-        for row in db.execute("""SELECT parent_session_id, child_session_id FROM delegations
-                                 WHERE child_session_id IS NOT NULL ORDER BY created_at, delegation_id"""):
-            parents.setdefault(row[1], row[0])
-        # An explicit supervision transfer replaces the creator edge.
-        parents.update(supervision_overrides(db))
-        # Fork lineage is a display relationship, not supervision ownership.
-        for row in db.execute("""SELECT thread_id, forked_from_thread_id FROM work_threads
-                                 WHERE forked_from_thread_id IS NOT NULL"""):
-            parents.setdefault(row[0], row[1])
+    for row in db.execute("""SELECT parent_session_id, child_session_id FROM delegations
+                             WHERE child_session_id IS NOT NULL ORDER BY created_at, delegation_id"""):
+        parents.setdefault(row[1], row[0])
+    # An explicit supervision transfer replaces the creator edge.
+    parents.update(overrides)
+    # Fork lineage is a display relationship, not supervision ownership.
+    for row in db.execute("""SELECT thread_id, forked_from_thread_id FROM work_threads
+                             WHERE forked_from_thread_id IS NOT NULL"""):
+        parents.setdefault(row[0], row[1])
+    return parents
+
+
+def project_family(selected, parents, read_thread):
+    """Follow only visible ancestors and descendants; an inaccessible intermediate ends the branch."""
+    thread_id = selected["thread_id"]
     # Old data can contain cycles. The same edge is dropped for every entry point.
     for child in sorted(parents):
         seen, parent = {child}, parents.get(child)
@@ -37,7 +48,7 @@ def agent_tree(sessions, thread_id):
     def read(identifier):
         if identifier not in records:
             try:
-                records[identifier] = sessions.work_thread(identifier, history=False, _creators=creators)
+                records[identifier] = read_thread(identifier)
             except CoordinationError:
                 return None  # Missing or outside this runtime's workspace.
         return records[identifier]

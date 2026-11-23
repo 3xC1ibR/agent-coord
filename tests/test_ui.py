@@ -481,6 +481,28 @@ class BrowserHTTPTests(unittest.TestCase):
             content = response.read().decode()
             return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
 
+    def test_transfer_input_pins_receiver_and_reserves_ordinary_message_once(self):
+        thread = self.request("/api/browser/sessions", {"cwd":str(self.root),"name":"Transfer"})[1]["session"]["thread_id"]
+        self.server.transfer_receiver = ("serving-instance", "serving-payload", "local-control")
+        file = Path(self.store.database_path).stat()
+        headers = {"X-Ribbon-Receiver-Instance":"serving-instance", "X-Ribbon-Receiver-Payload":"serving-payload",
+                   "Authorization":"Bearer local-control", "X-Ribbon-Receiver-Database":f"{file.st_dev}:{file.st_ino}"}
+        path = f"/api/browser/sessions/{thread}/update-input"
+        body = {"requestId":"original-receipt","message":"ordinary composer"}
+        with patch.object(self.sessions, "_send_composer", return_value={"turnId":"original-turn"}) as send, \
+                patch.object(self.sessions.dispatch, "submit", side_effect=AssertionError("Transferred input was rerouted")):
+            for key in headers:
+                self.assertEqual(self.request(path, body, {**headers,key:"changed"})[0], 403)
+            send.assert_not_called()
+            self.assertEqual(self.request(path, body, headers)[0], 200)
+            with patch.object(self.sessions.dispatch, "settings", return_value={"enabled":True}):
+                self.assertEqual(self.request(path, body, headers)[0], 200)
+            send.assert_called_once()
+        with self.store.reading(), self.store._connection() as db:
+            receipt = db.execute("SELECT state FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
+                                 (thread, body["requestId"])).fetchone()
+        self.assertEqual(receipt[0], "completed")
+
     def test_skill_catalog_requires_csrf_and_restricts_workspace_without_starting_a_turn(self):
         body = {"client": "codex", "cwd": str(self.root)}
         with patch.object(self.sessions.rpc, "request", return_value={"data": []}) as rpc:

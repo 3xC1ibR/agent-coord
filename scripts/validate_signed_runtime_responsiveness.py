@@ -14,6 +14,7 @@ import collections
 from functools import lru_cache
 from contextlib import closing
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -30,11 +31,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 
 from measure_backend_latency import BUDGETS
 from release_workload_receipt import database_bytes
-from runtime_upgrade_validation import Validation, process_command, runtime
+from runtime_upgrade_validation import Validation, listener_pids, process_command, processes_mentioning, runtime
 
 
 METRIC_NAMES = {
@@ -50,6 +52,40 @@ LARGE_OUTPUT_BYTES = 10 * 1024 * 1024
 STABLE_SECONDS = 30
 MINIMUM_SAMPLES = 12
 MAXIMUM_GAP_SECONDS = 5
+# Collection limits only. Interaction failures and availability gaps are
+# evaluated over the entire observed upgrade, including rollback snapshot time.
+UPDATE_OBSERVATION_SECONDS = 600
+UPDATE_PHASE_STALL_SECONDS = 120
+
+
+def diagnostic_reason(error):
+    # Control and provider exceptions can carry signed URLs, tokens or command arguments.
+    # Match fixed operational messages without persisting arbitrary text from the runtime.
+    message = str(error)
+    for fragment, code in (
+        ("three browser clients attached", "three-browser-attachments-missing"),
+        ("Missing original pending", "pending-work-missing"),
+        ("Pending approval, queue or original", "pending-work-changed"),
+        ("original pending approval", "initial-pending-work-missing"),
+        ("Original pending work did not complete", "pending-work-delivery-mismatch"),
+        ("Could not verify the signed candidate", "serving-verification-timeout"),
+        ("durable intake reconciliation", "intake-reconciliation-timeout"),
+        ("Accepted operations did not drain", "admission-drain-timeout"),
+        ("accepted submission still needs confirmation", "unresolved-accepted-submission"),
+        ("forwarded request is still completing", "forward-in-progress"),
+        ("Candidate exited before readiness", "candidate-exited"),
+        ("Candidate validation failed", "candidate-validation"),
+        ("did not confirm", "confirmation-missing"),
+        ("released its rejected preparation", "preparation-rejected"),
+        ("database is locked", "sqlite-busy"),
+        ("database or disk is full", "sqlite-full"),
+        ("Connection refused", "connection-refused"),
+        ("timed out", "timeout"),
+        ("Timed out", "timeout"),
+    ):
+        if fragment in message or code in message:
+            return code
+    return getattr(error, "sqlite_errorname", type(error).__name__ if not isinstance(error, str) else "runtime-error")
 
 
 def signed_resources(bundle):
@@ -270,6 +306,7 @@ class SignedUpgrade(Validation):
         self.profile_sample = args.profile_sample
         self.snapshot = args.snapshot
         self.affected_report = args.affected_report
+        self.source_baseline_report = getattr(args, "source_baseline_report", None)
         self.candidate_only = args.candidate_only
         self.browser_module = args.playwright_module
         self.browser = None
@@ -332,30 +369,117 @@ class SignedUpgrade(Validation):
             handle.write("\n")
         Path(handle.name).replace(self.output)
 
-    def launch_signed(self, resources, *, hold=False):
-        args = [
-            str(resources / "runtime/bin/python3"),
-            "-B",
-            str(resources / "backend.py"),
-            "--resources",
-            str(resources),
-            "--db",
-            str(self.database),
-            "--runtime-bootstrap",
-        ]
-        if hold:
-            args.append("--runtime-confirm-updates")
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            cwd=self.root,
-            env=dict(self.env, PYTHONPATH=str(resources / "backend")),
-        )
+    def signed_helper(self, resources, arguments, *, body=None, timeout=90):
+        command = [str(resources / "runtime/bin/python3"), "-B", str(resources / "backend.py"),
+                   "--resources", str(resources), "--db", str(self.database), *arguments]
+        result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
+                                capture_output=True, text=True, timeout=timeout, cwd=self.root,
+                                env=dict(self.env, PYTHONPATH=str(resources / "backend")))
         if result.returncode:
-            raise RuntimeError(result.stderr[-1000:])
+            raise RuntimeError(f"Signed helper exited {result.returncode} ({diagnostic_reason(result.stderr)})")
         return json.loads(result.stdout)
+
+    def launch_signed(self, resources, *, hold=False):
+        arguments = ["--runtime-bootstrap"]
+        if hold:
+            arguments.append("--runtime-confirm-updates")
+            if self.gateway_capable():
+                arguments.append("--runtime-interaction-continuity")
+        return self.signed_helper(resources, arguments)
+
+    def gateway_capable(self):
+        return (self.new[0] / "backend/agent_coord/runtime_gateway_lifecycle.py").is_file()
+
+    def gateway_control(self, route, *, body=None):
+        directory = runtime.runtime_directory(self.database)
+        record = runtime.read_json(directory / "interaction-gateway/gateway.json")
+        target = str(directory / "payloads" / self.new[1]["payload_digest"])
+        address = urllib.parse.urlsplit(record["url"])
+        if (record["database"] != str(self.database.resolve()) or record["payload"] != target
+                or record["url"] != f"http://127.0.0.1:{address.port}/"):
+            raise RuntimeError("The gateway does not belong to this private signed upgrade")
+        witness = self.report.get("interaction_gateway")
+        if witness and (record["url"], record["instance"]) != (witness["url"], witness["instance"]):
+            raise RuntimeError("The qualified gateway changed identity")
+        with closing(http.client.HTTPConnection("127.0.0.1", address.port, timeout=2)) as connection:
+            connection.request("POST" if body is not None else "GET", "/_runtime/" + route,
+                         json.dumps(body) if body is not None else None,
+                         {"Authorization": "Bearer " + record["control_token"], "Content-Type": "application/json"})
+            response = connection.getresponse()
+            if response.status != 200:
+                raise RuntimeError(f"Private gateway {route} returned HTTP {response.status}")
+            result = json.loads(response.read(65537))
+        if route == "identity" and any(result.get(k) != record[k] for k in ("database", "payload", "url", "instance")):
+            raise RuntimeError("The private gateway identity handshake failed")
+        return result
+
+    def wait_for_gateway(self, predicate, *, timeout, description):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(.25)
+        raise AssertionError("Timed out waiting for " + description)
+
+    def wait_for_intake_settlement(self, deadline):
+        """Keep observing while outstanding work shrinks under continuous traffic."""
+        intake = runtime.runtime_directory(self.database) / "interaction-gateway/message-intake.sqlite3"
+        now = time.monotonic()
+        stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
+        next_sample = now
+        lowest = None
+        while now < min(deadline, stall_deadline):
+            if self.gateway_control("identity").get("settled") is True:
+                return
+            if now >= next_sample and intake.is_file():
+                with closing(sqlite3.connect(intake.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                    pending, = db.execute("SELECT COUNT(*) FROM intake WHERE state IN ('uncertain','queued')").fetchone()
+                self.report.setdefault("intake_settlement_observations", []).append({"at_ms": time.time()*1000,
+                                                                                   "pending": pending})
+                if lowest is None or pending < lowest:
+                    lowest = pending
+                    stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
+                next_sample = now + 5
+            time.sleep(.25)
+            now = time.monotonic()
+        raise AssertionError("Timed out waiting for durable intake reconciliation")
+
+    def route_source_interactions(self, held, target, phase="baseline"):
+        identity = self.gateway_control("identity")
+        if held.get("interaction_url") != identity["url"] or held.get("interaction_payload") != target:
+            raise RuntimeError("The staged helper did not bind the exact signed interaction endpoint")
+        config = fetch(identity["url"], "", "config", timeout=3)
+        if config.get("interactionContinuity") is not True or not config.get("token"):
+            raise RuntimeError("The private gateway did not advertise interaction continuity")
+        owners = listener_pids(urllib.parse.urlsplit(identity["url"]).port)
+        if owners is None or len(owners) != 1:
+            raise RuntimeError("Could not verify the owner of the private gateway listener")
+        pid, = owners
+        command = process_command(pid) or ""
+        if not all(value in command for value in ("--runtime-interaction-gateway", str(self.database), target)):
+            raise RuntimeError("The gateway listener is not executing the private signed payload")
+        self.report["interaction_gateway"] = {key: identity[key] for key in ("instance", "database", "payload", "url", "settled")}
+        self.report["interaction_gateway"]["pid"] = pid
+        self.address = identity["url"], config["token"]
+        # Authenticate the actual three browser pages on the held source.
+        # A slow old coordinator may never finish a send. Every attempt is
+        # measured and audited but its success is not admission to the rehearsal.
+        routed_at = int(time.time() * 1000)
+        self.report["interaction_gateway"]["source_routed_at_ms"] = routed_at
+        self.publish_phase(phase)
+        self.wait_for_gateway(lambda: self.browser_attached(identity["url"], routed_at, phase),
+                              timeout=60, description="three browser clients attached to the staged source")
+        self.report["interaction_gateway"]["source_clients_verified"] = True
+
+    def browser_attached(self, url, since, phase):
+        path = self.root / "browser-observations.jsonl"
+        if not path.exists():
+            return False
+        origin = url.rstrip("/")
+        rows = (json.loads(line) for line in path.read_bytes().splitlines(keepends=True) if line.endswith(b"\n"))
+        return {r["page"] for r in rows if r.get("kind") == "browser_attachment"
+                and r.get("origin") == origin and r.get("phase") == phase and r.get("start", 0) >= since
+                and r.get("continuity") is True and r.get("status") == 200} == {"opening", "composing", "receiving"}
 
     def start(self):
         seed_inventory(self.database, self.root, self.sources)
@@ -406,6 +530,8 @@ class SignedUpgrade(Validation):
                     "outcome": "accepted",
                 }
             )
+        if getattr(self, "exercise_pending_work", False):
+            self.prepare_pending_work()
         (self.root / "start-streams").touch()
 
         def large_streams():
@@ -445,7 +571,7 @@ class SignedUpgrade(Validation):
             self.workers.append(t)
 
     def projection_bytes(self):
-        with sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
             size, cursor = db.execute("SELECT length(state),cursor FROM coordinator_projection").fetchone()
         return {"compressed": size, "cursor": cursor}
 
@@ -501,7 +627,7 @@ class SignedUpgrade(Validation):
                 "send": f"sessions/{self.peers[0]}/messages",
             }
             started = time.monotonic()
-            entry = {"phase": phase, "kind": name, "start": started, "fixture": tid}
+            entry = {"phase": phase, "kind": name, "start": started, "fixture": tid, "origin": address[0].rstrip("/")}
             payload = None
             if name == "send":
                 key = uuid.uuid4().hex
@@ -519,14 +645,19 @@ class SignedUpgrade(Validation):
                         raise ValueError("Saved conversation did not reopen its retained final turn")
                 if name == "detail" and value["thread_id"] != tid:
                     raise ValueError("Incorrect thread")
+                if name == "send" and "transferSubmission" in value:
+                    receipt = value["transferSubmission"]
+                    if receipt.get("requestId") != key or receipt.get("threadId") != self.peers[0]:
+                        raise ValueError("Transfer receipt does not identify the submitted request")
+                    entry["transfer_state"] = receipt["state"]
                 entry["outcome"] = "accepted" if name == "send" else "success"
             except urllib.error.HTTPError as error:
                 with error:
                     entry.update(
-                        outcome="rejected", status=error.code, detail=error.read(200).decode(errors="replace")
+                        outcome="rejected", status=error.code, detail=diagnostic_reason(error.read(200).decode(errors="replace"))
                     )
             except Exception as error:
-                entry.update(outcome="uncertain", detail=repr(error)[:200])
+                entry.update(outcome="uncertain", detail=diagnostic_reason(error))
             entry["end"] = time.monotonic()
             with self.lock:
                 self.report["samples"].append(entry)
@@ -534,6 +665,10 @@ class SignedUpgrade(Validation):
             self.stop_traffic.wait(0.25)
 
     def publish_phase(self, name):
+        routes = self.report.setdefault("interaction_routes", [])
+        origin = self.address[0].rstrip("/")
+        if not routes or (routes[-1]["phase"], routes[-1]["origin"]) != (name, origin):
+            routes.append({"phase": name, "origin": origin, "at_ms": time.time() * 1000})
         self.phase = name
         temporary = self.root / "browser-state.partial"
         temporary.write_text(
@@ -611,6 +746,8 @@ class SignedUpgrade(Validation):
                 "blocked",
             )
         }
+        if update.get("error"):
+            self.report["guarded_control"]["error"] = diagnostic_reason(update["error"])
         # The final receipt can overwrite the start of an earlier drain attempt.
         # Keep each observed change, including a drain that reopened admission.
         observed = {key: update.get(key) for key in (
@@ -621,7 +758,7 @@ class SignedUpgrade(Validation):
             observations.append(observed)
         return update["phase"]
 
-    def swap_signed(self):
+    def stage_signed(self):
         directory = runtime.runtime_directory(self.database)
         initial = self.report["initial_runtime"]
         previous = str(directory / "payloads" / self.old[1]["payload_digest"])
@@ -647,27 +784,92 @@ class SignedUpgrade(Validation):
             )
         ):
             raise RuntimeError("Initial coordinator changed before authorization")
+        return held, record, target
+
+    def observe_control_files(self, stop):
+        # The signed activation command can block. Observe only atomically replaced
+        # files while it runs, without competing for the coordinator writer or API.
+        directory = runtime.runtime_directory(self.database)
+        timeline = self.report["transition_control_timeline"] = []
+        last = None
+        while True:
+            sample = {}
+            for label, path in (("gateway", directory / "interaction-gateway/transition.json"),
+                                ("activation", directory / "interaction-gateway/activation-request.json"),
+                                ("backend", directory / "update.json")):
+                try:
+                    row = json.loads(path.read_bytes())
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError) as error:
+                    sample[label] = {"read_error": diagnostic_reason(error)}
+                    continue
+                if row.get("request_id", row.get("id")) != self.report["activation_request_id"]:
+                    continue
+                sample[label] = {k: row[k] for k in ("state", "phase", "released", "admission_drain_seconds")
+                                 if k in row}
+                if row.get("error"):
+                    sample[label]["error"] = diagnostic_reason(row["error"])
+            if sample != last:
+                timeline.append({"at_ms": int(time.time() * 1000), **sample})
+                last = sample
+            if stop.wait(.25):
+                return
+
+    def swap_signed(self, staged=None):
+        gateway = self.gateway_capable()
+        held, record, target = staged or self.stage_signed()
+        initial = self.report["initial_runtime"]
+        if gateway and staged is None:
+            # Other rehearsals can call swap_signed directly on an attached source.
+            try:
+                self.route_source_interactions(held, target)
+            finally:
+                if "baseline" in self.report.get("phase_bounds", {}):
+                    self.report["phase_bounds"]["baseline"][1] = time.monotonic()
+                    self.report["wall_phase_bounds"]["baseline"][1] = time.time() * 1000
+        if staged is not None:
+            record = runtime.discover(self.database, timeout=3)
+            if not record or (record.get("instance"), record.get("payload")) != (held["instance"], held["payload"]):
+                raise RuntimeError("Staged source coordinator changed before authorization")
+        if getattr(self, "peers", None):
+            self.observe_active_receipts("before_authorization")
         self.publish_phase("upgrade")
         begin = time.monotonic()
         self.report.setdefault("wall_phase_bounds", {})["upgrade"] = [time.time() * 1000]
         request = self.report["activation_request_id"] = str(uuid.uuid4())
         errors = self.report["guarded_control_observation_errors"] = []
+        watcher = None
+        if getattr(self, "peers", None):
+            stop = threading.Event()
+            watcher = threading.Thread(target=self.observe_control_files, args=(stop,), daemon=True)
+            watcher.start()
         try:
             try:
-                runtime.control(record, "activate-update", payload=target, request_id=request, timeout=35)
-            except (OSError, ValueError, RuntimeError) as error:
+                if gateway:
+                    self.signed_helper(self.new[0], ["--runtime-command", "activate-update",
+                                       "--runtime-interaction-continuity"],
+                                       body={"payload": target, "request_id": request}, timeout=75)
+                else:
+                    runtime.control(record, "activate-update", payload=target, request_id=request, timeout=35)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 # A lost response can follow a durable admission. Do not send
                 # the command twice; observe the decision for this request ID.
                 errors.append(
                     {
                         "operation": "activate-update",
-                        "error": repr(error),
+                        "error": diagnostic_reason(error),
                         "after_seconds": time.monotonic() - begin,
                     }
                 )
-            deadline = time.monotonic() + 75
-            while time.monotonic() < deadline:
+            deadline = begin + UPDATE_OBSERVATION_SECONDS
+            phase_deadline = time.monotonic() + UPDATE_PHASE_STALL_SECONDS
+            previous_phase = None
+            while time.monotonic() < min(deadline, phase_deadline):
                 phase = self.capture_update()
+                if phase and phase != previous_phase:
+                    previous_phase = phase
+                    phase_deadline = time.monotonic() + UPDATE_PHASE_STALL_SECONDS
                 if phase in {"failed", "rolled-back"}:
                     raise AssertionError(
                         "Guarded update failed: " + str(self.report["guarded_control"]["error"])
@@ -690,24 +892,35 @@ class SignedUpgrade(Validation):
                                 and status["update"].get("phase") == "committed"
                             ):
                                 operation = "browser config"
-                                self.address = (
+                                direct = (
                                     status["url"],
                                     fetch(status["url"], "", "config", timeout=3)["token"],
                                 )
                                 self.report["candidate_runtime"] = self.identity(status)
+                                if gateway:
+                                    if self.address[0] == direct[0]:
+                                        raise AssertionError("Interaction gateway is the coordinator endpoint")
+                                    self.candidate_direct_address = direct
+                                    self.wait_for_intake_settlement(deadline)
+                                    self.report["interaction_gateway"]["settled"] = True
+                                else:
+                                    self.address = direct
                                 self.report["guarded_update_phase"] = phase
                                 return
                     except (OSError, ValueError, RuntimeError) as error:
                         errors.append(
                             {
                                 "operation": operation,
-                                "error": repr(error),
+                                "error": diagnostic_reason(error),
                                 "after_seconds": time.monotonic() - begin,
                             }
                         )
                 time.sleep(0.1)
             raise AssertionError("Could not verify the signed candidate serving the committed guarded update")
         finally:
+            if watcher is not None:
+                stop.set()
+                watcher.join(2)
             self.capture_update()
             self.report.setdefault("phase_bounds", {})["upgrade"] = [begin, time.monotonic()]
             self.report["wall_phase_bounds"]["upgrade"].append(time.time() * 1000)
@@ -766,12 +979,198 @@ class SignedUpgrade(Validation):
                 if phase != "upgrade":
                     if len(latency) < MINIMUM_SAMPLES or len(selected) != len(latency):
                         failures.append("insufficient successful interactions or request errors")
-                    if not latency or p50 > limits[0] or p95 > limits[1]:
-                        failures.append("interaction latency budget exceeded")
+                if not latency or p50 > limits[0] or p95 > limits[1]:
+                    failures.append("interaction latency budget exceeded" if latency else "no completed latency samples")
                 if phase == "upgrade" and (not selected or gap >= MAXIMUM_GAP_SECONDS):
                     failures.append("missing cutover interaction or at least five seconds without success")
                 for reason in failures:
                     self.report["violations"].append({"phase": phase, "kind": name, "reason": reason})
+
+    def pending_state(self, pending):
+        address = getattr(self, "candidate_direct_address", self.address)
+        detail = fetch(*address, f"sessions/{pending['approval_thread']}")
+        with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+            queue = db.execute("SELECT id,state FROM browser_message_queue WHERE thread_id=? ORDER BY created_at,rowid",
+                               (pending["queue_thread"],)).fetchall()
+        records = self.records()
+        return {
+            "approval_keys": [r["key"] for r in detail["requests"]],
+            "provider_requests": [r["request"] for r in records if r["kind"] == "approval"
+                                  and r["thread"] == pending["approval_thread"]],
+            "provider_answers": [r["request"] for r in records if r["kind"] == "approval_answer"],
+            "queue": [list(row) for row in queue],
+            "queued_turns": sum(r["kind"] == "turn" and r.get("role") == "queued-after-stream" for r in records),
+            "provider_turns": [[r["thread"], r["pid"], r["turn"]] for r in records if r["kind"] == "turn"
+                               and r["thread"] in [*self.peers, pending["approval_thread"]]],
+        }
+
+    def prepare_pending_work(self):
+        pending = self.report["pending_work"] = {}
+        thread = fetch(*self.address, "sessions", {"cwd": str(self.root), "client": "claude",
+                                                   "name": "Pending approval verification"})["session"]["thread_id"]
+        pending.update(approval_thread=thread, queue_thread=self.peers[1])
+        fetch(*self.address, f"sessions/{thread}/messages", {"message": "approval"})
+        self.wait(lambda: fetch(*self.address, f"sessions/{thread}")["requests"], timeout=25)
+        queued = fetch(*self.address, f"sessions/{self.peers[1]}/queue", {"message": "queued-after-stream"})
+        before = pending["before"] = self.pending_state(pending)
+        if (not queued["queued"] or before["queue"] != [[queued["id"], "queued"]]
+                or len(before["approval_keys"]) != 1 or len(before["provider_requests"]) != 1
+                or before["provider_answers"] or before["queued_turns"] or len(before["provider_turns"]) != 7
+                or {r[0] for r in before["provider_turns"]} != {*self.peers, thread}):
+            raise AssertionError("The original pending approval, queued message or provider turns were not observed")
+
+    def verify_pending_work(self):
+        pending = self.report["pending_work"]
+        after = pending["after"] = self.pending_state(pending)
+        if after != pending["before"]:
+            raise AssertionError("Pending approval, queue or original provider turn changed across the handover")
+        pending["preserved"] = True
+
+    def pending_effects(self):
+        pending = self.report["pending_work"]
+        records = self.records()
+        answers = [r["request"] for r in records if r["kind"] == "approval_answer"]
+        requests = [r["request"] for r in records if r["kind"] == "approval" and r["thread"] == pending["approval_thread"]]
+        queued = [r["thread"] for r in records if r["kind"] == "turn" and r.get("role") == "queued-after-stream"]
+        return {"request_count": len(requests), "answer_count": len(answers), "queued_delivery_count": len(queued),
+                "original_approval_answered_once": pending["before"]["provider_requests"] == requests == answers,
+                "original_queue_delivered_once": queued == [pending["queue_thread"]]}
+
+    def release_pending_work(self):
+        pending = self.report["pending_work"]
+        key, = pending["before"]["approval_keys"]
+        # Release only the two synthetic items whose identities survived the swap.
+        fetch(*self.address, f"sessions/{pending['approval_thread']}/requests/{urllib.parse.quote(key, safe='')}",
+              {"decision": "accept"})
+        (self.root / "release").touch()
+        def both_observed():
+            effects = self.pending_effects()
+            return effects["queued_delivery_count"] and effects["answer_count"]
+        self.wait(both_observed, timeout=60)
+        effects = pending["effects"] = self.pending_effects()
+        if not effects["original_approval_answered_once"] or not effects["original_queue_delivered_once"]:
+            raise AssertionError("Original pending work did not complete exactly once")
+
+    def observe_active_receipts(self, when):
+        """Compare the original request with its independent provider input, without issuing any work."""
+        previous = self.report.setdefault("legacy_receipt_observations", {})
+        tracked = {r["request_id"] for rows in previous.values() for r in rows}
+        if when == "after_cleanup":
+            tracked.update(row["request_id"] for row in self.report.get("receipts", [])
+                           if row["http_outcome"] == "accepted" or row["durable_states"] in (["completed"], ["accepted"], ["uncertain"]))
+        counts = self.provider_input_counts()
+        rows = []
+        with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            for thread, key, payload, state in db.execute(
+                "SELECT thread_id,request_id,payload_json,state FROM browser_submission_receipts WHERE thread_id IN (?,?)",
+                (self.peers[0], self.composer)
+            ):
+                marker = json.loads(payload)["body"]["message"]
+                if marker == "stream" or (key not in tracked and state == "completed" and counts[marker] == 1):
+                    continue
+                rows.append({"request_id": key, "thread_role": "browser" if thread == self.composer else "stream",
+                             "durable_state": state, "provider_inputs": counts[marker]})
+        previous[when] = rows
+        if when == "after_cleanup":
+            observed = {row["request_id"] for row in rows}
+            acknowledged = {row["request_id"] for row in self.report.get("receipts", [])
+                            if row["http_outcome"] == "accepted" or row["durable_states"] in (["completed"], ["accepted"], ["uncertain"])}
+            for row in rows:
+                if (row["durable_state"] in {"accepted", "completed", "uncertain"}
+                        and (row["durable_state"] != "completed" or row["provider_inputs"] != 1)
+                        or row["provider_inputs"] > 1):
+                    self.report["violations"].append({"phase": "cleanup", "kind": "final provider receipt disagreement",
+                                                      "request_id": row["request_id"]})
+                    self.report.update(passed=False, standalone_passed=False)
+            # Previously observed pending work must remain addressable under its original key.
+            for missing in sorted(acknowledged - observed):
+                self.report["violations"].append({"phase": "cleanup", "kind": "missing original accepted receipt",
+                                                  "request_id": missing})
+                self.report.update(passed=False, standalone_passed=False)
+
+    def provider_input_counts(self, destinations=None, handoffs=None):
+        counts = collections.Counter()
+        latest = {}
+        for record in self.records():
+            message = record.get("message", {})
+            if handoffs is not None:
+                if record["kind"] == "turn":
+                    latest[record["thread"]] = (record["turn"], False)
+                    marker = record.get("role")
+                    if marker in handoffs:
+                        handoffs[marker]["turn"] = record["turn"]
+                elif record["kind"] == "complete" and latest.get(record["thread"]) == (record["turn"], False):
+                    latest[record["thread"]] = (record["turn"], True)
+                elif record["kind"] == "input" and message.get("method") == "turn/interrupt":
+                    latest.pop(message.get("params", {}).get("threadId"), None)
+            if record["kind"] == "input" and message.get("method") in {"turn/steer", "turn/start"}:
+                params = message["params"]
+                for item in params["input"]:
+                    text = item.get("text")
+                    counts[text] += 1
+                    if destinations is not None:
+                        destinations[text].append((params.get("threadId"), params.get("expectedTurnId")))
+                    if handoffs is not None and message["method"] == "turn/start":
+                        predecessor = latest.pop(params.get("threadId"), None)
+                        if predecessor and predecessor[1]:
+                            handoffs[text] = {"previous": predecessor[0]}
+        return counts
+
+    def terminal_receipt_service(self, intake, started, now):
+        """Measure queue age and canonical service time separately, using the original receipt keys."""
+        with closing(sqlite3.connect(intake.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            db.execute("ATTACH DATABASE ? AS canonical", (self.database.as_uri() + "?mode=ro",))
+            by_thread = {}
+            for role, thread in (("direct", self.peers[0]), ("browser", self.composer)):
+                rows = db.execute("""SELECT i.state, i.created_at, r.state, r.created_at, r.updated_at
+                    FROM intake i LEFT JOIN canonical.browser_submission_receipts r
+                    ON i.thread_id=r.thread_id AND i.request_id=r.request_id WHERE i.thread_id=?""",
+                    (thread,)).fetchall()
+                completed = [(created, end) for _, _, state, created, end in rows
+                             if state == "completed" and end >= started]
+                pending = [accepted for state, accepted, _, _, _ in rows if state in {"queued", "uncertain"}]
+                durations = sorted((end - created) * 1000 for created, end in completed)
+                by_thread[role] = {
+                    "intake_arrivals_since_draining": sum(accepted >= started for _, accepted, _, _, _ in rows),
+                    "intake_outstanding": len(pending),
+                    "oldest_outstanding_age_s": max(0, now - min(pending)) if pending else None,
+                    "canonical_completed_since_draining": len(completed),
+                    "canonical_completed_last_30s": sum(end >= max(started, now - 30) for _, end in completed),
+                    "canonical_service_ms_p50": statistics.median(durations) if durations else None,
+                    "canonical_service_ms_p95": durations[math.ceil(len(durations) * .95) - 1] if durations else None,
+                    "canonical_service_total_s": sum(durations) / 1000,
+                }
+            return by_thread
+
+    def capture_transition_diagnostics(self, when):
+        diagnostic = self.report.setdefault("transition_diagnostics", {})[when] = {
+            "phase": self.phase, "at_ms": int(time.time() * 1000)}
+        gateway = runtime.runtime_directory(self.database) / "interaction-gateway"
+        diagnostic["gateway_record_exists"] = (gateway / "gateway.json").is_file()
+        try:
+            path = gateway / "transition.json"
+            if path.is_file():
+                fence = json.loads(path.read_bytes())
+                diagnostic["gateway_state"] = {k: fence.get(k) for k in ("state", "request_id", "released")}
+            intake = gateway / "message-intake.sqlite3"
+            if intake.is_file():
+                with closing(sqlite3.connect(intake.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                    diagnostic["intake_states"] = dict(db.execute("SELECT state,COUNT(*) FROM intake GROUP BY state"))
+                started = next((row["at_ms"] for row in self.report.get("transition_control_timeline", [])
+                                if row.get("gateway", {}).get("state") == "draining"), None)
+                if started is not None and self.peers and self.composer:
+                    diagnostic["terminal_receipt_service"] = self.terminal_receipt_service(
+                        intake, started / 1000, diagnostic["at_ms"] / 1000)
+            path = self.root / "browser-network.json"
+            if path.is_file():
+                diagnostic["browser_network"] = json.loads(path.read_bytes())
+            diagnostic["update_phase"] = self.capture_update()
+            if getattr(self, "composer", None):
+                self.observe_active_receipts(when)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            diagnostic["collection_error"] = getattr(error, "sqlite_errorname", type(error).__name__)
+            self.report["violations"].append({"phase": "cleanup", "kind": "incomplete diagnostic evidence"})
+            self.report.update(passed=False, standalone_passed=False)
 
     def verify_receipts(self):
         # Start from both intent logs and the durable store. A client that
@@ -786,31 +1185,47 @@ class SignedUpgrade(Validation):
             for r in self.report.get("browser_observations", [])
             if r["kind"] in {"browser_send_intent", "browser_send"}
         }
-        counts = collections.Counter()
-        records = self.records()
-        for record in records:
-            message = record.get("message", {})
-            if record["kind"] == "input" and message.get("method") in {"turn/steer", "turn/start"}:
-                counts.update(item.get("text") for item in message["params"]["input"])
+        destinations = collections.defaultdict(list)
+        handoffs = {}
+        counts = self.provider_input_counts(destinations, handoffs)
         native = {}
-        with sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True) as db:
-            for tid, key, payload, state in db.execute(
-                """
-                    SELECT thread_id, request_id, payload_json, state FROM browser_submission_receipts
+        native_payloads = {}
+        native_turns = {}
+        admissions = {}
+        transfer_phase_names = {"baseline": "staged_source", "upgrade": "handoff", "gateway_candidate": "resumed_gateway"}
+        client_origins = {r["request_id"]: r["origin"] for r in self.report["samples"]
+                          if r["kind"] == "send" and "origin" in r}
+        client_origins.update({r["request_id"]: r["post_origin"] for r in browser.values()
+                               if r.get("request_id") and r.get("post_origin")})
+
+        with closing(sqlite3.connect(self.database.as_uri() + "?mode=ro", uri=True)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(browser_submission_receipts)")}
+            result_column = "result_json" if "result_json" in columns else "NULL"
+            for tid, key, payload, state, result in db.execute(
+                f"""
+                    SELECT thread_id, request_id, payload_json, state, {result_column} FROM browser_submission_receipts
                     WHERE thread_id IN (?, ?)""",
                 (self.peers[0], getattr(self, "composer", None)),
             ):
-                marker = json.loads(payload)["body"]["message"]
+                saved_body = json.loads(payload)["body"]
+                marker = saved_body["message"]
                 if marker == "stream":
                     continue
+                if key in native:
+                    self.report["violations"].append({"phase": "upgrade", "kind": "duplicate original receipt key",
+                                                      "request_id": key})
                 native[key] = state
+                native_payloads[key] = tid, saved_body
+                if result:
+                    native_result = json.loads(result)
+                    native_turns[key] = (native_result.get("turn") or {}).get("id") or native_result.get("turnId")
                 if key not in attempts:
                     observation = browser.get(marker, {})
                     code = observation.get("status")
                     outcome = (
                         "accepted" if code and 200 <= code < 300 else "rejected" if code else "uncertain"
                     )
-                    attempts[key] = (marker, outcome, observation.get("phase", "upgrade"), True)
+                    attempts[key] = (marker, outcome, observation.get("phase", "upgrade"), tid == self.composer)
         for marker, observation in browser.items():
             code = observation.get("status")
             key = observation.get("request_id")
@@ -821,9 +1236,84 @@ class SignedUpgrade(Validation):
                 self.report["violations"].append(
                     {"phase": observation["phase"], "kind": "browser delivery without receipt"}
                 )
+        def matches_target(key, marker, thread, expected):
+            targets = destinations[marker]
+            if len(targets) != 1 or targets[0][0] != thread:
+                return False
+            if not expected or targets[0][1] == expected:
+                return True
+            # A native start after the explicitly targeted turn is valid
+            # only when the wire log proves it was the latest completion
+            # and the ordinary receipt names the exact successor created.
+            handoff = handoffs.get(marker, {})
+            return bool(targets[0][1] is None and expected == handoff.get("previous") and
+                        native_turns.get(key) and native_turns[key] == handoff.get("turn"))
+
+        if self.report.get("interaction_gateway"):
+            # Audit in both directions. A lost browser response or provider
+            # receipt cannot erase a request already accepted by the gateway.
+            gateway_origin = self.report["interaction_gateway"]["url"].rstrip("/")
+            intake = runtime.runtime_directory(self.database) / "interaction-gateway/message-intake.sqlite3"
+            with closing(sqlite3.connect(intake.resolve(strict=True).as_uri() + "?mode=ro", uri=True)) as db:
+                rows = db.execute("SELECT thread_id,request_id,body,state,created_at FROM intake ORDER BY sequence").fetchall()
+            transferred = set()
+            registration_counts = collections.defaultdict(collections.Counter)
+            for thread, key, body, state, at in rows:
+                original = json.loads(body)
+                marker = original["message"]
+                route = next((r for r in reversed(self.report.get("interaction_routes", []))
+                              if r["at_ms"] <= 1000 * at), {})
+                phase = transfer_phase_names.get(route.get("phase"), "unclassified")
+                if route.get("origin") != gateway_origin:
+                    phase = "outside_gateway_window"
+                target_matches = matches_target(key, marker, thread, original.get("expectedTurnId"))
+                admissions[key] = {"phase": phase, "at_ms": 1000 * at, "state": state,
+                                   "provider_target_matches": target_matches}
+                channel = "browser" if thread == self.composer else "direct"
+                registration_counts[phase][channel] += 1
+                # Native receipts persist semantic composer fields. The private intake retains
+                # routing fields as well, including the original request ID and expected turn.
+                semantic = {k: v for k, v in original.items()
+                            if k not in {"requestId", "windowId", "activity", "expectedTurnId"}}
+                if key in transferred or original.get("requestId") != key:
+                    self.report["violations"].append({"phase": "upgrade", "kind": "gateway registration key disagreement",
+                                                      "request_id": key})
+                transferred.add(key)
+                via_browser = thread == self.composer
+                attempts.setdefault(key, (marker, "uncertain", route.get("phase", "unknown"), via_browser))
+                if (thread not in {self.peers[0], self.composer} or state != "committed"
+                        or native.get(key) != "completed" or counts[marker] != 1 or attempts[key][0] != marker
+                        or not target_matches or native_payloads.get(key) != (thread, semantic)
+                        or attempts[key][1] == "rejected"):
+                    self.report["violations"].append({"phase": "upgrade", "kind": "gateway receipt disagreement",
+                                                      "request_id": key, "gateway_state": state})
+            acknowledged = {r["request_id"] for r in self.report["samples"] if "transfer_state" in r}
+            acknowledged.update(r["request_id"] for r in browser.values() if r.get("status") == 202 and r.get("request_id"))
+            for key in acknowledged - transferred:
+                self.report["violations"].append({"phase": "upgrade", "kind": "missing gateway receipt", "request_id": key})
+            self.report["interaction_gateway"]["receipts"] = {
+                "total": len(rows), "states": dict(collections.Counter(r[3] for r in rows)),
+                "intake_registrations_by_phase": dict(registration_counts),
+                "browser": sum(r[0] == self.composer for r in rows),
+                "direct": sum(r[0] == self.peers[0] for r in rows),
+            }
+            if self.report.get("baseline_endpoint") == "staged_gateway":
+                if any(registration_counts["handoff"][kind] == 0 for kind in ("browser", "direct")):
+                    self.report["violations"].append({"phase": "upgrade", "kind": "missing handoff intake receipt coverage"})
+            if not any(r[0] == self.composer for r in rows) or not any(r[0] == self.peers[0] for r in rows):
+                self.report["violations"].append({"phase": "upgrade", "kind": "missing gateway receipt coverage"})
         for key, (marker, outcome, phase, via_browser) in attempts.items():
             state = native.get(key)
             delivered = counts[marker]
+            thread = self.composer if via_browser else self.peers[0]
+            observation = browser.get(marker, {}) if via_browser else {}
+            expected = observation.get("expected_turn_id") if via_browser else getattr(self, "turn_id", None)
+            receipt_thread, receipt_body = native_payloads.get(key, (None, {}))
+            identity_matches = receipt_thread == thread and receipt_body.get("message") == marker
+            confirmed_target = (identity_matches and matches_target(key, marker, thread, expected) and
+                                admissions.get(key, {}).get("provider_target_matches", True))
+            if observation.get("receipt_turn_id") and observation.get("status") == 200:
+                confirmed_target = confirmed_target and observation["receipt_turn_id"] == native_turns.get(key)
             self.report["receipts"].append(
                 {
                     "request_id": key,
@@ -832,12 +1322,15 @@ class SignedUpgrade(Validation):
                     "browser": via_browser,
                     "durable_states": [state] if state else [],
                     "provider_deliveries": delivered,
+                    "provider_target_matches": confirmed_target,
+                    "client_origin": client_origins.get(key),
+                    "gateway_registration": admissions.get(key),
                 }
             )
             if (
                 delivered > 1
                 or (outcome == "accepted" or state in {"accepted", "completed", "uncertain"})
-                and (delivered != 1 or state != "completed")
+                and (delivered != 1 or state != "completed" or not confirmed_target)
                 or (outcome == "rejected" or state == "rejected")
                 and delivered
             ):
@@ -848,6 +1341,18 @@ class SignedUpgrade(Validation):
                         "request_id": key,
                     }
                 )
+
+        if self.report.get("baseline_endpoint") == "staged_gateway" and self.report.get("interaction_gateway"):
+            completed = {name: {"browser": 0, "direct": 0} for name in transfer_phase_names.values()}
+            for row in self.report["receipts"]:
+                if (row["http_outcome"] == "accepted" and row["client_origin"] == gateway_origin
+                        and row["phase"] in transfer_phase_names and row["durable_states"] == ["completed"]
+                        and row["provider_deliveries"] == 1 and row["provider_target_matches"]):
+                    completed[transfer_phase_names[row["phase"]]]["browser" if row["browser"] else "direct"] += 1
+            self.report["interaction_gateway"]["receipts"]["confirmed_client_work_by_phase"] = completed
+            for phase, channels in completed.items():
+                if not all(channels.values()):
+                    self.report["violations"].append({"phase": phase, "kind": "missing confirmed gateway client receipts"})
 
     def finish_browser(self):
         if self.browser is None:
@@ -862,22 +1367,27 @@ class SignedUpgrade(Validation):
         p = self.root / "browser-observations.jsonl"
         rows = [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
         self.report["browser_observations"] = rows
-        self.report["browser_errors"] = (self.root / "browser-errors.log").read_text()[-1500:]
+        self.report["browser_process"] = {"exit_code": self.browser.returncode if isinstance(self.browser.returncode, int) else None,
+                                          "stderr_bytes": (self.root / "browser-errors.log").stat().st_size}
         for phase in self.report.get("phase_bounds", {}):
             for kind in ("browser_open", "browser_send"):
                 selected = [r for r in rows if r["phase"] == phase and r["kind"] == kind]
                 good = [r for r in selected if r["ok"]]
                 stats = {"successes": len(good), "attempts": len(selected)}
                 self.report.setdefault("browser_results", {}).setdefault(phase, {})[kind] = stats
+                if kind == "browser_open" and good:
+                    elapsed = sorted(r["end"] - r["start"] for r in good)
+                    stats["successful_open_ms"] = {"count": len(elapsed), "p50": statistics.median(elapsed),
+                                                   "p95": elapsed[math.ceil(len(elapsed) * 0.95) - 1], "max": elapsed[-1]}
                 if phase == "upgrade":
                     lo, hi = self.report["wall_phase_bounds"][phase]
                     completions = sorted(r["end"] for r in rows if r["kind"] == kind and r["ok"])
                     before = max((end for end in completions if end <= lo), default=lo)
                     after = min((end for end in completions if end >= hi), default=hi)
                     points = [before, *(end for end in completions if lo < end < hi), after]
-                    stats["maximum_seconds_without_success"] = (
-                        max(b - a for a, b in zip(points, points[1:])) / 1000
-                    )
+                    begin, end = max(zip(points, points[1:]), key=lambda pair: pair[1] - pair[0])
+                    stats["maximum_seconds_without_success"] = (end - begin) / 1000
+                    stats["gap_relative_to_upgrade_start_ms"] = [begin - lo, end - lo]
                     if not selected or stats["maximum_seconds_without_success"] >= MAXIMUM_GAP_SECONDS:
                         self.report["violations"].append(
                             {
@@ -886,22 +1396,36 @@ class SignedUpgrade(Validation):
                                 "reason": "missing upgrade traffic or availability gap",
                             }
                         )
-                    continue
-                if len(good) < 3 or len(good) != len(selected):
+                if phase == "upgrade" and not good:
+                    self.report["violations"].append({"phase": phase, "kind": kind, "reason": "no completed browser samples"})
+                elif phase != "upgrade" and (len(good) < 3 or len(good) != len(selected)):
                     self.report["violations"].append(
                         {"phase": phase, "kind": kind, "reason": "failed or missing browser samples"}
                     )
                 if kind == "browser_send" and good:
-                    for metric, median, tail in [("own_ms", None, 50), ("other_ms", 150, 400)]:
-                        times = sorted(r[metric] for r in good)
+                    for metric, median, tail in [("own_ms", None, 50), ("other_ms", 150, 400),
+                                                  ("http_acceptance_ms", *BUDGETS_MS["send"])]:
+                        values = [r["responded"] - r["requested"] if metric == "http_acceptance_ms"
+                                  and r.get("requested") is not None and r.get("responded") is not None
+                                  else r.get(metric) for r in good]
+                        times = sorted(v for v in values if isinstance(v, (int, float)) and math.isfinite(v) and v >= 0)
+                        if len(times) != len(good):
+                            self.report["violations"].append({"phase": phase, "kind": metric,
+                                                              "reason": "missing completed browser latency sample"})
+                        if not times:
+                            continue
                         p50, p95 = statistics.median(times), times[math.ceil(len(times) * 0.95) - 1]
-                        stats[metric] = {"p50": p50, "p95": p95}
+                        stats[metric] = {"count": len(times), "p50": p50, "p95": p95}
                         if p95 > tail or (median is not None and p50 > median):
                             self.report["violations"].append(
                                 {"phase": phase, "kind": metric, "reason": "browser latency budget exceeded"}
                             )
 
     def execute(self):
+        self.exercise_pending_work = not self.candidate_only
+        if self.affected_report:
+            self.report["affected_report"] = {"path": str(self.affected_report.resolve()),
+                                              "sha256": hashlib.sha256(self.affected_report.read_bytes()).hexdigest()}
         try:
             self.start()
             if self.candidate_only:
@@ -909,9 +1433,27 @@ class SignedUpgrade(Validation):
                 self.window("candidate")
             else:
                 self.report["mode"] = "signed_guarded_upgrade"
-                self.window("baseline")
-                self.swap_signed()
+                staged = None
+                if self.gateway_capable():
+                    self.report["baseline_endpoint"] = "staged_gateway"
+                    self.record_source_baseline()
+                    staged = self.stage_signed()
+                    started = time.monotonic()
+                    wall_start = time.time() * 1000
+                    try:
+                        self.route_source_interactions(staged[0], staged[2], "baseline")
+                        self.window("baseline")
+                    finally:
+                        self.report.setdefault("phase_bounds", {})["baseline"] = [started, time.monotonic()]
+                        self.report.setdefault("wall_phase_bounds", {})["baseline"] = [wall_start, time.time() * 1000]
+                else:
+                    self.window("baseline")
+                self.swap_signed(staged)
+                if self.report.get("interaction_gateway"):
+                    self.window("gateway_candidate")
+                    self.address = self.candidate_direct_address
                 self.window("candidate")
+                self.verify_pending_work()
             if self.profile_sample:
                 self.publish_phase("profiling")
                 witness = self.report.get("candidate_runtime") or self.report["initial_runtime"]
@@ -934,15 +1476,19 @@ class SignedUpgrade(Validation):
                         "reason": "Private coordinator identity changed",
                     }
         finally:
+            self.capture_transition_diagnostics("traffic_stopping")
             self.stop_traffic.set()
             for thread in self.workers:
                 thread.join(25)
             self.finish_browser()
+            self.capture_transition_diagnostics("traffic_stopped")
             self.capture_update()
             if "phase_bounds" in self.report:
                 self.summarize()
-            if self.peers:
+            if self.peers and getattr(self, "composer", None):
                 self.verify_receipts()
+            if self.report.get("pending_work", {}).get("preserved"):
+                self.release_pending_work()
             if "baseline" in self.report.get("results", {}) and self.old[1]["version"] == "0.1.12+63":
                 old = self.report["initial_runtime"]
                 red = any(
@@ -999,7 +1545,10 @@ class SignedUpgrade(Validation):
                 "architecture": old["architecture"],
             }
         else:
-            ref = json.loads(self.affected_report.read_bytes()) if self.affected_report else {}
+            raw = self.affected_report.read_bytes() if self.affected_report else b"{}"
+            ref = json.loads(raw)
+            if self.affected_report and hashlib.sha256(raw).hexdigest() != self.report["affected_report"]["sha256"]:
+                raise AssertionError("Affected release proof changed during validation")
             proof = ref.get("baseline_proof") or {}
             if (
                 ref.get("workload_contract") != self.report["workload_contract"]
@@ -1012,9 +1561,69 @@ class SignedUpgrade(Validation):
             and proof.get("architecture") == after["architecture"]
             and self.report.get("guarded_update_phase") == "committed"
             and not any(
-                v["phase"] != "baseline" or "receipt" in v["kind"] or "durable" in v["kind"] for v in failures
+                self.report.get("baseline_endpoint") == "staged_gateway" or v["phase"] != "baseline"
+                or "receipt" in v["kind"] or "durable" in v["kind"] for v in failures
             )
         )
+
+    def record_source_baseline(self):
+        # Preserve the exact previous receiver's direct workload, including
+        # failures and unresolved receipts. Its source window now runs through
+        # the staged production endpoint and has the full release budgets.
+        path = self.source_baseline_report or self.affected_report
+        try:
+            raw = path.read_bytes() if path else b"{}"
+            ref = json.loads(raw)
+        except (ValueError, OSError):
+            ref = {}
+        if (ref.get("workload_contract") != self.report["workload_contract"]
+                or ref.get("initial_runtime", {}).get("payload") != self.old[1]["payload_digest"]
+                or ref.get("interaction_gateway") or not ref.get("receipts")
+                or not ref.get("browser_results", {}).get("baseline")):
+            self.report["violations"].append({"phase": "baseline", "kind": "missing signed direct source baseline receipt"})
+            return
+        self.report["direct_source_baseline"] = {
+            "path": str(path.resolve()), "sha256": hashlib.sha256(raw).hexdigest(),
+            "payload": ref["initial_runtime"]["payload"], "browser_baseline": ref["browser_results"]["baseline"],
+            "receipt_count": len(ref["receipts"]), "receipt_violations": sum(
+                "receipt" in v["kind"] or "durable" in v["kind"] for v in ref.get("violations", [])),
+        }
+
+    def close(self):
+        directory = runtime.runtime_directory(self.database) / "interaction-gateway"
+        if (directory / "gateway.json").exists():
+            try:
+                identity = self.gateway_control("identity")
+                result = self.gateway_control("retire", body={})
+                if not identity.get("settled") or result.get("retired") is not True:
+                    raise RuntimeError("The private gateway did not confirm retirement")
+                self.report["gateway_retired"] = True
+            except Exception as error:
+                # A broken witness must never skip teardown of this isolated fixture.
+                self.report["gateway_retired"] = False
+                self.report["violations"].append({"phase": "cleanup", "kind": "gateway retirement",
+                                                  "reason": diagnostic_reason(error)})
+                self.report.update(passed=False, standalone_passed=False)
+        # The inherited cleanup revalidates each PID against the unique fixture
+        # root before signalling it, including a gateway that refused retirement.
+        super().close()
+        survivors = [pid for pid, command in processes_mentioning(str(self.root)).items()
+                     if "--runtime-interaction-gateway" in command]
+        self.report["gateway_survivors"] = survivors
+        if survivors:
+            self.report.update(passed=False, standalone_passed=False)
+            self.report["violations"].append({"phase": "cleanup", "kind": "gateway process survived cleanup"})
+
+        fixture_stopped = ("leftover_processes" in self.report and not survivors and not any(
+            p["alive_after_cleanup"] for p in self.report["leftover_processes"].values()))
+        if hasattr(self, "phase") and fixture_stopped:
+            self.capture_transition_diagnostics("after_cleanup")
+            pending = self.report.get("pending_work", {})
+            if pending.get("preserved"):
+                effects = pending["final_effects"] = self.pending_effects()
+                if not effects["original_approval_answered_once"] or not effects["original_queue_delivered_once"]:
+                    self.report.update(passed=False, standalone_passed=False)
+                    self.report["violations"].append({"phase": "cleanup", "kind": "pending work receipt disagreement"})
 
 
 def run_and_clean_up(runner):
@@ -1022,7 +1631,7 @@ def run_and_clean_up(runner):
         try:
             runner.execute()
         except Exception as error:
-            runner.report["execution_error"] = repr(error)
+            runner.report["execution_error"] = {"type": type(error).__name__, "reason": diagnostic_reason(error)}
             raise
     finally:
         runner.persist()
@@ -1032,7 +1641,7 @@ def run_and_clean_up(runner):
             # Validation.close stops only processes proved to belong to the
             # temporary root and records any survivors.
             runner.persist()
-            if "leftover_processes" in runner.report and not any(
+            if "leftover_processes" in runner.report and not runner.report.get("gateway_survivors") and not any(
                 v["alive_after_cleanup"] for v in runner.report["leftover_processes"].values()
             ):
                 shutil.rmtree(runner.root)
@@ -1059,6 +1668,10 @@ def main():
         "--affected-report",
         type=Path,
         help="Matching signed build 63 baseline receipt for a later healthy predecessor",
+    )
+    parser.add_argument(
+        "--source-baseline-report", type=Path,
+        help="Private signed direct workload for the exact previous payload when qualifying a staged gateway",
     )
     parser.add_argument(
         "--playwright-module", help="Installed Playwright module (default: demo/node_modules/playwright)"

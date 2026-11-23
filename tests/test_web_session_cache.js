@@ -189,6 +189,52 @@ test("a draft placeholder cannot be mistaken for the retained conversation's nod
   gate.resolve(fixture("one")); await opening;
 });
 
+test("opening an already seen conversation completes with its receipt writer blocked", async () => {
+  for (const [checkpoint, completion, seenCheckpoint, seenCompletion] of [
+    [8, 12, 8, 12], [8, 12, 10, 14], [null, null, 0, 0],
+  ]) {
+    const c = setup(), detail = fixture("one");
+    Object.assign(detail.work_thread, {
+      checkpoint: checkpoint && {id: checkpoint},
+      turn_completion: completion && {id: completion},
+      seen_checkpoint_id: seenCheckpoint, seen_completion_id: seenCompletion,
+    });
+    c.replies.set("one", detail);
+    const gate = deferred(), api = c.api;
+    let writes = 0, opened = false;
+    c.api = (path, body, options) => {
+      if (body?.seen) { writes++; return gate.promise; }
+      return api(path, body, options);
+    };
+    const opening = c.select("one").then(() => { opened = true; });
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(opened, true, "selection waited for a redundant seen write");
+      assert.equal(writes, 0);
+      assert.equal(c.$("timeline").childNodes[0].textContent, "Saved answer");
+    } finally {
+      gate.resolve({});
+      await opening;
+    }
+  }
+});
+
+test("opening acknowledges either advancing marker even when the unread badge is absent", async () => {
+  for (const [seenCheckpoint, seenCompletion] of [[7, 12], [8, 11], [undefined, undefined]]) {
+    const c = setup(), detail = fixture("one");
+    Object.assign(detail.work_thread, {
+      checkpoint: {id: 8}, turn_completion: {id: 12, status: "interrupted"},
+      seen_checkpoint_id: seenCheckpoint, seen_completion_id: seenCompletion,
+      unread_result: false,
+    });
+    c.replies.set("one", detail);
+    await c.select("one");
+    const writes = c.calls.filter(call => call.body?.seen);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(clone(writes[0].body), {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12});
+  }
+});
+
 test("updates received in the overview refresh cached history and acknowledge only the fresh result", async () => {
   const c = setup(); await c.select("one"); c.goHome();
   c.applyEvent({method: "turn/completed", params: {threadId: "one", turn: {id: "new"}}});

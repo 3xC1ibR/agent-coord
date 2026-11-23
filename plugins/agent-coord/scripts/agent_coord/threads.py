@@ -356,10 +356,13 @@ class ThreadStore:
 
     def get(self, thread_id: str, *, history=False) -> dict:
         with self.store.reading(), self.store._connection() as db:
-            row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
-            if row is None:
-                raise CoordinationError("Work thread not found.")
-            return self._read(db, row, history=history)
+            return self.read_thread(db, thread_id, history=history)
+
+    def read_thread(self, db, thread_id, *, history=False):
+        row = db.execute(self._SELECT + " WHERE t.thread_id = ?", (thread_id,)).fetchone()
+        if row is None:
+            raise CoordinationError("Work thread not found.")
+        return self._read(db, row, history=history)
 
     def is_archived(self, thread_id: str) -> bool:
         with self.store.reading(), self.store._connection() as db:

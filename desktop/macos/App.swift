@@ -47,6 +47,9 @@ private final class DesktopWindow {
     var commands = Set<String>()
     var loaded = false
     var navigationReady = false
+    var documentOrigin: URL?
+    var nextOrigin: URL?
+    var replacement: (navigation: WKNavigation, origin: URL)?
     var navigating = false
     var pendingLinks: [URL] = []
     var incomingConversation: [String: Any]?
@@ -108,6 +111,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private var activity: NSObjectProtocol?
     private var preferences = UserDefaults.standard
     private var smokeReport: URL?
+    private var smokeNavigationFixture: [String: Any]?
     private var smokeDirectory: URL?
     private var smokeStage = 0
     private var smokeResults: [String: Any] = [:]
@@ -194,6 +198,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             let database = smokeDirectory?.appendingPathComponent("state.sqlite3").path ?? configuration.databasePath
             windowStore = WindowRestorationStore(url: directory.appendingPathComponent("windows/state.json"), database: database)
             restoreWindows()
+            if smokeReport != nil { try prepareOfflineSmokeFixtures() }
             UNUserNotificationCenter.current().delegate = self
             activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
                 reason: "Receive Ribbon Field turn completions while the window is closed")
@@ -203,11 +208,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 let links = self.pendingAppLinks
                 self.pendingAppLinks.removeAll()
                 for link in links { self.openAppLink(link) }
-                for item in self.windows {
-                    if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: url, local: true)) }
-                    self.configureScripts(item.webView)
-                    item.webView.load(URLRequest(url: self.destination(for: item, base: url)))
-                }
+                for item in self.windows { self.moveWindow(item, to: url) }
             }
             backend.exited = { [weak self] message in
                 guard let self = self, !self.quitting else { return }
@@ -434,6 +435,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         windows.append(item)
         if !settings && !conversation { installTitlebar(item) }
         if let destination = url ?? serverURL.map({ self.destination(for: item, base: $0) }) {
+            item.documentOrigin = serverURL
             if !settings, let serverURL = serverURL { item.files.connect(BackendWorkspaceFiles(baseURL: serverURL, local: true)) }
             configureScripts(webView)
             webView.load(URLRequest(url: destination))
@@ -502,6 +504,69 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func destination(for item: DesktopWindow, base: URL) -> URL {
         URL(string: item.launchRoute, relativeTo: base)?.absoluteURL ?? base
+    }
+
+    private func moveWindow(_ item: DesktopWindow, to origin: URL) {
+        if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: origin, local: true)) }
+        // The main workspace and detached conversations expose the workspace bridge.
+        // Other routes (Settings, Usage, Activity, previews and Monitor) load their own pages.
+        guard item.documentOrigin != nil, item.webView.url?.path == "/", !item.isSettings else {
+            item.documentOrigin = origin
+            configureScripts(item.webView)
+            item.webView.load(URLRequest(url: destination(for: item, base: origin)))
+            return
+        }
+        guard item.nextOrigin != origin else { return }
+        item.nextOrigin = origin
+        if item.replacement != nil { item.webView.stopLoading() }
+        prepareOriginChange(in: item)
+    }
+
+    private func retryOriginChange(in item: DesktopWindow) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak item] in
+            guard let self = self, let item = item else { return }
+            self.prepareOriginChange(in: item)
+        }
+    }
+
+    private let requireMovableDocument = """
+        const bridge = window.agentCoordDesktop;
+        if (bridge?.windowStateBusy?.() !== false || document.querySelector('dialog[open]') ||
+            (typeof state === 'object' && (state.busy || state.transferLocks?.size))) return null;
+        for (const pane of window.agentCoordPanes?.records?.values() || [])
+            if (pane.frame?.contentDocument?.querySelector('dialog[open]')) return null;
+        """
+
+    private func canMoveWorkspace(_ item: DesktopWindow) -> Bool {
+        item.navigationReady && !item.restoringWorkspace && !item.navigating && item.window.attachedSheet == nil &&
+            !conversationTransfers.values.contains { $0.source === item || $0.target === item }
+    }
+
+    private func resumeOriginalDocument(in item: DesktopWindow, navigation: WKNavigation) {
+        guard item.replacement?.navigation === navigation else { return }
+        item.replacement = nil
+        item.webView.evaluateJavaScript("document.documentElement.inert = false")
+        retryOriginChange(in: item)
+    }
+
+    private func prepareOriginChange(in item: DesktopWindow) {
+        guard !quitting, windows.contains(where: { $0 === item }), let origin = item.nextOrigin,
+              origin == serverURL, item.replacement == nil else { return }
+        guard canMoveWorkspace(item) else {
+            retryOriginChange(in: item)
+            return
+        }
+        item.webView.callAsyncJavaScript(requireMovableDocument + "\nreturn true;",
+            arguments: [:], in: nil, in: .page) { [weak self, weak item] result in
+            guard let self = self, let item = item, item.nextOrigin == origin, item.replacement == nil,
+                  self.windows.contains(where: { $0 === item }), !self.quitting else { return }
+            if case .success(let ready) = result, ready as? Bool == true {
+                // The original document remains interactive while WebKit fetches the destination.
+                if let navigation = item.webView.load(URLRequest(url: self.destination(for: item, base: origin))) {
+                    item.replacement = (navigation, origin)
+                } else { self.retryOriginChange(in: item) }
+            } else { self.retryOriginChange(in: item) }
+        }
     }
 
     /// AppKit ignores miniaturize while a window is still being ordered in during
@@ -855,7 +920,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     // traversal can skip those entries, losing the view/pane return destination.
     @objc private func goBack() { if webView.canGoBack { webView.evaluateJavaScript("history.back()") } }
     @objc private func goForward() { if webView.canGoForward { webView.evaluateJavaScript("history.forward()") } }
-    @objc private func openBrowser() { if let url = webView.url, isLocal(url) { NSWorkspace.shared.open(url) } }
+    @objc private func openBrowser() {
+        if let url = webView.url, let currentURL = currentBackendURL(for: url, from: current) { NSWorkspace.shared.open(currentURL) }
+    }
     @objc private func openLog() { if let url = backend?.logURL { NSWorkspace.shared.open(url) } }
     @objc private func toggleFiles() {
         guard let item = current, let pane = item.filesItem else { return }
@@ -889,9 +956,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
     }
 
-    private func isLocal(_ url: URL) -> Bool {
-        guard let base = serverURL else { return false }
+    private func isLocal(_ url: URL, at origin: URL? = nil) -> Bool {
+        guard serverURL != nil, let base = origin ?? serverURL else { return false }
         return url.scheme == base.scheme && url.host == base.host && url.port == base.port && url.user == nil && url.password == nil
+    }
+
+    private func currentBackendURL(for url: URL, from item: DesktopWindow?) -> URL? {
+        guard isLocal(url, at: item?.documentOrigin), let serverURL = serverURL,
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        parts.host = serverURL.host
+        parts.port = serverURL.port
+        return parts.url
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -982,7 +1057,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-        if isLocal(url) {
+        if isLocal(url) || isLocal(url, at: item(for: webView)?.documentOrigin) {
             configureScripts(webView)
             decisionHandler(.allow)
         } else {
@@ -995,10 +1070,54 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
     }
 
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard navigationResponse.isForMainFrame, let item = item(for: webView),
+              let replacement = item.replacement else { decisionHandler(.allow); return }
+        guard let origin = item.nextOrigin, origin == replacement.origin, let url = navigationResponse.response.url,
+              isLocal(url, at: origin), canMoveWorkspace(item) else {
+            decisionHandler(.cancel)
+            resumeOriginalDocument(in: item, navigation: replacement.navigation)
+            return
+        }
+        // Capture at response arrival, so typing during the destination fetch is included.
+        // Recheck acceptance in this same JS turn. Lock input only while admitting the new document.
+        webView.callAsyncJavaScript(requireMovableDocument + "\n" + """
+            const snapshot = bridge.exportWindowState();
+            if (snapshot) document.documentElement.inert = true;
+            return snapshot;
+            """, arguments: [:], in: nil, in: .page) { [weak self, weak item] result in
+                guard let self = self, let item = item, !self.quitting, item.nextOrigin == origin,
+                      self.windows.contains(where: { $0 === item }), self.canMoveWorkspace(item),
+                      item.replacement?.navigation === replacement.navigation,
+                      case .success(let value) = result, let snapshot = value as? [String: Any] else {
+                    decisionHandler(.cancel)
+                    if let item = item { self?.resumeOriginalDocument(in: item, navigation: replacement.navigation) }
+                    return
+                }
+                item.restoredWorkspace = snapshot
+                item.restorationAttempted = false
+                self.acceptWorkspaceState(snapshot, for: item)
+                self.configureScripts(webView)
+                decisionHandler(.allow)
+            }
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard let item = item(for: webView) else { return }
+        item.navigationReady = false
+        if let replacement = item.replacement, replacement.navigation === navigation {
+            item.documentOrigin = replacement.origin
+            item.replacement = nil
+            if item.nextOrigin == replacement.origin { item.nextOrigin = nil }
+            else { retryOriginChange(in: item) }
+        }
+    }
+
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = navigationAction.request.url {
-            if isLocal(url) { makeWindow(url: url) }
+            if let currentURL = currentBackendURL(for: url, from: item(for: webView)) { makeWindow(url: currentURL) }
             else if url.scheme == "agentcoord" { openAppLink(url, preferred: item(for: webView)) }
             else if ["https", "http", "mailto"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
         }
@@ -1015,9 +1134,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if smokeReport != nil { checkSmoke(attempt: 0) }
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        item(for: webView)?.navigationReady = false
+        if let item = item(for: webView), item.replacement?.navigation !== navigation { item.navigationReady = false }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if let item = item(for: webView), let replacement = item.replacement, replacement.navigation === navigation {
+            resumeOriginalDocument(in: item, navigation: replacement.navigation)
+            return
+        }
         if (error as NSError).code != NSURLErrorCancelled { showStatus(error.localizedDescription, failed: true, in: item(for: webView)) }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -1061,8 +1184,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
                                replyHandler: @escaping (Any?, String?) -> Void) {
-        guard message.frameInfo.isMainFrame, let url = message.frameInfo.request.url, isLocal(url),
-              let source = message.webView, let owner = item(for: source),
+        guard message.frameInfo.isMainFrame, let url = message.frameInfo.request.url,
+              let source = message.webView, let owner = item(for: source), isLocal(url, at: owner.documentOrigin),
               let body = message.body as? [String: Any], let action = body["action"] as? String else {
             replyHandler(nil, "Only the local Ribbon Field window can use desktop features."); return
         }
@@ -1160,7 +1283,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             replyHandler(true, nil)
         case "newWindow":
             guard let value = body["url"] as? String, value.count <= 8192,
-                  let destination = URL(string: value, relativeTo: serverURL)?.absoluteURL, isLocal(destination) else {
+                  let link = URL(string: value, relativeTo: owner.documentOrigin ?? serverURL)?.absoluteURL,
+                  let destination = currentBackendURL(for: link, from: owner) else {
                 replyHandler(nil, "Only Ribbon Field pages can open in an app window."); return
             }
             makeWindow(url: destination)
@@ -1534,6 +1658,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             finishSmoke(error: nil)
             return
         }
+        if CommandLine.arguments.contains("--smoke-origin-change-only") {
+            try await smokeOriginChange(first)
+            finishSmoke(error: nil)
+            return
+        }
         if CommandLine.arguments.contains("--smoke-runtime-only") {
             smokeResults["runtime_attached"] = backend.process?.isRunning == true
             let image: NSImage = try await withCheckedThrowingContinuation { continuation in
@@ -1753,9 +1882,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             const restored = !document.querySelector('#desktop-command-dialog').open && document.activeElement === search &&
               search.value === 'Saved search' && search.selectionStart === 2 && search.selectionEnd === 6;
             search.value = '';
-            document.querySelector('#permissions-dialog').showModal();
+            document.querySelector('#settings-dialog').showModal();
             const blocked = window.agentCoordDesktop.command('commandPalette') === false;
-            document.querySelector('#permissions-dialog').close();
+            document.querySelector('#settings-dialog').close();
             return restored && blocked;
             """, in: second.webView)
         try smokeCheck("command_palette_focus_and_modal", paletteEscape as? Bool == true)
@@ -1866,6 +1995,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let persisted = try await smokeJS("return localStorage.getItem('agent-coord.smoke') === 'persisted';", in: first.webView)
         try smokeCheck("preferences_persisted", persisted as? Bool == true &&
             preferences.dictionary(forKey: "webPreferences")?["agent-coord.smoke"] as? String == "persisted")
+        try await smokeOriginChange(first)
         smokeStage = 2
         first.webView.takeSnapshot(with: nil) { image, error in
             if let data = image?.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data),
@@ -1874,6 +2004,82 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             }
             self.finishSmoke(error: error?.localizedDescription)
         }
+    }
+
+    @MainActor private func smokeOriginChange(_ item: DesktopWindow) async throws {
+        guard let direct = serverURL, var alternate = URLComponents(url: direct, resolvingAgainstBaseURL: false),
+              direct.host == "127.0.0.1", let directory = smokeDirectory else {
+            throw Backend.failure("Missing private loopback runtime for origin change.")
+        }
+        // Same disposable coordinator, two distinct WebKit origins. The production
+        // ready handler is responsible for navigation on both sides of the switch.
+        alternate.host = "localhost"
+        guard let staged = alternate.url else { throw Backend.failure("Invalid smoke origin.") }
+        let thread = try await smokeJS("""
+            document.querySelector('[data-jev-skip]')?.click();
+            const created = await api('sessions', {client:'claude', name:'Window continuity', cwd});
+            const id = created.session.thread_id;
+            await refreshList(); await select(id);
+            const field = document.querySelector('#message');
+            field.value = 'An unsent draft'; field.focus(); field.setSelectionRange(2, 8);
+            field.dispatchEvent(new Event('input', {bubbles:true}));
+            return id;
+            """, in: item.webView, arguments: ["cwd": directory.path]) as! String
+        let sibling = makeWindow()
+        defer { sibling.window.close() }
+        try await smokeReady(sibling)
+        _ = try await smokeJS("""
+            await refreshList(); await select(id);
+            const field = document.querySelector('#message');
+            field.value = 'Second window draft'; field.setSelectionRange(2, 8);
+            field.dispatchEvent(new Event('input', {bubbles:true}));
+            return true;
+            """, in: sibling.webView, arguments: ["id": thread])
+        func reached(_ window: DesktopWindow, _ endpoint: URL, text: String) async -> Bool {
+            for _ in 0..<120 {
+                if window.webView.url?.host == endpoint.host && window.navigationReady && !window.restoringWorkspace,
+                   (try? await smokeJS("""
+                      const field = document.querySelector('#message');
+                      return location.origin === origin && state.selected === id && field?.value === text &&
+                        field.selectionStart === 2 && field.selectionEnd === 8;
+                      """, in: window.webView, arguments: ["id": thread, "text": text,
+                            "origin": String(endpoint.absoluteString.dropLast())]) as? Bool) == true { return true }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return false
+        }
+        backend.ready?(staged)
+        let stagedRestored = await reached(item, staged, text: "An unsent draft")
+        try smokeCheck("origin_change_staged_window", stagedRestored)
+        let otherStaged = await reached(sibling, staged, text: "Second window draft")
+        try smokeCheck("origin_change_independent_drafts", otherStaged)
+        _ = try await smokeJS("(state.sending ||= new Set()).add(id); return true;",
+                              in: item.webView, arguments: ["id": thread])
+        backend.ready?(direct)
+        let otherDirect = await reached(sibling, direct, text: "Second window draft")
+        try smokeCheck("origin_change_ready_window_continues", otherDirect)
+        try await smokeFocus(item)
+        item.window.makeFirstResponder(item.webView)
+        let editable = try await smokeJS("""
+            const field = document.querySelector('#message');
+            field.focus(); field.setSelectionRange(field.value.length, field.value.length);
+            return location.hostname === 'localhost' && state.sending.has(id) && !document.documentElement.inert;
+            """, in: item.webView, arguments: ["id": thread])
+        try smokeCheck("origin_change_busy_window_editable", editable as? Bool == true)
+        try smokeCheck("origin_change_native_keystroke", smokeWebKey("x", flags: [], code: 7, throughApplication: true))
+        let typed = try await smokeJS("""
+            const field = document.querySelector('#message');
+            for (let i = 0; i < 30 && field.value !== 'An unsent draftx'; i++)
+              await new Promise(resolve => setTimeout(resolve, 30));
+            field.setSelectionRange(2, 8);
+            state.sending.delete(id);
+            return field.value === 'An unsent draftx';
+            """, in: item.webView, arguments: ["id": thread])
+        try smokeCheck("origin_change_keystroke_visible", typed as? Bool == true)
+        let directRestored = await reached(item, direct, text: "An unsent draftx")
+        try smokeCheck("origin_change_direct_window", directRestored)
+        _ = try await smokeJS("document.querySelector('[data-jev-skip]')?.click(); return true;", in: item.webView)
+        try await smokeWindowImage(item, suffix: "origin-change")
     }
 
     @MainActor private func smokeScratchpad(_ item: DesktopWindow, other: DesktopWindow) async throws {
@@ -2012,12 +2218,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let folder = root.appendingPathComponent("Working folder", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         _ = try smokePython("""
-            import sys
-            from agent_coord.store import CoordinationStore
-            store = CoordinationStore(sys.argv[1])
             for name, cwd in [('notify-owned', sys.argv[2]), ('notify-other', sys.argv[3]), ('notify-fresh', sys.argv[3])]:
-                store.register(session_id=name, client='codex', cwd=cwd)
-                store.threads.update(name, title=name)
+                fixture_command('register', '--session-id', name, '--client', 'codex', '--cwd', cwd)
+                fixture_command('thread', 'update', '--session-id', name, '--title', name)
             print('{}')
             """, arguments: [folder.path, root.path])
         try await smokeInventoryReady(second, present: ["notify-owned", "notify-other", "notify-fresh"])
@@ -2082,11 +2285,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // A closed conversation is absent from the open list, so its project is
         // unknown until its detail loads: the route that left misplaced tabs.
         _ = try smokePython("""
-            import sys
-            from agent_coord.store import CoordinationStore
-            store = CoordinationStore(sys.argv[1])
-            store.register(session_id='link-elsewhere', client='codex', cwd=sys.argv[2])
-            store.threads.update('link-elsewhere', title='link-elsewhere')
+            fixture_command('register', '--session-id', 'link-elsewhere', '--client', 'codex', '--cwd', sys.argv[2])
+            fixture_command('thread', 'update', '--session-id', 'link-elsewhere', '--title', 'link-elsewhere')
             print('{}')
             """, arguments: [root.path])
         try await smokeInventoryReady(item, present: ["link-elsewhere"])
@@ -2210,6 +2410,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try smokeCheck("settings_closed", windows.count == 2 && settings.window.contentView == nil)
         let firstAfter = try await smokeJS(snapshot, in: first.webView) as? String
         let secondAfter = try await smokeJS(snapshot, in: second.webView) as? String
+        if firstBefore != firstAfter || secondBefore != secondAfter {
+            smokeResults["settings_state_debug"] = [firstBefore, firstAfter, secondBefore, secondAfter]
+        }
         try smokeCheck("settings_conversations_preserved", firstBefore != nil && firstBefore == firstAfter &&
             secondBefore != nil && secondBefore == secondAfter && first.window.isVisible && second.window.isVisible &&
             backend.process?.isRunning == true)
@@ -2236,11 +2439,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         try "# Native files\nReady for local and remote workspaces.\n".write(to: file, atomically: true, encoding: .utf8)
         try "print(\"hello\")\n".write(to: base.appendingPathComponent("Sources/main.swift"), atomically: true, encoding: .utf8)
         _ = try smokePython("""
-            import json, sys
-            from agent_coord.store import CoordinationStore
-            store = CoordinationStore(sys.argv[1])
-            store.register(session_id='files-smoke', client='codex', cwd=sys.argv[2])
-            print(json.dumps({'ready': True}))
+            print(json.dumps(fixture_command('register', '--session-id', 'files-smoke', '--client', 'codex', '--cwd', sys.argv[2])))
             """, arguments: [base.path])
         try await smokeInventoryReady(item, present: ["files-smoke"])
         _ = try await smokeJS("""
@@ -2349,18 +2548,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @MainActor private func smokeRollUp(_ window: DesktopWindow) async throws {
         _ = try smokePython("""
-            import json, sys
-            from agent_coord.store import CoordinationStore
-            now = 10.0
-            store = CoordinationStore(sys.argv[1], clock=lambda: now)
-            store.threads.update('files-smoke', attention='archived')
+            directory = str(Path(sys.argv[1]).parent)
+            fixture_command('thread', 'update', '--session-id', 'files-smoke', '--attention', 'archived')
             for name in ['roll-old-session', 'roll-new-session', 'roll-later']:
-                store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
-                now += 10
-            for name, stamp in [('roll-old-session', 300), ('roll-new-session', 200), ('roll-later', 100)]:
-                now = stamp
-                store.threads.checkpoint(name, {'phase': 'finished', 'summary': 'A recommendation to review.', 'next_actor': 'nobody', 'next_action': ''})
-            store.threads.update('roll-later', attention='later')
+                fixture_command('register', '--session-id', name, '--client', 'codex', '--cwd', directory)
+            # Deliberately register and checkpoint in different orders to test oldest waiting.
+            for name in ['roll-later', 'roll-new-session', 'roll-old-session']:
+                fixture_command('checkpoint', '--session-id', name, '--json', json.dumps(
+                    {'phase': 'finished', 'summary': 'A recommendation to review.', 'next_step': None}))
+            fixture_command('thread', 'update', '--session-id', 'roll-later', '--attention', 'later')
             print(json.dumps({'ready': True}))
             """)
         try await smokeInventoryReady(window, present: ["roll-old-session", "roll-new-session", "roll-later"],
@@ -2434,7 +2630,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     private func smokePython(_ source: String, arguments: [String] = []) throws -> [String: Any] {
         let task = Process(), output = Pipe()
         task.executableURL = configuration.pythonURL(resources: resources)
-        task.arguments = ["-c", source, smokeDirectory!.appendingPathComponent("state.sqlite3").path] + arguments
+        let commands = """
+            import contextlib, io, json, sys
+            from pathlib import Path
+            from agent_coord.cli import main as coordinator_cli
+            def fixture_command(*args):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    if coordinator_cli(['--db', sys.argv[1], *args]) != 0:
+                        raise RuntimeError('Native smoke fixture command failed: ' + args[0])
+                return json.loads(output.getvalue())
+            """
+        task.arguments = ["-c", commands + "\n" + source, smokeDirectory!.appendingPathComponent("state.sqlite3").path] + arguments
         task.environment = ["PATH": configuration.toolPath, "PYTHONPATH": resources.appendingPathComponent("backend").path,
                             "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"]
         task.currentDirectoryURL = smokeDirectory
@@ -2445,27 +2651,63 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         guard task.terminationStatus == 0,
               let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NSError(domain: "AgentCoordSmoke", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Navigation fixture process failed"])
+                userInfo: [NSLocalizedDescriptionKey: "Native smoke fixture command failed"])
         }
         return result
     }
 
-    @MainActor private func smokeAttribution() async throws {
-        let fixture = try smokePython("""
-            import json, sys, uuid
-            from agent_coord.store import CoordinationStore
+    private func prepareOfflineSmokeFixtures() throws {
+        let mode = CommandLine.arguments.first { $0.hasPrefix("--smoke-") && ($0.hasSuffix("-only") || $0 == "--smoke-window-restoration") }
+        guard mode == nil || mode == "--smoke-attribution-only" else { return }
+        // Test bundles never start the telemetry sender. Initialize the disposable
+        // table before ownership passes to the coordinator, then test native attribution normally.
+        _ = try smokePython("""
             from agent_coord import launch_metrics
+            from agent_coord.store import CoordinationStore
             launch_metrics.initialize(CoordinationStore(sys.argv[1]))
-            print(json.dumps({'download_token': str(uuid.uuid4())}))
-            """, arguments: [])
-        let token = fixture["download_token"] as! String
+            print('{}')
+            """)
+        guard mode == nil, let window = windows.first else { return }
+        // The actual CLI runs outside the checkout against the isolated database.
+        // Capture its launch URL instead of sending it to the user's installed app.
+        smokeNavigationFixture = try smokePython("""
+            import contextlib, io, json, subprocess, sys
+            from unittest.mock import patch
+            from agent_coord.store import CoordinationStore
+            from agent_coord.navigation import NavigationStore
+            from agent_coord.cli import main
+            from agent_coord.runtime_requests import owner_operation
+            ownership = contextlib.ExitStack()
+            if not ownership.enter_context(owner_operation(sys.argv[1])):
+                raise RuntimeError("The private navigation fixture must be prepared before runtime startup")
+            store = CoordinationStore(sys.argv[1])
+            nav = NavigationStore(store)
+            directory = str(store.database_path.parent.resolve())
+            billing = store.threads.organization.create_project('Billing', cwd=directory)
+            other = store.threads.organization.create_project('Other', cwd=directory)
+            for name, project in [('navigation-manager', None), ('navigation-billing', billing['id']), ('navigation-other', other['id'])]:
+                store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
+                store.threads.update(name, title=name, project_id=project, attention='archived')
+            view = nav.views.create({'name': 'Review', 'cwd': directory, 'filters': {'project': other['id'], 'search': 'keep'}})
+            nav.bind('navigation-manager', sys.argv[2])
+            output = io.StringIO()
+            with patch('agent_coord.navigation.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as opener, contextlib.redirect_stdout(output):
+                assert main(['--db', sys.argv[1], 'ui', 'open', '--project', 'Billing', '--from-session', 'navigation-manager', '--wait', '0']) == 0
+            ownership.close()
+            print(json.dumps({'url': opener.call_args.args[0][-1], 'result': json.loads(output.getvalue()),
+                              'billing': billing['id'], 'other': other['id'], 'view': view['id'], 'directory': directory}))
+            """, arguments: [window.id])
+    }
+
+    @MainActor private func smokeAttribution() async throws {
+        let token = UUID().uuidString.lowercased()
         application(NSApp, open: [URL(string: "agentcoord://attribution?download_token=\(token)")!])
         var attributed = false
         for _ in 0..<20 {
             try await Task.sleep(nanoseconds: 100_000_000)
             let receipt = try smokePython("""
                 import json, sqlite3, sys
-                with sqlite3.connect(sys.argv[1]) as db:
+                with sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True) as db:
                     token = db.execute('SELECT download_token FROM launch_install').fetchone()[0]
                 print(json.dumps({'received': token == sys.argv[2]}))
                 """, arguments: [token])
@@ -2475,30 +2717,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @MainActor private func smokeNavigation(_ first: DesktopWindow, _ second: DesktopWindow) async throws {
-        // The actual CLI runs outside the checkout against the isolated database.
-        // Capture its launch URL instead of sending it to the user's installed app.
-        let fixture = try smokePython("""
-            import contextlib, io, json, subprocess, sys
-            from unittest.mock import patch
-            from agent_coord.store import CoordinationStore
-            from agent_coord.navigation import NavigationStore
-            from agent_coord.cli import main
-            store = CoordinationStore(sys.argv[1])
-            nav = NavigationStore(store)
-            directory = str(store.database_path.parent.resolve())
-            billing = store.threads.organization.create_project('Billing', cwd=directory)
-            other = store.threads.organization.create_project('Other', cwd=directory)
-            for name, project in [('navigation-manager', None), ('navigation-billing', billing['id']), ('navigation-other', other['id'])]:
-                store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
-                store.threads.update(name, title=name, project_id=project)
-            view = nav.views.create({'name': 'Review', 'cwd': directory, 'filters': {'project': other['id'], 'search': 'keep'}})
-            nav.bind('navigation-manager', sys.argv[2])
-            output = io.StringIO()
-            with patch('agent_coord.navigation.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as opener, contextlib.redirect_stdout(output):
-                assert main(['--db', sys.argv[1], 'ui', 'open', '--project', 'Billing', '--from-session', 'navigation-manager', '--wait', '0']) == 0
-            print(json.dumps({'url': opener.call_args.args[0][-1], 'result': json.loads(output.getvalue()),
-                              'billing': billing['id'], 'other': other['id'], 'view': view['id'], 'directory': directory}))
-            """, arguments: [first.id])
+        guard let fixture = smokeNavigationFixture else { throw Backend.failure("Missing private navigation fixture.") }
+        _ = try smokePython("""
+            for name in ('navigation-manager', 'navigation-billing', 'navigation-other'):
+                fixture_command('thread', 'update', '--session-id', name, '--attention', 'now')
+            print('{}')
+            """)
         try await smokeInventoryReady(first, present: ["navigation-manager", "navigation-billing", "navigation-other"])
         try await smokeAttribution()
         let data = try JSONSerialization.data(withJSONObject: fixture)
@@ -2543,10 +2767,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             "current_is_first": current === first, "other_untouched": otherUntouched as? Bool ?? false]
         try smokeCheck("app_link_source_window", current === first && otherUntouched as? Bool == true)
         let acknowledgement = try smokePython("""
-            import json, sys
-            from agent_coord.store import CoordinationStore
-            from agent_coord.navigation import NavigationStore
-            print(json.dumps(NavigationStore(CoordinationStore(sys.argv[1])).request(sys.argv[2])))
+            import sqlite3
+            with sqlite3.connect(Path(sys.argv[1]).as_uri() + '?mode=ro', uri=True) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute('SELECT status,window_id FROM ui_navigation_requests WHERE id=?', (sys.argv[2],)).fetchone()
+            print(json.dumps(dict(row)))
             """, arguments: [(fixture["result"] as! [String: Any])["request_id"] as! String])
         try smokeCheck("app_link_acknowledged", acknowledgement["status"] as? String == "displayed" && acknowledgement["window_id"] as? String == first.id)
         try smokeCheck("app_link_back_shortcut", smokeKey("[", flags: [.command], code: 33))
@@ -2656,7 +2881,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return false;
             """, in: first.webView)
         try smokeCheck("pane_escape_restores_layout", restored as? Bool == true)
-        _ = try await smokeJS("await agentCoordNavigate('agentcoord://overview?project=' + navigationFixture.billing); return true;", in: first.webView)
+        try await smokeFocus(first)
+        _ = try await smokeJS("""
+            // Changing an iframe's document creates a joint WebKit history entry.
+            // Finish the tiled fixture's own initial navigations before opening the app link.
+            const panes = agentCoordPanes;
+            for (let i = 0; i < 100; i++) {
+              const loaded = [...panes.records.values()].filter(record => record.frame);
+              if (loaded.every(record => record.api && record.frame.contentDocument?.readyState === 'complete')) break;
+              if (i === 99) throw new Error('Tiled conversation documents did not finish loading');
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            const result = await agentCoordNavigate('agentcoord://overview?project=' + navigationFixture.billing);
+            if (result.status !== 'displayed') throw new Error('Pane navigation failed: ' + result.error);
+            return true;
+            """, in: first.webView)
+        try await smokeFocus(first)
         try smokeCheck("app_link_pane_back_shortcut", smokeKey("[", flags: [.command], code: 33))
         try await Task.sleep(nanoseconds: 200_000_000)
         let paneBack = try await smokeJS("""
@@ -2675,11 +2915,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             """, in: first.webView)
         try smokeCheck("app_link_back_restores_pane_draft", paneBack as? Bool == true)
         _ = try await smokeJS("""
+            // Begin the independent toggle test from a known overview. A restored
+            // history entry can legitimately have a conversation as its return target.
+            goHome();
+            if (!await agentCoordPanes.toggleCurrent()) throw new Error('Could not open the saved pane layout from overview');
             window.smokePaneLayout = agentCoordPanes.layout;
             smokePaneLayout.widths = smokePaneLayout.columns.map((_, i) => 1 + i / 4);
             agentCoordPanes.render(); return true;
             """, in: first.webView)
-        _ = smokeKey("t", flags: [.command, .control, .option], code: 17)
+        try await smokeFocus(first)
+        guard smokeKey("t", flags: [.command, .control, .option], code: 17) else { throw Backend.failure("Tile Threads shortcut was unavailable") }
         let toggleOff = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
               if (!agentCoordPanes.active && state.selected === null) return true;
@@ -2688,7 +2933,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return false;
             """, in: first.webView)
         try smokeCheck("pane_toggle_returns_to_overview", toggleOff as? Bool == true)
-        _ = smokeKey("t", flags: [.command, .control, .option], code: 17)
+        try await smokeFocus(first)
+        guard smokeKey("t", flags: [.command, .control, .option], code: 17) else { throw Backend.failure("Tile Threads shortcut was unavailable") }
         let toggleOn = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
               if (agentCoordPanes.active)
@@ -2699,17 +2945,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             return false;
             """, in: first.webView)
         try smokeCheck("pane_toggle_restores_layout_and_draft", toggleOn as? Bool == true)
-        _ = try await smokeJS("goHome(); await select('navigation-manager'); return true;", in: first.webView)
-        _ = smokeKey("t", flags: [.command, .control, .option], code: 17)
+        _ = try await smokeJS("""
+            goHome(); await select('navigation-manager');
+            if (state.selected !== 'navigation-manager' || agentCoordPanes.active)
+              throw new Error('Single conversation did not open before toggling the pane layout');
+            return true;
+            """, in: first.webView)
+        try await smokeFocus(first)
+        guard smokeKey("t", flags: [.command, .control, .option], code: 17) else { throw Backend.failure("Tile Threads shortcut was unavailable") }
         let fromThread = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
-              if (agentCoordPanes.active) return agentCoordPanes.layout.returnTarget.thread === 'navigation-manager';
+              if (agentCoordPanes.active && agentCoordPanes.layout.returnTarget?.thread === 'navigation-manager') return true;
               await new Promise(resolve => setTimeout(resolve, 25));
             }
             return false;
             """, in: first.webView)
+        if fromThread as? Bool != true {
+            smokeResults["pane_single_thread_debug"] = try await smokeJS("""
+                return {active: agentCoordPanes.active, selected: state.selected, pane: agentCoordPanes.selected,
+                  target: agentCoordPanes.layout?.returnTarget, history: history.state, busy: state.busy,
+                  dialog: document.querySelector('dialog[open]')?.id, error: document.querySelector('#error span').textContent};
+                """, in: first.webView)
+        }
         try smokeCheck("pane_toggle_remembers_single_thread", fromThread as? Bool == true)
-        _ = smokeKey("t", flags: [.command, .control, .option], code: 17)
+        try await smokeFocus(first)
+        guard smokeKey("t", flags: [.command, .control, .option], code: 17) else { throw Backend.failure("Tile Threads shortcut was unavailable") }
         let toThread = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
               if (!agentCoordPanes.active && state.detail?.work_thread?.thread_id === 'navigation-manager')
@@ -2725,16 +2985,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @MainActor private func smokeDetach(_ first: DesktopWindow) async throws {
         _ = try smokePython("""
-            import sys
-            from agent_coord.store import CoordinationStore
-            store = CoordinationStore(sys.argv[1])
             for name in ['detach-one', 'detach-two']:
-                store.register(session_id=name, client='claude', cwd=str(store.database_path.parent))
-                store.threads.update(name, title=name)
+                fixture_command('register', '--session-id', name, '--client', 'claude', '--cwd', str(Path(sys.argv[1]).parent))
+                fixture_command('thread', 'update', '--session-id', name, '--title', name)
             for index in range(40):
-                store.send_message(sender_session_id='detach-two', recipient_session_id='detach-one',
-                    body=f'Saved message {index}\\n' + 'History preserved through detachment. ' * 25,
-                    classification='informational', reply_required=False)
+                fixture_command('send', '--from-session', 'detach-two', '--session', 'detach-one',
+                    f'Saved message {index}\\n' + 'History preserved through detachment. ' * 25,
+                    '--classification', 'informational', '--no-reply-required')
             print('{}')
             """)
         try await smokeInventoryReady(first, present: ["detach-one", "detach-two"])
@@ -2908,20 +3165,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     @MainActor private func smokeSessionCycling(_ item: DesktopWindow) async throws {
         let fixture = try smokePython("""
-            import json, sys
-            from agent_coord.store import CoordinationStore
-            store = CoordinationStore(sys.argv[1])
+            directory = str(Path(sys.argv[1]).parent.resolve() / 'Cycling workspace')
+            Path(directory).mkdir(exist_ok=True)
+            group = fixture_command('project', 'create', '--name', 'Cycling scope', '--cwd', directory)['id']
+            fixture_command('register', '--session-id', 'outside-cycle', '--client', 'codex', '--cwd', directory)
             for name in ['cycling-one', 'cycling-two', 'cycling-three']:
-                store.register(session_id=name, client='codex', cwd=str(store.database_path.parent))
-                store.threads.update(name, title=name)
-            print(json.dumps({'cwd': str(store.database_path.parent.resolve())}))
+                fixture_command('register', '--session-id', name, '--client', 'codex', '--cwd', directory)
+                fixture_command('thread', 'update', '--session-id', name, '--title', name, '--project', group)
+            print(json.dumps({'cwd': directory, 'group': group}))
             """)
         try await smokeInventoryReady(item, present: ["cycling-one", "cycling-two", "cycling-three"])
         _ = try await smokeJS("""
             await openProjectDirectory(cyclingDirectory);
             goHome();
-            document.querySelector('#search').value = 'cycling-';
-            await refreshList();
+            // Search now opens saved conversation results. Use the group filter on the sidebar being cycled.
+            await savedViews.overview({project: cyclingGroup});
+            goHome();
             // A pane's read receipt can trigger a newer list request, superseding
             // the awaited refresh. Wait for the filtered cards to be displayed.
             for (let i = 0; i < 100; i++) {
@@ -2936,7 +3195,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             document.querySelector('#message').disabled = false;
             document.querySelector('#message').focus();
             return true;
-            """, in: item.webView, arguments: ["cyclingDirectory": fixture["cwd"]!])
+            """, in: item.webView, arguments: ["cyclingDirectory": fixture["cwd"]!, "cyclingGroup": fixture["group"]!])
         try await smokeFocus(item)
         try smokeCheck("next_session_shortcut", smokeWebKey("\t", flags: [.control], code: 48, throughApplication: true))
         let next = try await smokeJS("""
@@ -2991,12 +3250,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             """, in: item.webView)
         try smokeCheck("next_session_dialog_keeps_selection", modal as? Bool == true)
         _ = try await smokeJS("""
-            agentCoordPanes.tileCurrent();
-            const layout = agentCoordPanes.layout;
-            // Stack all sessions in one pane to cover inactive tabs as well.
-            layout.columns = [1]; layout.groups = [cycleIDs.slice()]; layout.tabs = [cycleIDs[0]];
-            layout.selected = cycleIDs[0]; layout.maximized = null;
-            agentCoordPanes.render(); agentCoordPanes.focus(cycleIDs[0]);
+            const panes = agentCoordPanes;
+            if (!panes.tileCurrent()) throw new Error('Could not tile the three cycling sessions');
+            const slot = panes.layout.groups.findIndex(group => group.includes(cycleIDs[0]));
+            const thread = state.sessions.find(thread => thread.thread_id === cycleIDs[1]);
+            // Use the same move as a tab drop, keeping a second pane visible.
+            if (!panes.moveThread(thread, slot, 'center', 1)) throw new Error('Could not stack the second cycling tab');
+            panes.focus(cycleIDs[0]);
             for (let i = 0; i < 100; i++) {
               const record = agentCoordPanes.focusedRecord;
               if (record?.api) {
@@ -3004,21 +3264,33 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 doc.querySelector('#composer').hidden = false;
                 const field = doc.querySelector('#message');
                 field.disabled = false; field.value = 'Keep tiled keyboard draft'; field.focus();
-                if (doc.activeElement === field) return true;
+                if (panes.selected === cycleIDs[0] && document.activeElement === record.frame && doc.activeElement === field) return true;
               }
               await new Promise(resolve => setTimeout(resolve, 25));
             }
             throw new Error('Tiled composer did not become focused');
             """, in: item.webView)
+        // Closing the modal publishes enabled commands asynchronously across the native bridge.
+        for _ in 0..<100 where !item.commands.contains("nextSession") {
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        try smokeCheck("next_session_native_command_enabled", item.commands.contains("nextSession"))
         try smokeCheck("next_session_tiled_shortcut", smokeWebKey("\t", flags: [.control], code: 48, throughApplication: true))
         let tiled = try await smokeJS("""
             for (let i = 0; i < 100; i++) {
-              if (agentCoordPanes.selected === cycleIDs[1])
-                return agentCoordPanes.layout.tabs[0] === cycleIDs[1];
+              const slot = agentCoordPanes.layout.groups.findIndex(group => group.includes(cycleIDs[0]));
+              if (agentCoordPanes.selected === cycleIDs[1] && agentCoordPanes.layout.tabs[slot] === cycleIDs[1]) return true;
               await new Promise(resolve => setTimeout(resolve, 25));
             }
             return false;
             """, in: item.webView)
+        if tiled as? Bool != true {
+            smokeResults["tiled_cycle_debug"] = try await smokeJS("""
+                return {selected: agentCoordPanes.selected, groups: agentCoordPanes.layout.groups, tabs: agentCoordPanes.layout.tabs,
+                  active: agentCoordPanes.active, focus: document.activeElement?.tagName,
+                  error: document.querySelector('#error span').textContent};
+                """, in: item.webView)
+        }
         try smokeCheck("next_session_selects_stacked_tab", tiled as? Bool == true)
         _ = smokeWebKey("\u{19}", flags: [.control, .shift], code: 48, throughApplication: true)
         let paneDraft = try await smokeJS("""
@@ -3052,13 +3324,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 await refreshList(); return result;
                 """, in: first.webView, arguments: ["firstProject": firstProject.path, "secondProject": secondProject.path]) as! [String]
             _ = try smokePython("""
-                import sys
-                from agent_coord.store import CoordinationStore
-                store = CoordinationStore(sys.argv[1])
                 for index in range(30):
-                    store.send_message(sender_session_id=sys.argv[2], recipient_session_id=sys.argv[3],
-                        body=f'Restored history {index} ' + 'Keep the saved reading position. ' * 15,
-                        classification='informational', reply_required=False)
+                    fixture_command('send', '--from-session', sys.argv[2], '--session', sys.argv[3],
+                        f'Restored history {index} ' + 'Keep the saved reading position. ' * 15,
+                        '--classification', 'informational', '--no-reply-required')
                 print('{}')
                 """, arguments: [ids[0], ids[3]])
             _ = try await smokeJS("""

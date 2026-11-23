@@ -775,6 +775,22 @@ test("new draft displays effective configured settings without creating a provid
   assert.equal(c.calls.some(call => call.path === "sessions"), false);
 });
 
+test("showing a saved conversation reads provider defaults only when the picker is opened", async () => {
+  const c = setup();
+  c.state.selected = "saved";
+  c.state.detail = {session: {client: "codex", cwd: "/folder"}, work_thread: {thread_id: "saved"},
+    transferReadSource: "saved"};
+  const reads = [];
+  c.api = async path => {
+    reads.push(path);
+    return path === "session-defaults" ? {model: "configured"} : {data: []};
+  };
+  c.renderModelPicker();
+  assert.equal(reads.length, 0);
+  await c.$("model-picker").onfocus();
+  assert.ok(reads.includes("session-defaults"));
+});
+
 test("defaults are scoped by folder, provider and model and late replies do not change the active choice", async () => {
   const c = setup(); await c.newSession(); const pending = [];
   c.state.sessionDefaults.clear();

@@ -37,7 +37,7 @@ from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
 from .native_push import NativePush
-from .workspaces import matches_workspace, resolve_workspace
+from .workspaces import matches_workspace, require_thread_workspaces, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
@@ -293,6 +293,32 @@ def _validate_loopback(host: str) -> None:
         raise CoordinationError("Ribbon Field UI only binds to loopback addresses.")
 
 
+def browser_content_policy(path, status, content_type, origin, authorized):
+    parsed = urlparse(path)
+    query = parse_qs(parsed.query)
+    openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                    and parsed.path == "/openui-frame.html")
+    html_preview = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                    and parsed.path.startswith("/api/browser/html-preview-content/"))
+    from .html_preview import PREVIEW_CSP
+    # WebKit resolves 'self' to the sandbox's opaque origin and
+    # blocks even this document's own scripts/styles. Pin assets to
+    # the validated server origin instead; the frame stays opaque.
+    embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
+                and ((parsed.path == "/" and query.get("pane") == ["1"])
+                     or (parsed.path in {"/settings", "/usage", "/usage/coordination", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
+                and authorized)
+    frame_policy = "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY"
+    content_policy = (PREVIEW_CSP if html_preview else
+         f"default-src 'none'; script-src {origin}; style-src {origin} 'unsafe-inline'; "
+         "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
+         "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+         if openui_frame else "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "
+        + ("'self'" if embedded else "'none'"))
+    return {"X-Frame-Options": frame_policy, "Content-Security-Policy": content_policy}
+
+
 def _handler(
     store: CoordinationStore,
     parent_session_id: str | None,
@@ -363,34 +389,13 @@ def _handler(
                 self.send_header("Referrer-Policy", "no-referrer")
                 if cookie:
                     self.send_header("Set-Cookie", cookie)
-                parsed = urlparse(getattr(self, "path", ""))
-                query = parse_qs(parsed.query)
-                openui_frame = (status == HTTPStatus.OK and content_type.startswith("text/html")
-                                and parsed.path == "/openui-frame.html")
-                html_preview = (status == HTTPStatus.OK and content_type.startswith("text/html")
-                                and parsed.path.startswith("/api/browser/html-preview-content/"))
-                from .html_preview import PREVIEW_CSP
-                # WebKit resolves 'self' to the sandbox's opaque origin and
-                # blocks even this document's own scripts/styles. Pin assets to
-                # the validated server origin instead; the frame stays opaque.
-                openui_origin = ((remote_access.origin if self._remote_request()
-                                  else "http://" + self.headers.get("Host", ""))
-                                 if openui_frame else "")
-                embedded = (status == HTTPStatus.OK and content_type.startswith("text/html")
-                            and ((parsed.path == "/" and query.get("pane") == ["1"])
-                                 or (parsed.path in {"/settings", "/usage", "/usage/coordination", "/activity", "/html-preview"} and query.get("embedded") == ["1"]))
-                            and self._authorized())
-                self.send_header("X-Frame-Options", "SAMEORIGIN" if embedded or openui_frame or html_preview else "DENY")
-                self.send_header(
-                    "Content-Security-Policy",
-                    (PREVIEW_CSP if html_preview else
-                     f"default-src 'none'; script-src {openui_origin}; style-src {openui_origin} 'unsafe-inline'; "
-                     "img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; "
-                     "form-action 'none'; frame-ancestors 'self'; sandbox allow-scripts"
-                     if openui_frame else "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-                    "script-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors "
-                    + ("'self'" if embedded else "'none'")),
-                )
+                path = getattr(self, "path", "")
+                html = content_type.startswith("text/html")
+                origin = ""
+                if html and urlparse(path).path == "/openui-frame.html":
+                    origin = remote_access.origin if self._remote_request() else "http://" + self.headers.get("Host", "")
+                for name, value in browser_content_policy(path, status, content_type, origin, html and self._authorized()).items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(body)
                 # Finish bounded uploads rejected before parsing. Closing with unread
@@ -654,11 +659,7 @@ def _handler(
         def _check_thread_workspace(self, thread_id):
             # Sidebar panels need the saved workspace boundary. Building a
             # live thread card here waits on unrelated provider checkpoints.
-            with store.reading(), store._connection() as db:
-                row = db.execute("""SELECT s.cwd FROM work_threads t
-                    JOIN sessions s ON s.session_id=t.thread_id WHERE t.thread_id=?""", (thread_id,)).fetchone()
-            if row is None or not matches_workspace(row["cwd"], browser_sessions.cwd):
-                raise CoordinationError("Work thread not found in this workspace.")
+            require_thread_workspaces(store, [thread_id], browser_sessions.cwd)
 
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
@@ -677,6 +678,7 @@ def _handler(
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
+                                          "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
                 from .database_writer import performance_snapshot
@@ -958,7 +960,7 @@ def _handler(
                 return
             try:
                 route = urlparse(self.path).path.split("/")[1:]
-                image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue"}
+                image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue", "update-input"}
                 schedule_route = route[:3] == ["api", "browser", "schedules"]
                 max_body = MAX_MESSAGE_BODY_BYTES if image_route else 1024 * 1024 if schedule_route else _MAX_BODY_BYTES
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1361,6 +1363,20 @@ def _handler(
                 thread_id = unquote(route[3])
                 if len(route) == 4:
                     result = browser_sessions.update(thread_id, body)
+                elif len(route) == 5 and route[4] == "update-input":
+                    receiver = getattr(self.server, "transfer_receiver", None)
+                    file = Path(store.database_path).stat()
+                    if (not self._local_request() or receiver is None
+                            or self.headers.get("X-Ribbon-Receiver-Instance") != receiver[0]
+                            or self.headers.get("X-Ribbon-Receiver-Payload") != receiver[1]
+                            or self.headers.get("X-Ribbon-Receiver-Database") != f"{file.st_dev}:{file.st_ino}"
+                            or not secrets.compare_digest(self.headers.get("Authorization", "").encode(),
+                                                          ("Bearer " + receiver[2]).encode())):
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "The receiving coordinator changed."})
+                        return
+                    if not isinstance(body.get("requestId"), str) or not body["requestId"].strip():
+                        raise CoordinationError("A transferred message requires its original receipt identity.")
+                    result = browser_sessions.submit(thread_id, body, transfer=True)
                 elif len(route) == 5 and route[4] == "messages":
                     result = browser_sessions.submit(thread_id, body)
                 elif len(route) == 5 and route[4] == "queue":

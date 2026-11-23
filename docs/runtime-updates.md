@@ -26,6 +26,41 @@ not the legacy one-time interruption below. Public publication remains a
 separate outcome; an installed app or a passing CI run alone does not establish
 published customer updates.
 
+## Keeping local conversations available during a full-database upgrade
+
+The macOS interface can stage an interaction gateway from the retained signed
+candidate while the original coordinator still serves. Its loopback origin stays
+stable while the old supervisor closes its listeners and copies the rollback
+database. The original coordinator remains the sole owner of provider processes,
+approvals, scheduling and the live database. The gateway reads committed
+conversation snapshots and identifies them as saved. During the handover, search
+reports its bounded coverage. An action that requires the coordinator returns
+an explicit refusal if the coordinator cannot receive it.
+
+An explicit backend update binds the original coordinator instance, candidate
+payload and update request ID. While the interface is attached to an older coordinator, the gateway acknowledges
+eligible ordinary messages after committing the original request and expected turn
+to its private intake. It forwards staged messages to the original owner one at
+a time. Preparation stops new legacy deliveries and waits for already dispatched
+work to reach a canonical outcome. The listener remains available throughout
+this wait. After the switch, independent conversations drain concurrently in
+receipt order within each conversation. The normal
+provider receipt on the authenticated receiving coordinator determines delivery.
+The gateway can reissue the same ordinary transfer only to a receiver that
+reserves the same request before any provider operation. An ambiguous native
+outcome stays visible for reconciliation. Rollback to an older receiver permits
+a single delivery attempt. Stop Work and Quit and pending approvals retain their
+existing authority.
+
+Use the retained candidate helper with `--runtime-interaction-continuity` for both
+staging and activation. The native interface selects that path automatically.
+Compare the independent interaction URL and the serving coordinator URL, then
+verify both on the exact signed candidate under continuous opens, sends and
+streaming. A successful backup or a successful standalone candidate run leaves
+the upgrade test outstanding. Inspect `interaction_settled` and the committed
+payload before returning the interface to the coordinator. Retire the settled
+listener through its authenticated control and retain its original receipts.
+
 ## Inbox recovery after a runtime exit
 
 A cold app conversation can retain an unfinished native turn after its runtime

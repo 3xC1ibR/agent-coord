@@ -48,7 +48,7 @@ from .attention import AttentionClassifier
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
-from .organization import app_agent_creators
+from .organization import app_agent_creators, describe_creators
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
@@ -321,6 +321,7 @@ class BrowserSessions:
         self.cwd = str(Path(cwd).expanduser().resolve()) if cwd else None
         self.lock = threading.RLock()
         self.changed = threading.Condition(self.lock)
+        self.events_changed = threading.Condition()
         self.events: deque[dict] = deque(maxlen=1500)
         self.sequence = 0
         self.turn_revisions: dict[str, int] = {}
@@ -548,16 +549,18 @@ class BrowserSessions:
             projection = getattr(self, "projection", None)
             if projection is not None and projection.buffer_publication({"method": method, "params": params, **extra}):
                 return
-            self.sequence += 1
-            event = {"seq": self.sequence, "method": method, "params": params, **extra}
+            event = {"seq": self.sequence + 1, "method": method, "params": params, **extra}
             if projection is not None:
-                try:
-                    projection.publication(event)
-                except Exception:
-                    self.sequence -= 1
-                    raise
-            self.events.append(event)
-            self.changed.notify_all()
+                projection.publication(event)
+            self.append_committed_events([event])
+
+    def append_committed_events(self, events):
+        """Publish under the session lock only after the corresponding storage commit."""
+        with self.events_changed:
+            self.events.extend(events)
+            self.sequence = events[-1]["seq"]
+            self.events_changed.notify_all()
+        self.changed.notify_all()
 
     def inventory_changed(self) -> None:
         with self.inventory_lock:
@@ -1314,9 +1317,11 @@ class BrowserSessions:
             return self._remember_thread(thread)
 
     def events_after(self, sequence: int, timeout=15) -> dict:
-        with self.changed:
+        # Stream readers need only committed events and their cursor. An unrelated
+        # checkpoint may hold the session state lock while staging large histories.
+        with self.events_changed:
             if self.sequence <= sequence and not self.closed:
-                self.changed.wait(timeout)
+                self.events_changed.wait(timeout)
             reset = sequence > self.sequence or bool(self.events and sequence < self.events[0]["seq"] - 1)
             return {"seq": self.sequence, "reset": reset, "events": [e for e in self.events if e["seq"] > sequence]}
 
@@ -1541,20 +1546,7 @@ class BrowserSessions:
                 creators = app_agent_creators(connection)
         else:
             creators = app_agent_creators(db)
-        # Project visibility follows orchestration ancestry, independently of
-        # execution cwd and open/closed placement. Dispatch remains independent.
-        for child, creator in creators.items():
-            workspaces, seen, ancestor = [], {child}, creator
-            while ancestor and ancestor["mode"] == "orchestration" and ancestor["thread_id"] not in seen:
-                seen.add(ancestor["thread_id"])
-                workspace = ancestor["project_cwd"]
-                if workspace and workspace not in workspaces:
-                    workspaces.append(workspace)
-                ancestor = creators.get(ancestor["thread_id"])
-            creator["workspaces"] = workspaces
-        for creator in creators.values():
-            cwd = creator.pop("cwd")
-            creator["available"] = bool(cwd and matches_workspace(cwd, self.cwd))
+        describe_creators(creators, lambda cwd: matches_workspace(cwd, self.cwd))
         with self.inventory_lock:
             self.creators_cache = (generation, time.monotonic(), creators)
         return creators
@@ -2598,11 +2590,17 @@ class BrowserSessions:
                 self.execution.capture(thread_id, state="unknown", source="provider_read",
                                        turn_id=self.active.get(thread_id) or expected)
 
-    def submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
+    def submit(self, thread_id: str, body: dict, *, queued=False, transfer=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
         context = activity_context(body)
         with self.store._writer.measure_request("send.execution"):
-            result = self._submit(thread_id, body, queued=queued)
+            if transfer:
+                # This intent was accepted as an ordinary message. Its first
+                # canonical effect is the immutable receipt reservation, even
+                # if dispatcher settings changed during the coordinator switch.
+                result = self.submissions.run(thread_id, body, lambda: self._send_composer(thread_id, body))
+            else:
+                result = self._submit(thread_id, body, queued=queued)
         command = result.get("command")
         turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
         # Dispatcher and reviewed requests have their own durable acceptance
@@ -2966,6 +2964,8 @@ class BrowserSessions:
                 return
             self.closed = True
             self.changed.notify_all()
+            with self.events_changed:
+                self.events_changed.notify_all()
         try:
             self._close_components()
         finally:

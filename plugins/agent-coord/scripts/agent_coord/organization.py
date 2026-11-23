@@ -54,6 +54,23 @@ def app_agent_creators(db, thread_id=None):
     return creators
 
 
+def describe_creators(creators, includes_workspace):
+    # Project visibility follows orchestration ancestry, independently of
+    # execution cwd and open/closed placement. Dispatch remains independent.
+    for child, creator in creators.items():
+        workspaces, seen, ancestor = [], {child}, creator
+        while ancestor and ancestor["mode"] == "orchestration" and ancestor["thread_id"] not in seen:
+            seen.add(ancestor["thread_id"])
+            workspace = ancestor["project_cwd"]
+            if workspace and workspace not in workspaces:
+                workspaces.append(workspace)
+            ancestor = creators.get(ancestor["thread_id"])
+        creator["workspaces"] = workspaces
+    for creator in creators.values():
+        cwd = creator.pop("cwd")
+        creator["available"] = bool(cwd and includes_workspace(cwd))
+
+
 def repository_root(cwd: str) -> str | None:
     """Resolve a Git repository and its linked worktrees without invoking Git."""
     directory = Path(cwd).expanduser().resolve()
