@@ -230,12 +230,17 @@
 
     async refresh({background = false} = {}) {
       if (background && this.pending?.revision === this.revision) return this.pending.promise;
+      // Conversation refreshes share one workspace-wide schedule list. The open
+      // schedule manager polls for status changes on its own shorter interval.
+      if (background && !this.$("schedules-dialog").open && this.lastReadAt !== undefined
+          && Date.now() - this.lastReadAt < 15000) return;
       const request = {revision: ++this.revision};
       this.pending = request;
       request.promise = (async () => {
         const items = (await this.api("schedules", undefined, {priority: background ? "low" : "auto"})).data;
         if (request.revision !== this.revision) return;
         this.update(items);
+        this.lastReadAt = Date.now();
       })();
       try { await request.promise; }
       finally { if (this.pending === request) this.pending = null; }

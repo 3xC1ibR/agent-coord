@@ -340,6 +340,30 @@ test("cancellation updates chat and Later immediately and rejects an older in-fl
   assert.equal(changes, 2);
 });
 
+test("conversation activity reuses a successful schedule read until its freshness interval expires", async t => {
+  const c = setup(t);
+  let now = 100000, reads = 0, fail = false;
+  t.mock.method(Date, "now", () => now);
+  c.ui.api = async () => {
+    reads++;
+    if (fail) throw new Error("unavailable");
+    return {data: []};
+  };
+  for (let event = 0; event < 100; event++) await c.ui.refresh({background: true});
+  assert.equal(reads, 1);
+  now += 15000;
+  fail = true;
+  await assert.rejects(c.ui.refresh({background: true}), /unavailable/);
+  fail = false;
+  await c.ui.refresh({background: true});
+  assert.equal(reads, 3);
+  await c.ui.refresh();
+  assert.equal(reads, 4, "an explicit schedule change is visible immediately");
+  c.$("schedules-dialog").showModal();
+  await c.ui.refresh({background: true});
+  assert.equal(reads, 5, "the open manager keeps its own polling cadence");
+});
+
 test("background reads coalesce, and explicit refreshes supersede old reads", async t => {
   const c = setup(t), reads = [];
   c.ui.api = () => new Promise(resolve => reads.push(resolve));

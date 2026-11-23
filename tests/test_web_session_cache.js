@@ -544,6 +544,16 @@ test("a completion notification without an item event invalidates an outstanding
   assert.ok(c.scheduled > 0);
 });
 
+test("a schedule change refreshes a window or pane even with a fresh cached list", async () => {
+  for (const paneMode of [true, false]) {
+    const c = setup(), refreshes = [];
+    c.state.paneMode = paneMode;
+    c.state.schedules = {refresh: async ({background = false} = {}) => refreshes.push(background)};
+    c.applyEvent({method: "browser/schedules", params: {}});
+    assert.deepEqual(refreshes, [false]);
+  }
+});
+
 test("only changes in reported approvals invalidate a conversation across windows and panes", async () => {
   const c = setup(); await c.select("one");
   let lists = 0, controls = 0;

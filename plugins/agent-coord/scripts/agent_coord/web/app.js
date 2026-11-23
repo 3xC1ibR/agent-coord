@@ -129,7 +129,7 @@ function refreshDecisionsIfDue(background) {
   refreshDecisionsAndSchedules(background);
 }
 function refreshDecisionsAndSchedules(background = false) {
-  state.schedules?.refresh({background: true}).catch(showError);
+  state.schedules?.refresh({background}).catch(showError);
   state.asks?.refresh({background}).catch(showError);
 }
 async function loadThreadList(view, request, {background = false, priority = "auto"} = {}) {
@@ -2594,6 +2594,7 @@ function scheduleTimelineRender({userMessage = false} = {}) {
   else render.timer = setTimeout(paint, 50);
 }
 function applyEvent(event) {
+  if (event.method === "browser/schedules") { state.schedules?.refresh().catch(showError); return; }
   if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
