@@ -128,6 +128,29 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
         return identity
 
+    def test_projected_turn_lifecycle_repairs_registration_without_rendering_thread_detail(self):
+        thread_id = self.create()
+        with self.store._connection() as db:
+            db.execute("DELETE FROM thread_organization WHERE thread_id = ?", (thread_id,))
+            db.execute("UPDATE work_threads SET project_cwd = NULL WHERE thread_id = ?", (thread_id,))
+            db.execute("UPDATE sessions SET write_scope_json = ?, bead_id = 'issue' WHERE session_id = ?",
+                       ('["src"]', thread_id))
+        turn = {"id": "observed", "status": "inProgress"}
+        params = {"threadId": thread_id, "turn": turn, "prompt": "Run the check."}
+        # The projection owns the shared provider lock for these two callbacks.
+        with patch.object(self.store.threads, "get", side_effect=AssertionError("Full thread detail requested")), \
+             patch.object(self.store, "get_session", side_effect=AssertionError("Full session detail requested")):
+            self.sessions._persist_event("turn/started", params, set())
+            turn["status"] = "completed"
+            self.sessions._persist_event("turn/completed", params, set())
+        thread = self.store.threads.get(thread_id)
+        self.assertEqual(thread["project_cwd"], str(self.root))
+        self.assertTrue(any(link["kind"] == "bead" and link["target"] == "issue" for link in thread["links"]))
+        with self.store.reading(), self.store._connection() as db:
+            self.assertIsNotNone(db.execute("SELECT 1 FROM thread_organization WHERE thread_id=?", (thread_id,)).fetchone())
+        self.assertEqual(self.store.get_session(thread_id)["activity"], "waiting")
+        self.assertEqual(self.store.threads.completions_after(0)["events"][0]["status"], "completed")
+
     def test_composer_provider_selection_reads_only_routing_fields(self):
         identity = self.create()
         with patch("agent_coord.execution_state.read_many", side_effect=AssertionError("loaded execution details")):

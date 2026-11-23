@@ -24,7 +24,7 @@ from typing import Any, Callable
 from .context import client_environment
 from .permission_modes import (CLAUDE_MODES, codex_effective_mode, codex_modes, codex_options, is_legacy_yolo,
                                legacy_mode, requested_mode, selected_mode, selection, validate_mode)
-from .store import CoordinationError, CoordinationStore
+from .store import CoordinationError, CoordinationStore, _json_scopes
 from .browser_queue import BrowserMessageQueue
 from .thread_inventory import WAKE_PAUSES, has_table, wake_fields
 from .inventory_projection import entity_tag, list_card
@@ -1009,10 +1009,7 @@ class BrowserSessions:
             self.message_delivery.finish_turn(thread_id, turn.get('id'), completed=status == 'completed')
             self.store.threads.finish_turn(thread_id, turn_id=turn.get("id"), status=status,
                                            occurred_at=params.get("turn_observed_at"))
-            session = self.store.get_session(thread_id)
-            unfinished = session["write_scope"] or session["scope_required"] or session["activity"] in {"implementing", "validating", "planning", "waiting"}
-            if not self._touch_turn(thread_id, turn.get("id"), active=False,
-                                    activity="waiting" if unfinished else "idle"):
+            if not self._touch_turn(thread_id, turn.get("id"), active=False):
                 return
             if unsuccessful and not deliberate:
                 notify_agent_failure(self.store, thread_id, event_key=["turn", turn.get("id")],
@@ -1044,9 +1041,18 @@ class BrowserSessions:
                                          stage="disconnect", error=reason, turn_id=turn_id)
             self.store.end_session(identity)
 
-    def _touch_turn(self, thread_id, turn_id, *, active, activity=None):
+    def _touch_turn(self, thread_id, turn_id, *, active):
         """A retried notification must never clear or revive another turn."""
         with self.store._connection() as db:
+            activity = None
+            if not active:
+                row = db.execute("SELECT write_scope_json, scope_requested_at, activity FROM sessions WHERE session_id = ?",
+                                 (thread_id,)).fetchone()
+                if row is None:
+                    raise CoordinationError(f"Session {thread_id} is not registered.")
+                unfinished = (_json_scopes(row["write_scope_json"]) or row["scope_requested_at"] is not None
+                              or row["activity"] in {"implementing", "validating", "planning", "waiting"})
+                activity = "waiting" if unfinished else "idle"
             return bool(db.execute("""UPDATE sessions SET last_seen_at = ?,
                 ended_at = CASE WHEN ? THEN NULL ELSE ended_at END,
                 activity = COALESCE(?, activity), turn_active = ? WHERE session_id = ?

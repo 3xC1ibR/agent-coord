@@ -234,7 +234,14 @@ class ThreadStore:
 
     def ensure(self, session_id: str, *, project_cwd: str | None = None,
                creation_title: str | None = None) -> dict:
-        session = self.store.get_session(session_id)
+        self._ensure_record(session_id, project_cwd=project_cwd, creation_title=creation_title)
+        return self.get(session_id)
+
+    def _ensure_record(self, session_id, *, project_cwd=None, creation_title=None):
+        with self.store.reading(), self.store._connection() as db:
+            session = db.execute("SELECT cwd, name, bead_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        if session is None:
+            raise CoordinationError(f"Session {session_id} is not registered.")
         launch_directory = str(Path(project_cwd or session["cwd"]).expanduser().resolve())
         with self.store._connection() as db:
             existing = db.execute("SELECT project_id, project_cwd FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
@@ -265,7 +272,6 @@ class ThreadStore:
                                   (session_id, session["bead_id"], link_project)).fetchone()
                 if link is None or link["label"] != session["bead_id"]:
                     self._save_link(db, session_id, ("bead", session["bead_id"], session["bead_id"], link_project))
-        return self.get(session_id)
 
     def _read(self, db, row, *, history=False, inventory=None):
         row = dict(row)
@@ -577,7 +583,7 @@ class ThreadStore:
 
     def start_turn(self, session_id: str, *, prompt=None, turn_id=None, notification_context=None, occurred_at=None) -> None:
         from .thread_control import cancel_pending
-        self.ensure(session_id)
+        self._ensure_record(session_id)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM work_threads WHERE thread_id = ?", (session_id,)).fetchone()
