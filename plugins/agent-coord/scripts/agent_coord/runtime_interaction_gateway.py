@@ -1126,6 +1126,8 @@ class VisitHandler(GatewayHandler):
     def post(self, parsed, **kwargs):
         if not self.permitted_origin() or self.path != BROWSER + "activity/events":
             return self.json(403, {"error": "Visit reporting requires the local app."})
+        if self.gateway.stop.is_set():
+            return self.json(503, {"error": "The update listener is retiring."})
         return super().post(parsed, browser_token=self.gateway.visit_token)
 
     def do_GET(self):

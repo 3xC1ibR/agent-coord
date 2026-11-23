@@ -63,6 +63,8 @@ class VisitTransportTests(unittest.TestCase):
         self.assertEqual(result[0], 403)
         self.assertNotIn("Access-Control-Allow-Origin", result[1])
         self.assertEqual(self.send_visit(self.event("second"), **{"X-Agent-Coord-Token":self.g.token})[0], 403)
+        self.g.stop.set()
+        self.assertEqual(self.send_visit(self.event("retired"))[0], 503)
 
     def test_native_receipts_preserve_attribution_consent_scope_clear_and_stop(self):
         started = self.event("visit-one")
