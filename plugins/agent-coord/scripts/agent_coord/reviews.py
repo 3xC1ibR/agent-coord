@@ -374,6 +374,8 @@ class ReviewRuntime:
             db.execute("UPDATE review_runs SET completion_id=? WHERE id=?", (receipt, run["id"]))
 
     def cancel(self, thread_id, *, reason="You stopped the review.", state="cancelled"):
+        if not self.active(thread_id):
+            return False
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             runs = [dict(r) for r in db.execute("SELECT * FROM review_runs WHERE (owner_id=? OR critic_id=?) AND state IN ('active','creating')", (thread_id, thread_id))]

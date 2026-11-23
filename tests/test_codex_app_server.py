@@ -128,6 +128,25 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=identity))
         return identity
 
+    def test_composer_provider_selection_reads_only_routing_fields(self):
+        identity = self.create()
+        with patch("agent_coord.execution_state.read_many", side_effect=AssertionError("loaded execution details")):
+            self.assertIs(self.sessions._rpc(identity), self.sessions.rpc)
+        with self.assertRaisesRegex(CoordinationError, "not registered"):
+            self.sessions._rpc("missing-session")
+
+    def test_archived_send_is_rejected_without_rendering_thread_metadata(self):
+        identity = self.create()
+        self.store.threads.update(identity, attention="archived")
+        with patch.object(self.store.threads, "_read", side_effect=AssertionError("loaded thread details")):
+            with self.assertRaisesRegex(CoordinationError, "Reopen this thread"):
+                self.sessions.send(identity, {"message": "Follow up"})
+
+    def test_superseding_an_absent_review_needs_no_write_transaction(self):
+        identity = self.create()
+        with self.store.reading():
+            self.assertFalse(self.sessions.reviews.cancel(identity))
+
     def usage_event(self, thread_id, total, *, persist=True, **kwargs):
         self.sessions._event({"method": "thread/tokenUsage/updated", "params": {
             "threadId": thread_id, "tokenUsage": {"total": {"inputTokens": total-10,

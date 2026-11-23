@@ -533,7 +533,10 @@ class BrowserSessions:
 
     def _rpc(self, thread_id: str):
         # Saved terminal Codex threads can be read before browser adoption/fork.
-        session = self.store.get_session(thread_id)
+        with self.store.reading(), self.store._connection() as db:
+            session = db.execute("SELECT cwd, client FROM sessions WHERE session_id=?", (thread_id,)).fetchone()
+        if session is None:
+            raise CoordinationError(f"Session {thread_id} is not registered.")
         if not matches_workspace(session["cwd"], self.cwd):
             raise CoordinationError("Session not found in this workspace.")
         return self._provider(session["client"])
@@ -2166,7 +2169,7 @@ class BrowserSessions:
                 # Recover a missed completion before rejecting a setting change.
                 # An idle selection never requires a complete provider transcript.
                 record = self.read(thread_id)["session"]
-        if self.store.threads.get(thread_id)["attention"] == "archived":
+        if self.store.threads.is_archived(thread_id):
             raise CoordinationError("Restore this session before changing its settings.")
         with self.lock:
             if thread_id in self.active:
@@ -2417,8 +2420,7 @@ class BrowserSessions:
             # Admission needs only saved placement. Projecting the full card
             # here duplicates usage, ownership, supervision and checkpoint
             # reads; the response projects it after reconciliation below.
-            attention = self.store.threads.get(thread_id)["attention"]
-            if record["archived"] or attention == "archived":
+            if record["archived"] or self.store.threads.is_archived(thread_id):
                 thread = self._read_thread(thread_id)
             elif thread_id not in self.loaded:
                 self._resume_thread(thread_id, record)
@@ -2698,7 +2700,7 @@ class BrowserSessions:
                 # organization, while Stop/failure/queued user input remain gates.
                 if not self.inbox_wake.can_submit(thread_id):
                     raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
-            elif self.store.threads.get(thread_id)["attention"] == "archived":
+            elif self.store.threads.is_archived(thread_id):
                 raise CoordinationError("Reopen this thread before sending a message.")
             if not automatic and not recovery and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
                 expected_turn = None
@@ -2721,7 +2723,7 @@ class BrowserSessions:
                 recovery()
             if automatic and not self.inbox_wake.can_submit(thread_id):
                 raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
-            if automatic and self.store.threads.get(thread_id)["attention"] == "archived":
+            if automatic and self.store.threads.is_archived(thread_id):
                 # Work queued before a subsequent Close is retained; reopen if
                 # it is now eligible to run. A stopped/uncertain wake cannot get here.
                 self.store.threads.update(thread_id, attention="now")

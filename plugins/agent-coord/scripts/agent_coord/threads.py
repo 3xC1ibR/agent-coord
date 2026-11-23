@@ -361,6 +361,13 @@ class ThreadStore:
                 raise CoordinationError("Work thread not found.")
             return self._read(db, row, history=history)
 
+    def is_archived(self, thread_id: str) -> bool:
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT attention FROM work_threads WHERE thread_id=?", (thread_id,)).fetchone()
+        if row is None:
+            raise CoordinationError("Work thread not found.")
+        return row[0] == "archived"
+
     def scratchpad(self, thread_id: str, text=UNSET) -> dict:
         """Keep user notes separate from agent context and thread activity."""
         if text is not UNSET and (not isinstance(text, str) or len(text) > 100_000):
