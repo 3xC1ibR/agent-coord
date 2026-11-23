@@ -43,8 +43,8 @@ function setup() {
       c.$("timeline").replaceChildren(element("article", c.state.detail.thread.turns[0]?.items[0]?.text));
     },
     scheduleTimelineRender() { c.renderTimeline(); c.renderStatus(); },
-    api: async (path, body) => {
-      calls.push({path, body});
+    api: async (path, body, options) => {
+      calls.push({path, body, options});
       if (body) return {};
       const id = path.split("/")[1];
       const detail = replies.get(id) || fixture(id);
@@ -446,6 +446,20 @@ test("a new page subscribes from its configuration snapshot and supports older b
   delete c.state.config.eventCursor;
   c.connect();
   assert.equal(c.events.url, "/api/browser/events?after=0&completion_after=17");
+});
+
+test("opening an unknown conversation projects its thread and history in one read", async () => {
+  const c = setup();
+  c.state.config.conversationSnapshotControls = true;
+  const detail = fixture("one");
+  detail.work_thread.close_when_done = {status: "queued"};
+  c.replies.set("one", detail);
+  await c.select("one");
+  const reads = c.calls.filter(call => !call.body && ["threads/one", "sessions/one"].includes(call.path));
+  assert.deepEqual(reads.map(call => call.path), ["sessions/one"]);
+  assert.equal(reads[0].options.headers["X-Agent-Coord-Thread-Controls"], "1");
+  assert.equal(reads[0].options.headers["X-Agent-Coord-History-View"], "recent");
+  assert.equal(c.state.detail.close_when_done.status, "queued");
 });
 
 test("an SSE reset invalidates an outstanding cached refresh", async () => {

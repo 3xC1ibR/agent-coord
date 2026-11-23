@@ -1239,14 +1239,22 @@ async function refreshDetail({markSeen = true} = {}) {
     const sessionOptions = entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
     let work, detail;
     try {
-      // A known app conversation needs both reads; issue them together so
-      // opening waits for the slower one, not their sum.
-      const known = entry.detail?.work_thread || state.sessions?.find(thread => thread.thread_id === id);
-      const session = known?.browser_session || known?.can_read_history ? api(sessionPath(id), undefined, sessionOptions) : null;
-      session?.catch(() => {}); // Observed below, or superseded by the thread read's failure.
-      work = await api(threadPath(id), undefined, options);
-      detail = work.browser_session || work.can_read_history ? await (session || api(sessionPath(id), undefined, sessionOptions)) : {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false,
-        coordinationMessages: (await api(threadPath(id) + "/messages", undefined, options)).data};
+      if (state.config?.conversationSnapshotControls) {
+        detail = await api(sessionPath(id), undefined, {...sessionOptions,
+          headers: {...sessionOptions.headers, "X-Agent-Coord-Thread-Controls": "1"}});
+        work = detail.work_thread;
+      } else {
+        // Older backends expose close status only on the separate thread route.
+        const known = entry.detail?.work_thread || state.sessions?.find(thread => thread.thread_id === id);
+        const session = known?.browser_session || known?.can_read_history ? api(sessionPath(id), undefined, sessionOptions) : null;
+        session?.catch(() => {}); // Observed below, or superseded by the thread read's failure.
+        work = await api(threadPath(id), undefined, options);
+        if (work.browser_session || work.can_read_history) detail = await (session || api(sessionPath(id), undefined, sessionOptions));
+      }
+      if (!work.browser_session && !work.can_read_history) {
+        const coordinationMessages = detail?.coordinationMessages ?? (await api(threadPath(id) + "/messages", undefined, options)).data;
+        detail = {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false, coordinationMessages};
+      }
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
       entry.refreshError = error.message || String(error);

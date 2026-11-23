@@ -581,6 +581,15 @@ def _handler(
             names = {"127.0.0.1", "localhost", "[::1]", f"[{bound}]" if ":" in bound else bound}
             return host in {f"{name}:{port}" for name in names} or (port == 80 and host in names)
 
+        def _check_thread_workspace(self, thread_id):
+            # Sidebar panels need the saved workspace boundary. Building a
+            # live thread card here waits on unrelated provider checkpoints.
+            with store.reading(), store._connection() as db:
+                row = db.execute("""SELECT s.cwd FROM work_threads t
+                    JOIN sessions s ON s.session_id=t.thread_id WHERE t.thread_id=?""", (thread_id,)).fetchone()
+            if row is None or not matches_workspace(row["cwd"], browser_sessions.cwd):
+                raise CoordinationError("Work thread not found in this workspace.")
+
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -597,6 +606,7 @@ def _handler(
                                           "askReplies": True,
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
+                                          "conversationSnapshotControls": True,
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
                 from .database_writer import performance_snapshot
@@ -720,8 +730,10 @@ def _handler(
             elif route.startswith("threads/") and route.endswith("/close-when-done"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:-16])
-                browser_sessions.work_thread(thread_id, history=False)
-                self._json(HTTPStatus.OK, ThreadControl(store).status(thread_id))
+                self._check_thread_workspace(thread_id)
+                with store.reading():
+                    close_status = ThreadControl(store).status(thread_id)
+                self._json(HTTPStatus.OK, close_status)
             elif route.startswith("threads/") and route.endswith("/agent-tree"):
                 from .agent_tree import agent_tree
                 self._json(HTTPStatus.OK, agent_tree(browser_sessions, unquote(route[8:-11])))
@@ -730,15 +742,19 @@ def _handler(
                 self._json(HTTPStatus.OK, close_plan(browser_sessions, unquote(route[8:-11])))
             elif route.startswith("threads/") and route.endswith("/scratchpad"):
                 thread_id = unquote(route[8:-11])
-                browser_sessions.work_thread(thread_id, history=False)
-                self._json(HTTPStatus.OK, store.threads.scratchpad(thread_id))
+                self._check_thread_workspace(thread_id)
+                with store.reading():
+                    scratchpad = store.threads.scratchpad(thread_id)
+                self._json(HTTPStatus.OK, scratchpad)
             elif route.startswith("threads/") and route.endswith("/sidecars"):
                 thread_id = unquote(route[8:-9])
-                browser_sessions.work_thread(thread_id, history=False)
+                self._check_thread_workspace(thread_id)
                 from .app_control import AppControl
                 control = AppControl(store)
                 pending = control.sidecar_request_ids(thread_id)
-                self._json(HTTPStatus.OK, {"watches": browser_sessions.sidecars.watches.list(thread_id),
+                with store.reading():
+                    watches = browser_sessions.sidecars.watches.list(thread_id)
+                self._json(HTTPStatus.OK, {"watches": watches,
                                          "requests": [control.status(key) for key in pending]})
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
@@ -759,6 +775,10 @@ def _handler(
                     raise CoordinationError("History view must be complete or recent.")
                 with store.reading():
                     result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
+                    if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
+                        from .thread_control import ThreadControl
+                        work = result["work_thread"]
+                        work["close_when_done"] = ThreadControl(store).status(work["thread_id"])
                 self._json(HTTPStatus.OK, result)
             elif route == "events":
                 try:

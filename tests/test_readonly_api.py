@@ -166,6 +166,29 @@ class ReadOnlyHTTPTests(unittest.TestCase):
                 self.assertTrue(all(error and "readonly" in error.lower() for error in rejections[before:]), rejections)
         self.assertEqual(self.store.threads.get(self.identity)["title"], "Saved conversation")
 
+    def test_conversation_snapshot_includes_close_status_in_one_thread_projection(self):
+        headers = {"X-Agent-Coord-Thread-Controls": "1", "X-Agent-Coord-History-View": "recent"}
+        status, work = self.request("/api/browser/threads/" + self.identity)
+        self.assertEqual(status, 200)
+        with patch.object(self.sessions, "work_thread", wraps=self.sessions.work_thread) as project:
+            status, detail = self.request("/api/browser/sessions/" + self.identity, headers=headers)
+        self.assertEqual(status, 200, detail)
+        self.assertEqual(detail["work_thread"]["close_when_done"], work["close_when_done"])
+        self.assertEqual(detail["thread"]["view"], "recent")
+        project.assert_called_once_with(self.identity)
+
+    def test_panel_reads_do_not_wait_for_the_live_card_and_enforce_the_workspace(self):
+        routes = ["scratchpad", "sidecars", "close-when-done"]
+        with patch.object(self.sessions, "work_thread", side_effect=AssertionError("Unnecessary card projection")):
+            for route in routes:
+                with self.subTest(route=route):
+                    self.assertEqual(self.request(f"/api/browser/threads/{self.identity}/{route}")[0], 200)
+            with tempfile.TemporaryDirectory() as outside, patch.object(self.sessions, "cwd", outside):
+                for route in routes:
+                    with self.subTest(route=route, workspace="different"):
+                        status, response = self.request(f"/api/browser/threads/{self.identity}/{route}")
+                        self.assertGreaterEqual(status, 400, response)
+
     def test_metadata_rejects_oversized_batches(self):
         query = urllib.parse.urlencode({"id": [str(index) for index in range(201)]}, doseq=True)
         status, result = self.request("/api/browser/threads/metadata?" + query)
