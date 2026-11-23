@@ -286,8 +286,8 @@ class CoordinatorProjection:
         return self.attach(channel, result["pid"], callback, provider=provider, thread_id=thread_id)
 
     def prepare_checkpoint(self, *, inline=False):
-        from .history_persistence import prepare_history, stage_history
-        prepared = {identity: prepare_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
+        from .history_persistence import prepare_projected_history, stage_history
+        prepared = {identity: prepare_projected_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
                     for identity in self.sessions.dirty_histories if identity in self.sessions.histories}
         for identity, history in prepared.items():
             # This cache is populated only after the root transaction commits.

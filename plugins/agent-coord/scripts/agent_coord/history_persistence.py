@@ -130,6 +130,34 @@ def prepare_history(history, *, previous=None):
     return _finish_steps(prepare_history_steps(history, previous=previous))
 
 
+def prepare_projected_history(history, *, previous=None):
+    """An inline coordinator checkpoint has no chunk documents to stage or index."""
+    if previous is None or previous.source_bytes <= INLINE_BYTES:
+        # A provider can append megabytes to a formerly small history in one
+        # event. Bound the probe before asking the JSON encoder for a complete
+        # string. The final canonical length decides the storage format.
+        pending, remaining = [history], INLINE_BYTES
+        while pending and remaining >= 0:
+            value = pending.pop()
+            if isinstance(value, str):
+                remaining -= len(value)
+            elif isinstance(value, (dict, list, tuple)):
+                remaining -= len(value)
+                if remaining >= 0:
+                    if isinstance(value, dict):
+                        pending.extend(value.keys())
+                        pending.extend(value.values())
+                    else:
+                        pending.extend(value)
+            elif isinstance(value, int):
+                remaining -= value.bit_length() // 4
+        if remaining >= 0:
+            serialized = _json(history)
+            if len(serialized) <= INLINE_BYTES:
+                return PreparedHistory(serialized, {}, len(serialized), encoded_document_bytes=len(serialized))
+    return prepare_history(history, previous=previous)
+
+
 def prepare_history_steps(history, *, previous=None):
     """Yield between documents so one archive does not monopolize saving."""
     chunks, documents, durable_chunks = {}, {}, {}

@@ -109,6 +109,25 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pack(object())
 
+    def test_inline_checkpoint_skips_archive_manifests_and_switches_losslessly_at_the_limit(self):
+        from agent_coord import history_persistence as storage
+        history = {"id": self.identity, "turns": [
+            {"id": str(i), "status": "completed", "items": [{"type": "agentMessage", "text": "finished"}]}
+            for i in range(256)]}
+        self.sessions.histories[self.identity] = history
+        self.sessions.dirty_histories.add(self.identity)
+        with patch.object(storage, "prepare_history", side_effect=AssertionError("Prepared an unused archive")):
+            self.projection.checkpoint()
+        with self.store.reading(), self.store._connection() as db:
+            serialized = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (self.identity,)).fetchone()[0]
+            self.assertEqual(serialized, storage._json(history))
+        # JSON escaping can put even a short input over the inline byte limit.
+        history["turns"][-1]["items"][0]["text"] = "\x00" * (storage.INLINE_BYTES // 6)
+        self.sessions.dirty_histories.add(self.identity)
+        self.projection.checkpoint()
+        self.assertTrue(self.projection.prepared_histories[self.identity].chunks)
+        self.assertEqual(storage.read_history(self.store, self.identity), history)
+
     def test_next_checkpoint_recognizes_blocks_from_a_published_history(self):
         from agent_coord import history_persistence as storage
         item = {"id": "output", "type": "agentMessage", "text": "initial " * 90000}
