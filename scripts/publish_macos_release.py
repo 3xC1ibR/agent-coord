@@ -28,6 +28,8 @@ ACCOUNT_ID = "af320d6747244dea99edc8895d3d00f4"
 CURRENT_KEY = "releases/current.json"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "desktop/macos"))
 import sparkle
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_workload_receipt
 
 
 def digest(stream) -> str:
@@ -261,7 +263,11 @@ def verify_download(key: str, path: Path) -> None:
             raise ValueError(f"Public download checksum mismatch: {key}")
 
 
-def publish(files: list[Path], release: dict, r2: R2, *, promote_current: bool = False) -> None:
+def publish(files: list[Path], release: dict, r2: R2 | None = None, *, promote_current: bool = False,
+            receipt_wait_seconds: int = 0) -> None:
+    release_workload_receipt.require_release_receipts(release, receipt_wait_seconds)
+    if r2 is None:
+        r2 = R2()
     prefix = f"releases/{release['version']}/"
     with tempfile.TemporaryDirectory(prefix="ribbon-release-") as directory:
         manifest = Path(directory) / "release.json"
@@ -296,13 +302,15 @@ def main() -> None:
     parser.add_argument("--promote-current", action="store_true", help="Advance the website release after every artifact verifies")
     parser.add_argument("--require-updates", action="store_true", help="Reject releases without signed Sparkle artifacts")
     parser.add_argument("--update-public-key", help="Trusted public key for archive and feed verification")
+    parser.add_argument("--receipt-wait-seconds", type=int, default=0,
+                        help="Seconds to wait for the authenticated operator workload receipts")
     args = parser.parse_args()
     if args.promote_current and not args.publish:
         parser.error("--promote-current requires --publish")
     files, release = release_files(args.directory, args.version, args.commit, args.channel,
-                                   require_updates=args.require_updates, update_public_key=args.update_public_key)
+                                   require_updates=args.require_updates or args.publish, update_public_key=args.update_public_key)
     if args.publish:
-        publish(files, release, R2(), promote_current=args.promote_current)
+        publish(files, release, promote_current=args.promote_current, receipt_wait_seconds=args.receipt_wait_seconds)
     print(json.dumps({"published": args.publish, **release}, indent=2))
 
 

@@ -200,7 +200,11 @@ jobs:
     needs: [validate, build]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
     # Configure a required reviewer on this environment before enabling uploads.
     # Download and test the retained DMGs before approving this job.
     environment:
@@ -218,6 +222,7 @@ jobs:
           merge-multiple: true
       - name: Upload immutable releases and verify public downloads
         env:
+          GH_TOKEN: ${{ github.token }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_EC2_METADATA_DISABLED: 'true'
@@ -232,7 +237,7 @@ jobs:
           python3 scripts/publish_macos_release.py --directory build/release \
             --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
             --require-updates --update-public-key "$SPARKLE_PUBLIC_KEY" \
-            --publish --promote-current | tee release-result.json
+            --publish --promote-current --receipt-wait-seconds 9000 | tee release-result.json
           {
             echo '### Published macOS downloads'
             echo

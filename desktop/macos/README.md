@@ -180,7 +180,9 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
    Gatekeeper, first launch, and the native UI on another Mac. Test Intel on
    Intel hardware when available; an Intel runner does not cover every
    supported macOS version.
-3. Approve `macos-release`. The publisher validates both complete artifact sets,
+3. Run the private workload on the operator Mac for each architecture using
+   the procedure below. Approve `macos-release`. The publisher requires both
+   authenticated results for this attempt, validates both complete artifact sets,
    checks their recorded source commit, and uploads versioned files. It then
    downloads them through the public HTTPS host and verifies every checksum.
    Only after all checks pass does it upload `releases/X.Y.Z/release.json`.
@@ -213,8 +215,47 @@ python3 scripts/publish_macos_release.py --directory build/release \
   --version 0.1.1 --commit <full-source-commit-sha>
 ```
 
-Adding `--publish` performs the public upload using `AWS_ACCESS_KEY_ID` and
-`AWS_SECRET_ACCESS_KEY`. Use the protected workflow for normal releases.
+Public uploads require signed updates, both verified operator workload receipts
+and the R2 credentials supplied by the protected workflow.
+
+### Operator Mac workload verification
+
+Use a clean checkout of the exact release commit, Python 3.12, the existing
+owner-authenticated GitHub CLI, and the signed previous application for each
+architecture. Supply a private, consistent offline backup of the operator
+workload with representative saved conversation histories. Keep the backup,
+browser observations, and detailed result outside Git. Each invocation downloads
+that architecture’s artifacts directly from the specified release run, verifies
+that the installer and the update contain the same Developer ID-signed application,
+exercises the extracted application in isolation, and
+compares its resource digest with the candidate backend actually exercised.
+
+```sh
+python3.12 scripts/release_workload_receipt.py --run "$release_run" \
+  --architecture arm64 --previous "$previous_arm_app" --snapshot "$offline_database" \
+  --report "$private_directory/arm64-result.json" --affected-report "$affected_arm_report"
+python3.12 scripts/release_workload_receipt.py --run "$release_run" \
+  --architecture x86_64 --previous "$previous_intel_app" --snapshot "$offline_database" \
+  --report "$private_directory/x86_64-result.json" --affected-report "$affected_intel_report"
+```
+
+Run these serially. On the Apple Silicon operator Mac, arm64 measures native
+execution and x86_64 measures the signed Intel runtime under Rosetta. The
+observed process architecture must match the artifact. Pass
+`--playwright-module` when the installed browser automation module needs an
+explicit location. For an upgrade from affected build 63, omit
+`--affected-report` to exercise its regression directly. For subsequent
+healthy predecessors, preserve the private build 63 reproduction separately for
+each architecture. Each report path must be unused.
+
+A successful invocation creates a GitHub commit status as repository owner
+(account ID 111322275). Only a fixed success description, a GitHub run link,
+and a context derived from the signed asset identities are transmitted. The
+publisher verifies the authenticated creator and latest status for each
+architecture against the commit, build, run, attempt and hashes of the signed
+update ZIP and DMG. After a rerun, rerun both private gates for the new attempt.
+The publication step waits up to 150 minutes for the two receipts. If either
+gate fails, retain its private report for diagnosis.
 
 ## Build and install locally
 

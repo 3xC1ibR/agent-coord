@@ -23,6 +23,10 @@ COMMIT = "a" * 40
 
 class MacOSReleaseTests(unittest.TestCase):
     def setUp(self):
+        # Exercise publication against fake R2. Independent tests exercise receipt authorization.
+        receipts = mock.patch.object(release.release_workload_receipt, "require_release_receipts")
+        receipts.start()
+        self.addCleanup(receipts.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
