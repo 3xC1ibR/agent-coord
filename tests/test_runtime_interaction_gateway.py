@@ -127,6 +127,47 @@ class GatewayTests(unittest.TestCase):
         self.assertNotEqual(self.http("POST", endpoint, {**body, "requestId":"stopped"}, auth)[0], 200)
         self.assertEqual(seen, [body])
 
+    def test_untargeted_input_waits_for_earlier_native_start_without_choosing_a_turn(self):
+        import hashlib
+        from agent_coord.runtime_message_intake import OrdinaryComposerReceiver
+        self.current.update(instance="new", payload=self.g.payload)
+        self.g.backend = (*self.g.backend[:2], "new", self.g.payload)
+        self.g.terminal = self.g._authority(self.current)
+        gateway.runtime.atomic_json(self.g.runtime_directory / "discovery.json", self.current)
+        self.g.fence = {**self.request, "state": "draining"}
+        def authorize(thread, body, *, receiver_owns_turn=False):
+            self.authorize_thread(thread)
+            if body["message"] == "approval":
+                raise gateway.CoordinationError("A decision is pending.")
+            if not receiver_owns_turn:
+                raise gateway.CoordinationError("The active turn changed. Refresh before sending.")
+        self.g.views.authorize_composer = authorize
+        received = []
+        def forward(thread, body):
+            received.append(body)
+            data = json.dumps({"body":{"message":body["message"]},"queued":False},sort_keys=True,separators=(",",":"))
+            with closing(sqlite3.connect(self.g.database)) as db:
+                db.execute("INSERT INTO browser_submission_receipts VALUES(?,?,?,?,1)",
+                           (thread,body["requestId"],"completed",hashlib.sha256(data.encode()).hexdigest()))
+                db.commit()
+        self.g.receiver = OrdinaryComposerReceiver(self.g.database, "new", self.g.payload, forward)
+        auth = {"X-Agent-Coord-Token":"browser"}
+        endpoint = "/api/browser/sessions/one/messages"
+        first = {"message":"starting","requestId":"first"}
+        second = {"message":"later","requestId":"second"}
+        self.g.intake.accept("one", first)
+        for _ in range(2):
+            status, reply = self.http("POST", endpoint, second, auth)
+            self.assertEqual((status, reply.get("transferSubmission", {}).get("state")), (202, "queued"))
+        self.assertEqual(self.http("POST", endpoint, {**second,"requestId":"explicit","expectedTurnId":"old"}, auth)[0],409)
+        self.assertEqual(self.http("POST", endpoint, {**second,"requestId":"blocked","message":"approval"}, auth)[0],409)
+        self.assertEqual(received, [])
+        for _ in range(2):
+            self.g.intake.drain_to("one", self.g.receiver, preflight=self.g._verify_delivery)
+        self.assertEqual(received, [first, second])
+        self.assertEqual(self.http("POST", endpoint, second, auth)[1]["transferSubmission"]["state"],"committed")
+        self.assertFalse(self.g.intake.pending_threads())
+
     def test_concurrent_arrivals_keep_fifo_while_predecessor_is_being_authorized(self):
         from concurrent.futures import ThreadPoolExecutor
         import time

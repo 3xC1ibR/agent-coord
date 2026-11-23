@@ -71,6 +71,7 @@ async function api(path, body, requestOptions = {}) {
       if (viewMutation) ++listRequest;
       if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status, code: result.code});
       if (response.headers?.get("X-Ribbon-Transfer-Read-Source") === "serving") result.transferReadSource = "serving";
+      if (response.headers?.get("X-Ribbon-Untargeted-Input") === "1") result.acceptsUntargetedInput = true;
       if (entity) Object.assign(entity, {tag: response.headers?.get("ETag") || null, value: result});
       return result;
     } catch (error) {
@@ -1648,12 +1649,14 @@ function renderStatus() {
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session && !(!state.detail && state.detailRefreshing);
   renderDetailRefresh();
-  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (!dispatcher && running && !state.detail.activeTurn) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
-  const sendAction = dispatcher ? "Send request" : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
+  const starting = !dispatcher && running && !state.detail.activeTurn;
+  const ordinaryStartingInput = starting && state.detail.acceptsUntargetedInput && ["codex", "claude"].includes(work?.client);
+  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
+  const sendAction = dispatcher ? "Send request" : running && !ordinaryStartingInput ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
   $("send").setAttribute?.("aria-label", sendAction);
   $("send").title = sendAction + " (Enter)";
   $("queue").hidden = dispatcher || !running || !["codex", "claude", "muse"].includes(work?.client);
-  $("queue").disabled = $("send").disabled;
+  $("queue").disabled = $("send").disabled || starting;
   $("message").disabled = archived || !!state.transferLocks?.has(state.selected);
   $("stop").hidden = !running;
   $("close-thread").textContent = archived ? "Reopen" : running || ["running", "needs input"].includes(work?.status) ? "Stop and close" : "Close thread";
@@ -3776,14 +3779,16 @@ async function sendMessage(mode = "steer") {
   const draftId = draft?.draftId || id;
   const ticket = state.rollUp?.ticket(id);
   const images = state.attachments?.snapshot(draftId) || [];
+  const ordinaryStartingInput = mode === "steer" && detail?.acceptsUntargetedInput &&
+    ["codex", "claude"].includes(detail.work_thread?.client) && !text.trimStart().startsWith("/");
   if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
-      (!dispatcher && !reviewing && detail.running && !detail.activeTurn) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
+      (!dispatcher && !reviewing && detail.running && !detail.activeTurn && !ordinaryStartingInput) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
   const mentions = state.mentions?.snapshot(draftId, text) || [];
   const body = {message: text};
   if (mentions.length) body.mentions = mentions;
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-  if (!dispatcher && !reviewing && detail.running && mode !== "queue") body.expectedTurnId = detail.activeTurn;
+  if (!dispatcher && !reviewing && detail.running && detail.activeTurn && mode !== "queue") body.expectedTurnId = detail.activeTurn;
   (state.sending ||= new Set()).add(sendKey); renderStatus();
   let echo = null;
   const showOutgoing = () => {

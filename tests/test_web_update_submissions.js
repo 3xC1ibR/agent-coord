@@ -220,3 +220,23 @@ test("the ordinary composer keeps the 202 queued and a concurrent stream confirm
     assert.equal(input.value, "");
   }
 });
+
+test("Enter can submit an ordinary message behind a starting turn on a verified receiver", async () => {
+  for (const [ready, active, expected] of [[true,null,null],[true,"current","current"],[false,null,false]]) {
+    const input = {value:"ordinary message"};
+    const detail = {...history(), acceptsUntargetedInput:ready, running:true, activeTurn:active,
+      work_thread:{client:"codex",browser_session:true,attention:"now"}};
+    const state = {config:{interactionContinuity:true}, selected:"thread", detail, closing:new Set(),
+      commandFeedback:new Map(), drafts:new Map(), outgoing:outgoing()};
+    const requests = [];
+    const c = vm.createContext({state, document:{}, $:()=>input, sessionPath:id=>"sessions/"+id,
+      DispatchUI:{requestKey:()=>"request"}, conversationEntry:()=>({detail}), sessionStorage:{removeItem(){}},
+      renderStatus(){}, isSessionDraft:()=>false, refreshList:async()=>{}, refreshDetail:async()=>{},showError(){},
+      api:async(path,body)=>{requests.push(body);return {transferSubmission:receipt("request",1)};}});
+    vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
+    await c.sendMessage();
+    assert.equal(requests.length, expected === false ? 0 : 1);
+    if (expected === null) assert.equal("expectedTurnId" in requests[0], false);
+    if (active) assert.equal(requests[0].expectedTurnId, active);
+  }
+});

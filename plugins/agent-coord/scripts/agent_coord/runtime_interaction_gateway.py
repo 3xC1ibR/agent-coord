@@ -386,9 +386,18 @@ class InteractionGateway:
         self.verify_origin(self.backend, require_admission=True)
         self.views.authorize_composer(thread, body, receiver_owns_turn=True)
         submission = self.intake.accept(thread, body, serving_authority=receiver.authority)
-        if submission is None:
-            return None
+        waiting = submission is None
+        if waiting:
+            # An untargeted ordinary message can wait in FIFO order while the
+            # earlier native start obtains its turn ID. A supplied target
+            # still needs the saved-turn check before accepting deferred work.
+            if "expectedTurnId" in body:
+                return None
+            self._before_transport(self.terminal)
+            submission = self.intake.accept(thread, body)
         self.receipt_completed(thread)
+        if waiting:
+            return 202, {"transferSubmission": submission}
         try:
             self.intake.drain_to(thread, receiver, preflight=self._verify_delivery)
         except TEMPORARY:
@@ -921,12 +930,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 gateway.cache[route] = raw
             if route.startswith("sessions/") and "/" not in route[len("sessions/"):]:
                 records = gateway.intake.visible(unquote(route[len("sessions/"):]))
+                receiver_ready = _serving_candidate(gateway)
                 if records:
                     result = json.loads(raw)
                     result.update(transferSubmissions=records, transferReadSource="serving")
+                    if receiver_ready:
+                        result["acceptsUntargetedInput"] = True
                     return self.json(status, result)
                 fields["X-Ribbon-Transfer-Read-Source"] = "serving"
-        useful = {k: v for k, v in fields.items() if k in {"ETag", "Server-Timing", "Cache-Control", "X-Ribbon-Transfer-Read-Source"}}
+                if receiver_ready:
+                    fields["X-Ribbon-Untargeted-Input"] = "1"
+        useful = {k: v for k, v in fields.items() if k in {"ETag", "Server-Timing", "Cache-Control",
+                                                          "X-Ribbon-Transfer-Read-Source", "X-Ribbon-Untargeted-Input"}}
         self.answer(status, raw, fields.get("Content-Type", "application/json"), useful)
 
     def dispatch_get(self, parsed):

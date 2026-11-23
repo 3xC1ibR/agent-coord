@@ -68,9 +68,9 @@ function recoverySetup() {
   c.action = fn => fn();
   c.sessionBusy = () => false;
   vm.runInContext(source.slice(source.indexOf("function renderDetailRefresh("), source.indexOf("function renderCloseWhenDone(")), c);
-  const predicate = source.split("\n").find(line => line.includes('$("send").disabled ='));
+  const predicate = source.slice(source.indexOf("  const starting = !dispatcher && running"), source.indexOf("  const sendAction ="));
   c.renderStatus = () => {
-    vm.runInContext('var running = !!state.detail?.running, work = state.detail?.work_thread, dispatcher = !!work?.dispatcher, archived = work?.attention === "archived";' + predicate, c);
+    vm.runInContext('var running = !!state.detail?.running, work = state.detail?.work_thread, dispatcher = !!work?.dispatcher, archived = work?.attention === "archived";{' + predicate + '}', c);
     c.renderDetailRefresh();
   };
   return c;

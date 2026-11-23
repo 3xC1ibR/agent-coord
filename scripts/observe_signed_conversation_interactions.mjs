@@ -225,7 +225,8 @@ async function sends() {
           window.__releaseComposer = {
             draft_matches: e.target.value === marker,
             selected_matches: state.selected === decodeURIComponent(location.hash.slice(1)),
-            detail_running: !!state.detail?.running, has_detail: !!state.detail, refreshing: !!state.detailRefreshing,
+            detail_running: !!state.detail?.running, active_turn_present: !!state.detail?.activeTurn,
+            accepts_untargeted_input: !!state.detail?.acceptsUntargetedInput, has_detail: !!state.detail, refreshing: !!state.detailRefreshing,
             read_pending: !!entry?.pending, opening_submission: !!entry?.openingSubmission,
             sending: !!state.sending?.has(state.selected), send_disabled: document.querySelector("#send").disabled,
             composer_hidden: document.querySelector("#composer").hidden, detail_pending_input: !!state.detail?.requests?.length,
