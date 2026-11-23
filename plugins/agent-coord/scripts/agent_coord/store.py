@@ -440,14 +440,16 @@ class _IdleConnection:
     def __init__(self) -> None:
         self.connection: _StoreConnection | None = None
         self.factory: Callable[[], Any] = lambda: None
+        self.file_identity: tuple[int, int] | None = None
         self.in_use = False
         self.closer: weakref.finalize | None = None
 
-    def keep(self, connection: _StoreConnection, factory: Any) -> None:
+    def keep(self, connection: _StoreConnection, factory: Any, file_identity: tuple[int, int]) -> None:
         self.discard()
         # Weak, so a replaced factory cannot keep its store alive.
         self.factory = weakref.ref(factory)
         self.connection = connection
+        self.file_identity = file_identity
         # Unlike __del__, this runs before garbage collection can finalize the
         # connection along with the store's reference cycle, and at exit.
         self.closer = weakref.finalize(self, connection.close)
@@ -456,6 +458,7 @@ class _IdleConnection:
         if self.closer is not None:
             self.closer()
         self.connection, self.closer = None, None
+        self.file_identity = None
         self.factory = lambda: None
 
 
@@ -734,6 +737,15 @@ class CoordinationStore:
         # the schema and loses SQLite's page cache during one request.
         slot = "reader" if reading else "holder"
         idle = getattr(self, "_idle_connections", None)
+        file_identity = self._database_file_identity()
+        if idle is not None:
+            # Detached readers can outlive an atomic database replacement.
+            # Retire both idle slots so a reader-only poll also releases an
+            # obsolete writer. Never close an enclosing active transaction.
+            for name in ("reader", "holder"):
+                cached = getattr(idle, name, None)
+                if cached is not None and not cached.in_use and cached.file_identity != file_identity:
+                    cached.discard()
         holder = None if idle is None else getattr(idle, slot, None)
         if idle is not None and holder is None:
             holder = _IdleConnection()
@@ -757,6 +769,9 @@ class CoordinationStore:
         fresh = connection is None
         if fresh:
             connection = self._connect()
+            if file_identity is None:
+                # The initial writer may have created the database.
+                file_identity = self._database_file_identity()
             if not nested and isinstance(connection, _StoreConnection):
                 connection.settings = (connection.execute("PRAGMA busy_timeout").fetchone()[0],
                                        connection.execute("PRAGMA foreign_keys").fetchone()[0])
@@ -778,7 +793,9 @@ class CoordinationStore:
             with (connection if transaction else nullcontext()):
                 yield connection
             reusable = (not nested and isinstance(connection, _StoreConnection)
-                        and connection.settings is not None and not connection.in_transaction)
+                        and connection.settings is not None and not connection.in_transaction
+                        and file_identity is not None
+                        and file_identity == self._database_file_identity())
         finally:
             if not nested:
                 holder.in_use = False
@@ -788,7 +805,7 @@ class CoordinationStore:
                         connection.end_statements()
                     if fresh:
                         if reusable:
-                            holder.keep(connection, factory)
+                            holder.keep(connection, factory, file_identity)
                 except (sqlite3.Error, TypeError):
                     reusable = False
             if not reusable:
@@ -796,6 +813,13 @@ class CoordinationStore:
                     holder.discard()
                 else:
                     connection.close()
+
+    def _database_file_identity(self):
+        try:
+            status = self.database_path.stat()
+        except FileNotFoundError:
+            return None
+        return status.st_dev, status.st_ino
 
     def _initialize(self) -> None:
         with self._connection() as connection:

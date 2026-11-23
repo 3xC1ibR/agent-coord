@@ -40,6 +40,16 @@ class StoreConnectionReuseTests(unittest.TestCase):
     def outside(self):
         return sqlite3.connect(self.path, timeout=5)
 
+    def replace_database(self):
+        replacement = self.path.with_name("replacement.sqlite3")
+        with sqlite3.connect(replacement) as other:
+            other.execute("CREATE TABLE probe (value INTEGER)")
+            other.execute("INSERT INTO probe VALUES (2)")
+        other.close()
+        replacement.replace(self.path)
+        for suffix in ("-wal", "-shm"):
+            Path(str(self.path) + suffix).unlink(missing_ok=True)
+
     def test_sequential_uses_on_one_thread_share_one_connection(self):
         factory, calls = self.counted()
         with patch.object(self.store, "_connect", side_effect=factory):
@@ -151,6 +161,51 @@ class StoreConnectionReuseTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         with self.assertRaises(sqlite3.ProgrammingError):
             idle.execute("SELECT 1")
+
+    def test_database_replacement_releases_cached_reader_and_writer(self):
+        with self.store._connection() as db:
+            writer = db
+            db.execute("INSERT INTO probe VALUES (1)")
+        with self.store.reading(), self.store._connection() as db:
+            reader = db
+            self.assertEqual(db.execute("SELECT value FROM probe").fetchone()[0], 1)
+
+        self.replace_database()
+
+        with self.store.reading(), self.store._connection() as db:
+            self.assertIsNot(db, reader)
+            self.assertEqual(db.execute("SELECT value FROM probe").fetchone()[0], 2)
+        for old in (reader, writer):
+            with self.assertRaises(sqlite3.ProgrammingError):
+                old.execute("SELECT 1")
+        with self.store._connection() as db:
+            self.assertIsNot(db, writer)
+            db.execute("INSERT INTO probe VALUES (3)")
+        with self.outside() as other:
+            self.assertEqual(other.execute("SELECT value FROM probe ORDER BY value").fetchall(), [(2,), (3,)])
+        other.close()
+
+    def test_removed_database_releases_both_idle_connection_slots(self):
+        with self.store._connection() as db:
+            writer = db
+        with self.store.reading(), self.store._connection() as db:
+            reader = db
+        self.path.unlink()
+        with self.assertRaises(sqlite3.OperationalError), self.store.reading(), self.store._connection():
+            self.fail("A removed database must not be read through a cached handle")
+        for old in (reader, writer):
+            with self.assertRaises(sqlite3.ProgrammingError):
+                old.execute("SELECT 1")
+
+    def test_replacement_during_use_closes_handle_after_use(self):
+        with self.store.reading(), self.store._connection() as db:
+            previous = db
+            self.replace_database()
+            self.assertFalse(db.in_transaction)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            previous.execute("SELECT 1")
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT value FROM probe").fetchone()[0], 2)
 
     def test_delayed_open_does_not_hold_writer_admission(self):
         opened, ready, proceed, release, completed = (threading.Event() for _ in range(5))
