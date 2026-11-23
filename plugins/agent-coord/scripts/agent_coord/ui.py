@@ -927,8 +927,10 @@ def _handler(
                 try:
                     self._admitted_POST()
                 finally:
-                    # A user action can change any thread's card; the next list read rebuilds.
-                    if urlparse(self.path).path != "/api/browser/coordination-metrics/refresh":
+                    # Recording a visit or refreshing metrics leaves every thread card intact.
+                    if urlparse(self.path).path not in {"/api/browser/activity/events",
+                                                        "/api/browser/provider-usage/refresh",
+                                                        "/api/browser/coordination-metrics/refresh"}:
                         browser_sessions.inventory_changed()
 
         def _admitted_POST(self) -> None:

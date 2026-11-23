@@ -428,6 +428,24 @@ class BrowserHTTPTests(unittest.TestCase):
         self.server.server_close()
         self.worker.join(2)
 
+    def test_recording_a_visit_reuses_the_thread_list_and_renaming_rebuilds_it(self):
+        thread = self.sessions.create({})["session"]["thread_id"]
+        self.sessions.activity.configure(True)
+        event = {"kind": "visit_started", "thread_id": thread, "event_id": "open",
+                 "visit_id": "visit", "window_id": "window", "source": "navigation",
+                 "occurred_at": self.store.clock()}
+        with patch("agent_coord.codex_app_server.INVENTORY_REUSE_SECONDS", 60), patch.object(
+                self.sessions, "list_work_threads", wraps=self.sessions.list_work_threads) as builds:
+            before = self.request("/api/browser/threads")
+            self.assertEqual(before[0], 200)
+            self.assertEqual(self.request("/api/browser/activity/events", {"events": [event]})[0], 200)
+            self.assertEqual(self.request("/api/browser/threads"), before)
+            self.assertEqual(builds.call_count, 1)
+            self.assertEqual(self.request("/api/browser/threads/" + thread, {"title": "Renamed"})[0], 200)
+            after = self.request("/api/browser/threads")
+            self.assertEqual(next(t for t in after[1]["data"] if t["thread_id"] == thread)["title"], "Renamed")
+            self.assertEqual(builds.call_count, 2)
+
     def test_reopening_workspace_reuses_only_matching_static_asset_bytes(self):
         from agent_coord import ui
         with tempfile.TemporaryDirectory() as directory:
