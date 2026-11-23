@@ -783,9 +783,9 @@ def _refresh_messages(store, cwd, measurement, schedule_index):
                 raise
 
 
-def pending_search_evidence(db, terms, thread_ids, *, user_only):
+def pending_search_evidence(db, terms, thread_ids, *, user_only, published, measurement):
     """Inspect current revisions in the same SQLite snapshot as the ranked query."""
-    from .history_persistence import decode_history
+    from .history_persistence import decode_history, prepared_history_view
 
     filter_ids = "" if thread_ids is None else " WHERE p.thread_id IN (SELECT value FROM json_each(?))"
     parameters = () if thread_ids is None else (json.dumps(sorted(thread_ids)),)
@@ -799,7 +799,14 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only):
             settled.append(identity)
             continue
         try:
-            history = decode_history(serialized, db=db)
+            prepared = published.get(identity)
+            history = prepared_history_view(prepared, serialized)
+            if history is None:
+                history = decode_history(serialized, db=db)
+                measurement["database_reads"] = measurement.get("database_reads", 0) + 1
+            else:
+                measurement["published_reads"] = measurement.get("published_reads", 0) + 1
+                measurement["published_bytes"] = measurement.get("published_bytes", 0) + prepared.source_bytes
             if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
                 raise ValueError("Invalid conversation history")
             found = {}

@@ -324,6 +324,28 @@ class SearchExecutionTests(unittest.TestCase):
         search_browser_threads(self.store, sessions, {"q": ["live evidence"]})
         self.assertEqual(len(queued), 1)
 
+    def test_dirty_search_reuses_only_the_exact_committed_history(self):
+        from types import SimpleNamespace
+        from agent_coord import history_persistence as storage
+        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
+        def write(text):
+            current = storage.prepare_history({"turns": [{"id": "turn", "status": "inProgress", "items": [
+                {"id": "message", "type": "agentMessage", "text": "content " * 12000 + text}]}]})
+            storage.stage_history(self.store, current)
+            with self.store._connection() as db:
+                storage.publish_history(db, "stream", current)
+            return current
+        with self.store._connection() as db:
+            storage.ensure_schema(db)
+        committed = write("first")
+        self.store.provider_projection = SimpleNamespace(prepared_histories={"stream": committed})
+        with patch.object(storage, "decode_history", side_effect=AssertionError("Decoded the published mirror again")):
+            result = search_threads(self.store, "first", snapshot_dirty=True)
+        self.assertEqual([r["thread_id"] for r in result["items"]], ["stream"])
+        write("replacement")
+        self.assertFalse(search_threads(self.store, "first", snapshot_dirty=True)["items"])
+        self.assertEqual(len(search_threads(self.store, "replacement", snapshot_dirty=True)["items"]), 1)
+
     def test_dirty_snapshot_pages_match_indexed_pages_and_coverage(self):
         self.seed(16)
         coverage = search_threads(self.store, "radio", snapshot_dirty=True)["coverage"]

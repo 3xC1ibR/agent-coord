@@ -241,6 +241,35 @@ def _documents(db, references):
         raise HistoryUnavailableError("Saved conversation contains an invalid block document.") from exc
 
 
+def prepared_history_view(prepared, serialized):
+    """Borrow immutable item values only for the exact published archive root."""
+    if prepared is None or prepared.serialized != serialized:
+        return None
+    documents = prepared.documents
+    root = documents.get(())
+    if root is None or not isinstance(root.value, dict):
+        return None
+    if not isinstance(root.value.get("metadata"), dict) or not isinstance(root.value.get("turns"), list):
+        return None
+    turns = []
+    for index in range(len(root.value["turns"])):
+        document = documents.get((index,))
+        if document is None or document.value is None:
+            return None
+        saved = document.value
+        turn = dict(saved["metadata"])
+        if "items" in saved:
+            items = []
+            for position in range(len(saved["items"])):
+                item = documents.get((index, position))
+                if item is None or item.value is None:
+                    return None
+                items.append(item.value)
+            turn["items"] = items
+        turns.append(turn)
+    return {**root.value["metadata"], "turns": turns}
+
+
 def _decode(db, manifest):
     own_snapshot = not db.in_transaction
     if own_snapshot:

@@ -348,7 +348,11 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             folded_rows = message_source(include_text=False, indexed=indexed is not None)
             history_rows = "conversation_search_history_index"
             if snapshot_dirty and "browser_history" in tables:
-                dirty, hits, settled = pending_search_evidence(db, terms, thread_ids, user_only=my_messages)
+                projection = getattr(store, "provider_projection", None)
+                published = getattr(projection, "prepared_histories", {})
+                with _measure(store, "pending_history") as measurement:
+                    dirty, hits, settled = pending_search_evidence(db, terms, thread_ids, user_only=my_messages,
+                                                                  published=published, measurement=measurement)
                 if dirty:
                     params["dirty_histories"] = json.dumps(dirty)
                     params["dirty_hits"] = json.dumps(hits)

@@ -2705,7 +2705,8 @@ class BrowserSessions:
                               and not automatic and not recovery and completed_turn_id is None
                               and not message.lstrip().startswith("/"))
             if not loaded or (believed_running and not targeted_steer):
-                self.read(thread_id)
+                with self.store._writer.measure_request("send.reconcile_history"):
+                    self.read(thread_id)
             record = self._record(thread_id)
             if recovery:
                 recovery()
@@ -2752,7 +2753,8 @@ class BrowserSessions:
                     self.starting_notification_context[thread_id] = {"origin": "user", "owner_thread_id": thread_id}
                 try:
                     with self.navigation.sending(thread_id, source_window):
-                        result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                        with self.store._writer.measure_request("send.provider_steer"):
+                            result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
                 except CoordinationError as error:
                     # These provider responses explicitly mean no input was
                     # submitted. Disconnects, timeouts and ambiguous native
@@ -2804,7 +2806,8 @@ class BrowserSessions:
                     submission["started"] = True
                     from .provider_transport import ProviderLaunchRejected
                     try:
-                        result = rpc.request("turn/start", params)
+                        with self.store._writer.measure_request("send.provider_start"):
+                            result = rpc.request("turn/start", params)
                     except ProviderLaunchRejected:
                         if automatic and record["client"] == "claude":
                             submission["started"] = False

@@ -83,9 +83,20 @@ async function sends() {
         current = url;
       }
       await composing.locator("#message").fill(marker);
-      await composing.evaluate(() => {
-        document.querySelector("#message").addEventListener("keydown", e => { window.__releaseEnter = e.timeStamp; }, {once:true});
-      });
+      await composing.evaluate(marker => {
+        document.querySelector("#message").addEventListener("keydown", e => {
+          window.__releaseEnter = e.timeStamp;
+          const entry = state.conversations?.get(state.selected);
+          window.__releaseComposer = {
+            draft_matches: e.target.value === marker,
+            selected_matches: state.selected === decodeURIComponent(location.hash.slice(1)),
+            has_detail: !!state.detail, refreshing: !!state.detailRefreshing,
+            read_pending: !!entry?.pending, opening_submission: !!entry?.openingSubmission,
+            sending: !!state.sending?.has(state.selected), send_disabled: document.querySelector("#send").disabled,
+            composer_hidden: document.querySelector("#composer").hidden, detail_pending_input: !!state.detail?.requests?.length,
+          };
+        }, {once:true});
+      }, marker);
       const tracked = composing.waitForRequest(r => r.method() === "POST" && /\/messages$/.test(new URL(r.url()).pathname)
         && r.postDataJSON()?.message === marker, {timeout: 7000}).then(async request => {
         const body = request.postDataJSON();
@@ -102,8 +113,8 @@ async function sends() {
       const first = see(composing), second = see(receiving);
       await composing.locator("#message").press("Enter");
       const [own,other,receipt] = await Promise.all([first,second,tracked]);
-      const enter = await composing.evaluate(() => performance.timeOrigin + window.__releaseEnter);
-      log({phase, kind:"browser_send", marker, ...receipt, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
+      const [enter, controlsAtEnter] = await composing.evaluate(() => [performance.timeOrigin + window.__releaseEnter, window.__releaseComposer]);
+      log({phase, kind:"browser_send", marker, ...receipt, controls_at_enter: controlsAtEnter, ok: receipt.status >= 200 && receipt.status < 300 && own !== null && other !== null,
         start, end:Date.now(), own_ms:own === null ? null : own-enter, other_ms:other === null ? null : other-enter});
     } catch (error) {
       current = null;
