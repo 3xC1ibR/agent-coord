@@ -128,6 +128,46 @@ class ProjectionTests(unittest.TestCase):
         self.assertTrue(self.projection.prepared_histories[self.identity].chunks)
         self.assertEqual(storage.read_history(self.store, self.identity), history)
 
+    def test_projection_restores_exact_published_and_newer_unpublished_histories_on_failure(self):
+        from agent_coord.history_persistence import INLINE_BYTES
+        for text in ("active text", "z" * INLINE_BYTES):
+            with self.subTest(text_bytes=len(text)):
+                history = {"id": self.identity, "turns": [
+                    {"id": str(i), "items": [{"id": "prior", "text": str(i)}]} for i in range(450)]}
+                history["turns"].append({"id": self.turn_id, "items": [{"id": "output", "type": "agentMessage", "text": text}]})
+                self.sessions.histories[self.identity] = history
+                self.sessions._dirty_history(self.identity)
+                self.projection.checkpoint()
+                expected = copy.deepcopy(history)
+                duplicate = copy.deepcopy
+
+                def count_copies(value, *args, **kwargs):
+                    self.assertFalse(value is history, "Copied the complete published history before a routine event")
+                    return duplicate(value, *args, **kwargs)
+
+                event = self.event(1, "item/agentMessage/delta", itemId="output", delta="more")
+                with patch("agent_coord.coordinator_projection.copy.deepcopy", side_effect=count_copies), \
+                     patch.object(self.projection, "_save", side_effect=sqlite3.OperationalError("failed checkpoint")), \
+                     self.assertRaisesRegex(sqlite3.OperationalError, "failed checkpoint"):
+                    self.projection.project(event)
+                self.assertEqual(self.sessions.histories[self.identity], expected)
+                self.assertEqual(self.projection.cursor, 0)
+                # A live change newer than the published revision must survive its own failed batch.
+                history = self.sessions.histories[self.identity]
+                self.sessions._dirty_history(self.identity)
+                self.projection.checkpoint()
+                history["turns"][0]["items"][0]["text"] = "newer independent history save"
+                self.sessions._dirty_history(self.identity)
+                self.assertTrue(self.sessions.persistence.flush(key=self.identity))
+                # An independent save may clear the dirty flag without replacing
+                # the event projection's older cached checkpoint.
+                self.sessions.dirty_histories.discard(self.identity)
+                expected = copy.deepcopy(history)
+                with patch.object(self.projection, "_save", side_effect=sqlite3.OperationalError("failed checkpoint")), \
+                     self.assertRaisesRegex(sqlite3.OperationalError, "failed checkpoint"):
+                    self.projection.project(event)
+                self.assertEqual(self.sessions.histories[self.identity], expected)
+
     def test_next_checkpoint_recognizes_blocks_from_a_published_history(self):
         from agent_coord import history_persistence as storage
         item = {"id": "output", "type": "agentMessage", "text": "initial " * 90000}

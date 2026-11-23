@@ -346,20 +346,17 @@ def prepared_history_view(prepared, serialized):
     return {**root.value["metadata"], "turns": turns}
 
 
-def _decode(db, manifest):
-    own_snapshot = not db.in_transaction
-    if own_snapshot:
-        db.execute("BEGIN")
+def _materialize_manifest(manifest, read_documents):
     try:
         if manifest.get(MARKER) != 1 or manifest.get("layout") not in {"raw", "turns"}:
             raise HistoryUnavailableError("Saved conversation requires an unsupported history format.")
-        root = _documents(db, [manifest.get("root")])[0]
+        root = read_documents([manifest.get("root")])[0]
         if manifest["layout"] == "raw":
             return root
         history = root["metadata"]
-        turns = _documents(db, root["turns"])
+        turns = read_documents(root["turns"])
         references = [item for turn in turns for item in turn.get("items", [])]
-        items = iter(_documents(db, references))
+        items = iter(read_documents(references))
         decoded = []
         for turn in turns:
             value = turn["metadata"]
@@ -370,6 +367,26 @@ def _decode(db, manifest):
         return history
     except (KeyError, TypeError, StopIteration) as exc:
         raise HistoryUnavailableError("Saved conversation has an invalid manifest.") from exc
+
+
+def restore_projected_history(prepared):
+    """Recover the pre-event mirror from its immutable, complete in-memory checkpoint."""
+    manifest = json.loads(prepared.serialized)
+    if not prepared.chunks:
+        return manifest
+
+    def read_documents(references):
+        return [json.loads(b"".join(prepared.chunks[digest] for digest in reference)) for reference in references]
+
+    return _materialize_manifest(manifest, read_documents)
+
+
+def _decode(db, manifest):
+    own_snapshot = not db.in_transaction
+    if own_snapshot:
+        db.execute("BEGIN")
+    try:
+        return _materialize_manifest(manifest, lambda references: _documents(db, references))
     finally:
         if own_snapshot:
             db.rollback()

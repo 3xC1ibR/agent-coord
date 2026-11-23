@@ -20,7 +20,7 @@ import zlib
 
 from .browser_persistence import capture_writes
 from .provider_transport import Client, ProviderLaunchRejected, TransportError
-from .history_persistence import saved_turn_status
+from .history_persistence import restore_projected_history, saved_turn_status
 from .store import CoordinationError
 
 VERSION = 1
@@ -102,6 +102,7 @@ class CoordinatorProjection:
         self.error = None
         self.delivery_error = None
         self.prepared_histories = {}
+        self.rollback_history_versions = {}
         self.payload_cache = {}
         self.text_references = {}
         self.unloaded_observation = None
@@ -154,6 +155,7 @@ class CoordinatorProjection:
         if state["version"] != VERSION:
             raise TransportError("Coordinator projection version is incompatible.")
         sessions = self.sessions
+        self.rollback_history_versions.clear()
         for name, value in state["browser"].items():
             if name != "sequence":
                 setattr(sessions, name, copy.deepcopy(value))
@@ -358,7 +360,7 @@ class CoordinatorProjection:
         for identity, history in prepared.items():
             publish_history(db, identity, history)
 
-    def remember_histories(self, prepared, completions):
+    def remember_histories(self, prepared, completions, *, session_locked=False):
         for identity, outcome in completions.items():
             self.sessions.claude.discard_persisted_completion(identity, outcome)
         self.sessions.dirty_histories.difference_update(prepared)
@@ -367,12 +369,32 @@ class CoordinatorProjection:
             # be compared without serializing and hashing them on every delta.
             history.cache_bytes = max(history.cache_bytes, 3 * history.source_bytes)
             self.prepared_histories[identity] = history
+            if session_locked:
+                self.rollback_history_versions[identity] = (self.sessions.histories[identity],
+                                                           self.sessions.history_revisions.get(identity, 0))
+            else:
+                self.rollback_history_versions.pop(identity, None)
         for identity in list(self.prepared_histories):
             if identity not in self.sessions.loaded:
                 self.prepared_histories.pop(identity)
         while (len(self.prepared_histories) > 16 or
                sum(value.cache_bytes for value in self.prepared_histories.values()) > 64 * 1024 * 1024):
             self.prepared_histories.pop(next(iter(self.prepared_histories)))
+        for identity in self.rollback_history_versions.keys() - self.prepared_histories.keys():
+            del self.rollback_history_versions[identity]
+
+    def _rollback_snapshot(self, affected):
+        # Only a checkpoint published under the same session lock is evidence
+        # of this precise mirror object and revision. New or dirty state keeps
+        # a private copy. Materialize a proven preimage only if the batch fails.
+        affected = set(self.sessions.histories) if affected is None else affected
+        deferred = {}
+        for identity in affected & self.rollback_history_versions.keys():
+            original, revision = self.rollback_history_versions[identity]
+            if (self.sessions.histories.get(identity) is original and identity not in self.sessions.dirty_histories
+                    and self.sessions.history_revisions.get(identity, 0) == revision):
+                deferred[identity] = self.prepared_histories[identity]
+        return self.state(affected=affected - deferred.keys()), deferred
 
     def publication(self, event):
         value = (event["seq"], json.dumps(event))
@@ -409,7 +431,7 @@ class CoordinatorProjection:
             with self.store.database_operation("coordinator.checkpoint"), self.store._connection() as db:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
-            self.remember_histories(prepared, completions)
+            self.remember_histories(prepared, completions, session_locked=True)
 
     def write(self, channel, message):
         self.write_registered(channel, lambda: message)
@@ -613,7 +635,7 @@ class CoordinatorProjection:
             if any(event["stream"] == "eof" for event, _ in decoded):
                 affected = None
             with self.store._writer.measure_request("provider.rollback_snapshot"):
-                before = self.state(affected=affected)
+                before, deferred_histories = self._rollback_snapshot(affected)
             try:
                 if affected is not None:
                     # While the next batch is uncommitted, an unrelated unloaded
@@ -683,10 +705,12 @@ class CoordinatorProjection:
                 self.cursor = event["sequence"]
                 if self.in_event.publications:
                     self.sessions.append_committed_events([json.loads(payload) for _, payload in self.in_event.publications])
-                self.remember_histories(prepared, published_completions)
+                self.remember_histories(prepared, published_completions, session_locked=True)
                 commands = list(self.in_event.commands)
                 completions = list(self.in_event.completions)
             except Exception:
+                for identity, prepared_history in deferred_histories.items():
+                    before["browser"]["histories"][identity] = restore_projected_history(prepared_history)
                 self.restore(before)
                 raise
             finally:
