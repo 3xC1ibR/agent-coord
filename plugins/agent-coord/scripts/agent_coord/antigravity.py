@@ -170,6 +170,8 @@ class AntigravityRPC:
         self.last_activity = {}
         self.prompt_locks = {}
         self.skill_contexts = {}
+        # Turns a backend update is stopping; their late requests are refused.
+        self.update_stopping = set()
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS antigravity_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL)")
 
@@ -396,6 +398,7 @@ class AntigravityRPC:
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("An Antigravity turn is already running.")
+            self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
             skills = self.skill_contexts[thread_id]
             prompt = [{"type": "text", "text": coordination_bootstrap(
@@ -422,8 +425,16 @@ class AntigravityRPC:
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != params["turnId"]:
                 raise CoordinationError("The active Antigravity turn changed or finished.")
+            if params.get("runtimeUpdate"):
+                # Requests register under this lock: an update never withdraws one.
+                with self.lock:
+                    if any(value[0] == thread_id for value in self.requests.values()):
+                        raise CoordinationError("Antigravity is waiting for an approval or answer; the update did not stop this turn.")
+                    self.update_stopping.add(thread_id)
+            # A backend update stops the turn itself; it is not the user's Stop.
+            origin, reason = ("runtime", "backend_update") if params.get("runtimeUpdate") else ("user", "turn_interrupt")
             self._finish(thread_id, "interrupted",
-                         termination={"origin": "user", "reason": "turn_interrupt", "execution": "unknown"})
+                         termination={"origin": origin, "reason": reason, "execution": "unknown"})
             connection = self.connections.pop(thread_id, None)
             if connection:
                 try:
@@ -650,7 +661,19 @@ class AntigravityRPC:
         options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
         question = str(tool.get("toolCallId", "")).startswith("interaction_")
         key = f"antigravity:{thread_id}:{message['id']}"
-        self.requests[key] = (thread_id, message["id"], request)
+        with self.lock:
+            stopping = thread_id in self.update_stopping
+            if not stopping:
+                self.requests[key] = (thread_id, message["id"], request)
+        if stopping:
+            connection = self.connections.get(thread_id)
+            try:
+                if connection:
+                    connection.write({"id": message["id"], "error": {
+                        "code": -32603, "message": "This turn is stopping for a backend update."}})
+            except CoordinationError:
+                pass  # The provider is already stopping with its turn.
+            return
         params = {"threadId": thread_id, "turnId": self.turns[thread_id]["id"]}
         if question and options:
             method = "item/tool/requestUserInput"

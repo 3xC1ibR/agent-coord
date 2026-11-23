@@ -175,6 +175,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             updater.backendUpdateIdentifier = { [weak self] in self?.backend.pendingUpdate }
             updater.backendUpdateVersion = { [weak self] in self?.backend.pendingUpdateVersion }
             updater.backendUpdateRequiresConfirmation = { [weak self] in self?.backend.pendingUpdateRequiresConfirmation == true }
+            updater.backendUpdateContinuity = { [weak self] in
+                guard let backend = self?.backend else { return .restartsWork }
+                return backend.continuesInterruptedProviders ? .pausesOtherProviders
+                    : backend.supportsUninterruptedUpdates ? .waitsForOtherProviders : .restartsWork
+            }
             updater.applyBackendUpdate = { [weak self] completion in
                 guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
                 backend.applyUpdate(completion: completion)
@@ -188,7 +193,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 guard let self = self else { return }
                 self.updater.backendUpdateNotice = message
                 if failed { NSApp.presentError(Backend.failure(message)) }
-                else if self.backend.updateInProgress { self.showStatus(message, failed: false) }
+                else if self.backend.updateInProgress && self.backend.interactionURL == nil { self.showStatus(message, failed: false) }
             }
             makeMenu()
             sessionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in

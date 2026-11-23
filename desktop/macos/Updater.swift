@@ -4,7 +4,25 @@ import Sparkle
 #endif
 
 enum RibbonUpdatePrompt {
-    static func alert(version: String?, restartingAgents: Bool) -> NSAlert {
+    /// How the running backend treats active work during its own replacement.
+    enum Continuity {
+        case restartsWork
+        case waitsForOtherProviders
+        case pausesOtherProviders
+
+        var disclosure: String {
+            switch self {
+            case .restartsWork:
+                return "Installing restarts running agents and tools. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
+            case .waitsForOtherProviders:
+                return "Codex and Claude work keeps running. The update waits for running Kimi, Muse and Antigravity turns to finish. Approvals and uncertain actions wait for your review."
+            case .pausesOtherProviders:
+                return "Codex and Claude work keeps running. Running Kimi, Muse and Antigravity turns pause for the update and continue automatically. Approvals and uncertain actions wait for your review."
+            }
+        }
+    }
+
+    static func alert(version: String?, restartingAgents: Bool, continuity: Continuity = .restartsWork) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "A new version of Ribbon Field is available"
         let release = version.map { value -> String in
@@ -13,7 +31,7 @@ enum RibbonUpdatePrompt {
             return "Version \(display) is ready to install."
         } ?? "An update is ready to install."
         alert.informativeText = release + "\n\n" + (restartingAgents
-            ? "Installing restarts running agents and tools. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
+            ? continuity.disclosure
             : "Install the update and relaunch Ribbon Field when it is ready.")
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Skip for Now").keyEquivalent = "\u{1b}"
@@ -160,6 +178,7 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
     var backendUpdateIdentifier: (() -> String?)?
     var backendUpdateVersion: (() -> String?)?
     var backendUpdateRequiresConfirmation: (() -> Bool)?
+    var backendUpdateContinuity: (() -> RibbonUpdatePrompt.Continuity)?
     var applyBackendUpdate: ((@escaping (Error?) -> Void) -> Void)?
     var cancelBackendAuthorization: (() -> Void)?
     var backendUpdateNotice: String?
@@ -278,7 +297,8 @@ final class RibbonUpdater: NSObject, NSMenuItemValidation {
         let identifier = backendUpdateIdentifier?()
         if let identifier = identifier { notifiedBackendUpdates.insert(identifier) }
         presentingBackendUpdate = true
-        let alert = RibbonUpdatePrompt.alert(version: backendUpdateVersion?(), restartingAgents: true)
+        let alert = RibbonUpdatePrompt.alert(version: backendUpdateVersion?(), restartingAgents: true,
+                                             continuity: backendUpdateContinuity?() ?? .restartsWork)
         if backendUpdateRequiresConfirmation?() != true {
             // Older runtimes may still activate passively at idle. Preserve
             // their manual-restart choices instead of promising a deferral.

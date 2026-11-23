@@ -109,6 +109,8 @@ class MuseRPC:
         self.seen = {}
         self.ready, self.terminal_turns, self.background_turns = set(), {}, {}
         self.request_history, self.answered, self.settled = {}, set(), set()
+        # Turns a backend update is stopping; their late requests are not shown.
+        self.update_stopping = set()
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
         self.permission_catalogs = {}
         self.closed = False
@@ -348,6 +350,7 @@ class MuseRPC:
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("A Muse turn is already running.")
+            self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
             # Explicit identity also works in native tools that sanitize their environment.
             command = shlex.join(["env", f"AGENT_COORD_SESSION_ID={thread_id}", f"AGENT_COORD_DB={self.store.database_path}", "agent-coord"])
@@ -377,6 +380,12 @@ class MuseRPC:
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != params["turnId"]:
                 raise CoordinationError("The active Muse turn changed or finished.")
+            if params.get("runtimeUpdate"):
+                # Requests register under this lock: an update never withdraws one.
+                with self.lock:
+                    if any(value["thread"] == thread_id for value in self.requests.values()):
+                        raise CoordinationError("Muse is waiting for an approval or answer; the update did not stop this turn.")
+                    self.update_stopping.add(thread_id)
             try:
                 self._command(self.connections[thread_id], "turn/interrupt", sessionId=self.native[thread_id], turnId=turn["id"])
             finally:
@@ -625,8 +634,11 @@ class MuseRPC:
             display.update(reason=reason,
                 command=params.get("subject", {}).get("command") or params.get("rawArgs", ""),
                 availableDecisions=list(choices) + ([] if "cancel" in choices else ["cancel"]))
-        self.requests[key] = {"thread": thread_id, "native_id": native_id, "request": copy.deepcopy(params),
-                              "question": question, "choices": choices}
+        with self.lock:
+            if thread_id in self.update_stopping:
+                return  # The native interrupt settles this request with its turn.
+            self.requests[key] = {"thread": thread_id, "native_id": native_id, "request": copy.deepcopy(params),
+                                  "question": question, "choices": choices}
         self.on_event({"id": key, "method": "item/tool/requestUserInput" if question else "item/commandExecution/requestApproval", "params": display})
 
     def write(self, message):

@@ -28,7 +28,9 @@ conversation state, scheduling, and coordination logic execute in the
 replaceable coordinator.
 
 The supported live adapters are Codex and Claude. An active Kimi, Antigravity,
-or Muse workload defers replacement. Candidate metadata must declare compatible
+or Muse workload defers a passive replacement. An explicit update pauses those
+turns within a bound and continues each confirmed turn once in its saved native
+session; see [explicit updates with coordinator-owned providers](runtime-updates.md#explicit-updates-with-coordinator-owned-providers). Candidate metadata must declare compatible
 transport and projection versions. This contract covers replacement of the
 coordinator and its adapters; it does not replace the transport owner itself,
 upgrade an already running provider executable, or survive a machine restart.
@@ -80,8 +82,10 @@ future objects are reconstructed rather than serialized.
 Only the current fenced coordinator may issue new commands. Replacement closes
 new admission and drains accepted application operations without terminating
 providers. Candidate failure must preserve a recoverable owner and the event
-prefix needed by the retained coordinator. Unsupported active providers or
-incompatible state formats defer activation explicitly.
+prefix needed by the retained coordinator. Incompatible state formats defer
+activation explicitly. Unsupported active providers defer passive activation;
+an explicit update pauses them, never withdraws an approval, and records the
+exact interrupted turns before signalling any provider.
 
 Journal retention and replay batches must have byte bounds. A slow provider
 must not hold a shared journal or coordination-database lock while writing to
