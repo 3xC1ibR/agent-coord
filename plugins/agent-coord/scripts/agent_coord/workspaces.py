@@ -34,8 +34,21 @@ def matches_workspace(cwd: str, workspace: str | None) -> bool:
         return True
     directory = Path(cwd).expanduser().resolve()
     root = Path(workspace).expanduser().resolve()
+    if directory.is_relative_to(root):
+        return True
     repository = repository_root(str(directory))
-    return directory.is_relative_to(root) or (repository is not None and repository == repository_root(str(root)))
+    return repository is not None and repository == repository_root(str(root))
+
+
+def require_thread_workspaces(store, thread_ids, workspace):
+    """Check a bounded set of saved threads without projecting their live state."""
+    identities = set(thread_ids)
+    with store.reading(), store._connection() as db:
+        slots = ",".join("?" for _ in identities)
+        rows = db.execute(f"""SELECT s.cwd FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
+            WHERE t.thread_id IN ({slots})""", tuple(identities)).fetchall()
+    if len(rows) != len(identities) or not all(matches_workspace(cwd, workspace) for cwd in {r["cwd"] for r in rows}):
+        raise CoordinationError("Work thread not found in this workspace.")
 
 
 def workspace_choices(cwd: str, known: Iterable[str] = (), *, workspace: str | None = None) -> list[dict]:

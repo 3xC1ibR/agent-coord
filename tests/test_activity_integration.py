@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
 sys.path.insert(0, str(SCRIPTS))
-from agent_coord.activity_api import create_activity_review, read_activity_history
+from agent_coord.activity_api import create_activity_review, read_activity_history, record_browser_events
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.store import CoordinationStore, CoordinationError
 from agent_coord.checkpoint_mcp import query_activity
@@ -30,6 +30,18 @@ class ActivityIntegrationTests(unittest.TestCase):
 
     def report(self):
         return self.sessions.activity.query(start=0, end=self.store.clock() + 1)
+
+    def test_browser_visits_check_the_saved_workspace_without_projecting_thread_cards(self):
+        event = dict(kind="visit_started", thread_id=self.thread, occurred_at=self.store.clock(),
+                     source="navigation", window_id="first", event_id="visit-one", visit_id="visit")
+        with patch.object(self.sessions, "work_thread", side_effect=AssertionError("Unnecessary live projection")):
+            with self.assertRaises(CoordinationError):
+                record_browser_events(self.sessions, {"events": [event, {**event, "thread_id": "missing"}]})
+            self.assertFalse(self.report()["events"])
+            self.assertEqual(record_browser_events(self.sessions, {"events": [event]})["status"], "ok")
+        with patch.object(self.sessions, "cwd", str(self.root / "other")):
+            with self.assertRaises(CoordinationError):
+                record_browser_events(self.sessions, {"events": [event]})
 
     def test_direct_input_counts_once_and_internal_delivery_does_not(self):
         self.sessions.rpc.fast_turn = True

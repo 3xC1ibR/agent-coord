@@ -198,13 +198,16 @@ class ActivityStore:
                           (thread_id,) if thread_id is not None else ()).fetchall()
 
     @staticmethod
-    def _creators(db):
-        creators = app_agent_creators(db)
-        for row in db.execute("""SELECT d.child_session_id, d.parent_session_id,
+    def _creators(db, thread_id=None):
+        creators = app_agent_creators(db, thread_id)
+        if thread_id is not None and thread_id in creators:
+            return creators
+        target = "d.child_session_id IS NOT NULL" if thread_id is None else "d.child_session_id=?"
+        for row in db.execute(f"""SELECT d.child_session_id, d.parent_session_id,
                 t.title, s.cwd, COALESCE(t.project_cwd, s.cwd) AS project_cwd
                 FROM delegations d JOIN sessions s ON s.session_id=d.parent_session_id
                 LEFT JOIN work_threads t ON t.thread_id=d.parent_session_id
-                WHERE d.child_session_id IS NOT NULL ORDER BY d.created_at, d.delegation_id"""):
+                WHERE {target} ORDER BY d.created_at, d.delegation_id""", () if thread_id is None else (thread_id,)):
             creators.setdefault(row["child_session_id"], {
                 "thread_id": row["parent_session_id"], "title": row["title"],
                 "cwd": row["cwd"], "project_cwd": row["project_cwd"], "mode": "delegation"})
@@ -307,7 +310,7 @@ class ActivityStore:
                               AND (ended_at IS NULL OR ?<ended_at) LIMIT 1""",
                           (occurred_at, occurred_at)).fetchone():
                 return self._skip(db, event_id, "recording_paused_at_occurrence", visit_key=visit_key)
-        snapshot = self._snapshot(threads[0], self._creators(db))
+        snapshot = self._snapshot(threads[0], self._creators(db, thread_id))
         db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
             received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",

@@ -14,7 +14,7 @@ CREATION_MODE_SQL = """CASE WHEN json_valid(payload_json) THEN
         THEN 'orchestration' END END"""
 
 
-def app_agent_creators(db):
+def app_agent_creators(db, thread_id=None):
     """Read the first identified creation, including uncertain deliveries."""
     schema = {row[0] for row in db.execute("""SELECT name FROM sqlite_master
         WHERE name IN ('app_control_requests', 'app_control_creator_metadata')""")}
@@ -24,7 +24,8 @@ def app_agent_creators(db):
     # but reads completed request bodies and sorts them on every refresh.
     # This covering index stores the mode expression and creation order.
     # Legacy initialization can precede AppControl's optional schema upgrade.
-    index = " INDEXED BY app_control_creator_metadata" if "app_control_creator_metadata" in schema else ""
+    index = " INDEXED BY app_control_creator_metadata" if thread_id is None and "app_control_creator_metadata" in schema else ""
+    target = "" if thread_id is None else " AND r.thread_id=?"
     # Aggregate in SQLite: fetching one Python row per creator repeatedly
     # reacquires the GIL behind polling and provider threads. Only the small
     # creation-mode field belongs in this projection, not the original prompt.
@@ -39,8 +40,8 @@ def app_agent_creators(db):
         LEFT JOIN sessions s ON s.session_id = r.sender_session_id
         LEFT JOIN work_threads t ON t.thread_id = r.sender_session_id
         WHERE r.operation = 'create' AND r.thread_id IS NOT NULL
-        AND r.status IN ('running', 'completed', 'uncertain')
-        ORDER BY r.created_at, r.request_id)""").fetchone()[0])
+        AND r.status IN ('running', 'completed', 'uncertain'){target}
+        ORDER BY r.created_at, r.request_id)""", () if thread_id is None else (thread_id,)).fetchone()[0])
     creators = {}
     for row in rows:
         if row["thread_id"] == row["sender_session_id"]:

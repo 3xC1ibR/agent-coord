@@ -14,7 +14,7 @@ import warnings
 from .activity import ActivityStore
 from .conversation_search import messages
 from .store import CoordinationError
-from .workspaces import matches_workspace
+from .workspaces import matches_workspace, require_thread_workspaces
 
 
 QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor", "include_turns"}
@@ -105,7 +105,7 @@ def record_browser_events(sessions, body):
         stamp = query_arguments({"start": event["occurred_at"]})["start"]
         if stamp > sessions.store.clock() + 60:
             raise CoordinationError("The activity timestamp is in the future; check this device's clock.")
-        sessions.work_thread(event["thread_id"], history=False)
+    require_thread_workspaces(sessions.store, (event["thread_id"] for event in events), sessions.cwd)
     activity = sessions.activity
     receipts = []
     for event in events:
