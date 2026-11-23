@@ -463,6 +463,27 @@ class JournalBoundsTests(unittest.TestCase):
                 self.journal.stop_waits()
                 writer.join(timeout=3)
 
+    def test_full_storage_defers_the_reader_instead_of_ending_the_channel(self):
+        database = self.journal.db
+        with self.journal.lock:
+            database.execute("PRAGMA max_page_count=%d" % database.execute("PRAGMA page_count").fetchone()[0])
+        data, appended = "x" * 65536, []
+        writer = threading.Thread(target=lambda: appended.append(self.journal.append("provider", "stdout", data)))
+        with patch("sys.stderr"):
+            writer.start()
+            try:
+                writer.join(timeout=.3)
+                self.assertTrue(writer.is_alive(), "A full volume must not end the provider reader")
+                with self.journal.lock:
+                    database.execute("PRAGMA max_page_count=1073741823")
+                writer.join(timeout=3)
+                self.assertFalse(writer.is_alive())
+            finally:
+                self.journal.stop_waits()
+                writer.join(timeout=3)
+        self.assertEqual(appended, [1])
+        self.assertEqual(self.journal.events(0)[0]["data"], data)
+
     def test_recovery_floor_and_sequence_survive_restart_and_empty_journal(self):
         self.journal.append("provider", "stdout", "first")
         self.journal.acknowledge_events(1, retain_after=1)

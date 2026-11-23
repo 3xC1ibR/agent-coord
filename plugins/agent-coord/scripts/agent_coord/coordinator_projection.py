@@ -20,6 +20,7 @@ import zlib
 from .browser_persistence import capture_writes
 from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import saved_turn_status
+from .store import CoordinationError
 
 VERSION = 1
 BROWSER_FIELDS = ("sequence", "turn_revisions", "requests", "active", "loaded", "loaded_clients",
@@ -444,6 +445,24 @@ class CoordinatorProjection:
         if getattr(self.sessions, "transport_handover", False):
             return
         self.client.command(channel, "close", {})
+        self._mark_closed(channel)
+
+    def close_exited_channel(self, channel):
+        """Retire a channel whose output ended, before its replacement opens.
+
+        The owner may already have reaped an exited provider; that channel has
+        nothing left to close. A provider that outlived a failed reader still
+        owns its process group and must not run beside the replacement.
+        """
+        if getattr(self.sessions, "transport_handover", False):
+            raise CoordinationError("Codex app-server stopped during a coordinator handover; "
+                                    "the replacement coordinator starts it again.")
+        retained = self.client.call("status").get("channels", [])
+        if any(entry["channel"] == channel and entry["state"] != "closed" for entry in retained):
+            self.client.command(channel, "close", {})
+        self._mark_closed(channel)
+
+    def _mark_closed(self, channel):
         with self.lock:
             if channel in self.channels:
                 self.channels[channel]["closed"] = True

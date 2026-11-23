@@ -119,6 +119,14 @@ def encode(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def storage_exhausted(error):
+    """Whether SQLite failed because the volume ran out of space."""
+    name = getattr(error, "sqlite_errorname", None)  # Python 3.11+
+    if name is not None:
+        return name == "SQLITE_FULL" or name.startswith("SQLITE_IOERR")
+    return "database or disk is full" in str(error) or "disk I/O error" in str(error)
+
+
 def event_size(channel, stream, data):
     # Includes the largest sequence/size fields and batch separators. Counting
     # serialized bytes also covers JSON escaping of control characters.
@@ -292,9 +300,24 @@ class Journal:
                 self.changed.wait(.2)
             if self.stopping:
                 return None
-            with self.db:
-                cursor = self.db.execute("INSERT INTO events(channel,stream,data,size) VALUES (?,?,?,?)",
-                                         (channel, stream, data, size))
+            reported = False
+            while True:
+                try:
+                    with self.db:
+                        cursor = self.db.execute("INSERT INTO events(channel,stream,data,size) VALUES (?,?,?,?)",
+                                                 (channel, stream, data, size))
+                    break
+                except sqlite3.OperationalError as error:
+                    # A full disk must stall this reader like journal capacity.
+                    # Ending it delivers end-of-output, which retires a live provider.
+                    if not storage_exhausted(error):
+                        raise
+                    if not reported:
+                        print(f"Provider transport journal write deferred: {error}", file=sys.stderr, flush=True)
+                        reported = True
+                    self.changed.wait(1)
+                    if self.stopping:
+                        return None
             self.event_bytes += size
             self.changed.notify_all()
             return cursor.lastrowid
