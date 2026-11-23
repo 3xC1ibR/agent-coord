@@ -2067,16 +2067,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // ready handler is responsible for navigation on both sides of the switch.
         alternate.host = "localhost"
         guard let staged = alternate.url else { throw Backend.failure("Invalid smoke origin.") }
+        let arguments = CommandLine.arguments
+        let flag = arguments.firstIndex(of: "--smoke-observe-origins")
+        let saved = flag.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
         let thread = try await smokeJS("""
             document.querySelector('[data-jev-skip]')?.click();
-            const created = await api('sessions', {client:'claude', name:'Window continuity', cwd});
-            const id = created.session.thread_id;
+            const id = saved || (await api('sessions', {client:'claude', name:'Window continuity', cwd})).session.thread_id;
             await refreshList(); await select(id);
             const field = document.querySelector('#message');
             field.value = 'An unsent draft'; field.focus(); field.setSelectionRange(2, 8);
             field.dispatchEvent(new Event('input', {bubbles:true}));
             return id;
-            """, in: item.webView, arguments: ["cwd": directory.path]) as! String
+            """, in: item.webView, arguments: ["cwd": directory.path, "saved": saved ?? ""]) as! String
         let sibling = makeWindow()
         defer { sibling.window.close() }
         try await smokeReady(sibling)

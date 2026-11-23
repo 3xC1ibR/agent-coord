@@ -18,6 +18,7 @@ import logging
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -25,7 +26,7 @@ from pathlib import Path
 
 from .store import CoordinationError
 from .sqlite_compatibility import SQLITE_CANTOPEN
-from .history_window import recent_view
+from .history_window import RECENT_TURNS, recent_view
 
 
 INLINE_BYTES = 256 * 1024
@@ -34,6 +35,8 @@ STAGE_BYTES = 256 * 1024
 STAGE_CHUNKS = 32
 QUERY_CHUNKS = 128
 READ_CHUNKS = 32
+_READ_AHEAD_SLOT = threading.BoundedSemaphore(1)
+_READ_AHEAD_WORKERS = 4
 MARKER = "__agent_coord_history__"
 PREPARATION_CACHE_BYTES = 64 * 1024 * 1024
 PREPARATION_CACHE_THREADS = 16
@@ -274,7 +277,21 @@ def compact_history(prepared):
     return PreparedHistory(prepared.serialized, {}, prepared.source_bytes, documents, cache_bytes=retained)
 
 
-def _documents(db, references):
+def _prefetch_blocks(uri, digests):
+    """Fault selected payload pages into the OS cache. Never return data to the reader."""
+    try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=.05)) as db:
+            for offset in range(0, len(digests), QUERY_CHUNKS):
+                batch = digests[offset:offset + QUERY_CHUNKS]
+                placeholders = ",".join("?" for _ in batch)
+                db.execute(f"SELECT sum(length(substr(payload, -1, 1))) FROM browser_history_chunks "
+                           f"WHERE digest IN ({placeholders})", batch).fetchone()
+    except sqlite3.Error:
+        # Contention or a missing block is handled by the authoritative snapshot read below.
+        pass
+
+
+def _documents(db, references, *, read_ahead=None):
     digests, multiblock = set(), set()
     for reference in references:
         if not isinstance(reference, list) or not reference or any(
@@ -284,6 +301,8 @@ def _documents(db, references):
         digests.update(reference)
         if len(reference) > 1:
             multiblock.update(reference)
+    if read_ahead is not None and len(digests) >= READ_CHUNKS:
+        read_ahead(sorted(digests)[:_READ_AHEAD_WORKERS * QUERY_CHUNKS])
     blocks = {}
     try:
         for binary, group in ((True, multiblock), (False, digests - multiblock)):
@@ -346,15 +365,17 @@ def prepared_history_view(prepared, serialized):
     return {**root.value["metadata"], "turns": turns}
 
 
-def _materialize_manifest(manifest, read_documents):
+def _materialize_manifest(manifest, read_documents, *, recent=False, live_turn=None):
     try:
         if manifest.get(MARKER) != 1 or manifest.get("layout") not in {"raw", "turns"}:
             raise HistoryUnavailableError("Saved conversation requires an unsupported history format.")
         root = read_documents([manifest.get("root")])[0]
         if manifest["layout"] == "raw":
-            return root
+            return recent_view(root, live_turn=live_turn) if recent else root
         history = root["metadata"]
-        turns = read_documents(root["turns"])
+        turn_refs = root["turns"]
+        selected = turn_refs[-RECENT_TURNS:] if recent else turn_refs
+        turns = read_documents(selected)
         references = [item for turn in turns for item in turn.get("items", [])]
         items = iter(read_documents(references))
         decoded = []
@@ -364,6 +385,10 @@ def _materialize_manifest(manifest, read_documents):
                 value["items"] = [next(items) for _ in turn["items"]]
             decoded.append(value)
         history["turns"] = decoded
+        if recent:
+            window = recent_view(history, live_turn=live_turn)
+            window["earlierTurns"] += len(turn_refs) - len(selected)
+            return window
         return history
     except (KeyError, TypeError, StopIteration) as exc:
         raise HistoryUnavailableError("Saved conversation has an invalid manifest.") from exc
@@ -381,12 +406,13 @@ def restore_projected_history(prepared):
     return _materialize_manifest(manifest, read_documents)
 
 
-def _decode(db, manifest):
+def _decode(db, manifest, *, recent=False, live_turn=None, read_ahead=None):
     own_snapshot = not db.in_transaction
     if own_snapshot:
         db.execute("BEGIN")
     try:
-        return _materialize_manifest(manifest, lambda references: _documents(db, references))
+        return _materialize_manifest(manifest, lambda refs: _documents(db, refs, read_ahead=read_ahead),
+                                     recent=recent, live_turn=live_turn)
     finally:
         if own_snapshot:
             db.rollback()
@@ -457,18 +483,46 @@ def read_history(store, thread_id, *, windows=None, live_turn=None):
         if not row:
             return None
         if windows is not None:
-            return windows.read(row[0], db, live_turn)
+            return windows.read(row[0], db, live_turn, thread_id=thread_id)
         return decode_history(row[0], db=db)
 
 
 class SavedHistoryWindows:
-    """Reuse bounded recent views of large inline histories written by older builds."""
+    """Read recent windows and reuse bounded views of large legacy inline histories."""
 
     def __init__(self):
         self.windows = OrderedDict()
+        self.warmed_threads = OrderedDict()
         self.lock = threading.Lock()
 
-    def read(self, raw, db, live_turn):
+    def _recent_manifest(self, thread, db, live_turn, thread_id):
+        with self.lock:
+            warm = thread_id in self.warmed_threads
+            if warm:
+                self.warmed_threads.move_to_end(thread_id)
+        if warm or thread.get("layout") != "turns" or not _READ_AHEAD_SLOT.acquire(blocking=False):
+            return _decode(db, thread, recent=True, live_turn=live_turn)
+        try:
+            path = db.execute("PRAGMA database_list").fetchone()[2]
+            if not path:
+                return _decode(db, thread, recent=True, live_turn=live_turn)
+            uri = Path(path).as_uri() + "?mode=ro"
+            with ThreadPoolExecutor(max_workers=_READ_AHEAD_WORKERS, thread_name_prefix="history-read") as pool:
+                def read_ahead(digests):
+                    futures = [pool.submit(_prefetch_blocks, uri, digests[i::_READ_AHEAD_WORKERS])
+                               for i in range(_READ_AHEAD_WORKERS)]
+                    for future in futures:
+                        future.result()
+                window = _decode(db, thread, recent=True, live_turn=live_turn, read_ahead=read_ahead)
+            with self.lock:
+                self.warmed_threads[thread_id] = None
+                if len(self.warmed_threads) > 4:
+                    self.warmed_threads.popitem(last=False)
+            return window
+        finally:
+            _READ_AHEAD_SLOT.release()
+
+    def read(self, raw, db, live_turn, *, thread_id=None):
         key = (hashlib.sha256(raw).digest(), live_turn) if len(raw) > INLINE_BYTES else None
         if key:
             with self.lock:
@@ -479,9 +533,9 @@ class SavedHistoryWindows:
                 return json.loads(cached)
         thread = json.loads(raw)
         if MARKER in thread:
-            # Verify all referenced blocks against this read snapshot.
-            thread = _decode(db, thread)
-            key = None
+            # The verified root supplies the full turn count. Read and
+            # verify the displayed turn and item blocks in this same snapshot.
+            return self._recent_manifest(thread, db, live_turn, thread_id)
         window = recent_view(thread, live_turn=live_turn)
         if key:
             encoded = json.dumps(window, separators=(",", ":")).encode()

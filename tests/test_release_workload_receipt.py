@@ -40,7 +40,8 @@ class ReleaseWorkloadTests(unittest.TestCase):
             "baseline_proof": {"version": "0.1.12+63", "red": True, "architecture": "arm64",
                                "payload_digest": gate.AFFECTED_PAYLOADS["arm64"]},
             "saved_histories": [{"fixture_id": key, "size_band": key, "source_bytes": size,
-                                 "sanitized_bytes": size, "turns": 5}
+                                 "sanitized_bytes": size, "turns": 331 if key == "medium" else 5,
+                                 "storage_format": "manifest" if key == "medium" else "legacy", "items": 1714}
                                 for key, size in (("medium", 256 * 1024), ("large", 10 * 1024**2))],
             "samples": [{"phase": "candidate", "kind": "history", "outcome": "success",
                          "fixture": key} for key in ("medium", "large")],
@@ -122,6 +123,8 @@ class ReleaseWorkloadTests(unittest.TestCase):
             (["candidate_runtime", "architecture"], "x86_64"),
             (["baseline_proof", "payload_digest"], "a"*64), (["saved_histories"], []),
             (["saved_histories", 0, "source_bytes"], 256 * 1024 - 1),
+            (["saved_histories", 0, "turns"], 3), (["saved_histories", 0, "items"], 157),
+            (["saved_histories", 0, "storage_format"], "legacy"),
             (["saved_histories", 1, "sanitized_bytes"], 10 * 1024**2 - 1),
             (["saved_histories", 1, "source_bytes"], 36 * 1024**2 + 1),
             (["workload", "source_database_bytes"], 1024**2), (["workload", "fixture_database_bytes"], 9045114879),

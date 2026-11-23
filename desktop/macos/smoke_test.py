@@ -58,6 +58,25 @@ def observe_window_moves(app, address):
     return observations
 
 
+def prepare_window_conversation(app, directory):
+    """Seed a saved conversation before the disposable native backend starts."""
+    sys.path.insert(0, str(app / "Contents/Resources/backend"))
+    from agent_coord.codex_app_server import BrowserSessions
+    from agent_coord.store import CoordinationStore
+    store = CoordinationStore(directory / "state.sqlite3")
+    sessions = BrowserSessions(store, str(directory))
+    thread = "native-window-observation"
+    try:
+        store.register(session_id=thread, client="claude", cwd=str(directory), name="Window continuity")
+        with store._connection() as db:
+            db.execute("""INSERT INTO browser_sessions(thread_id,cwd,name,client,created_at,updated_at)
+                          VALUES (?,?,?,?,?,?)""", (thread, str(directory), "Window continuity", "claude", time.time(), time.time()))
+        sessions.history_persistence.save(thread, {"id": thread, "turns": []})
+    finally:
+        sessions.close()
+    return thread
+
+
 def stopped(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -106,7 +125,9 @@ def main() -> int:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
     address = smoke_directory / "origins"
     if args.origins_only:
-        command += ["--smoke-origin-change-only", "--smoke-observe-origins", "--observe-window-origins", str(address)]
+        saved = prepare_window_conversation(args.app.expanduser().resolve(), smoke_directory)
+        command += ["--smoke-origin-change-only", "--smoke-observe-origins", saved,
+                    "--observe-window-origins", str(address), "--smoke-preserve-runtime"]
     first = None
     try:
         for attempt in range(2 if args.runtime_only else 1):

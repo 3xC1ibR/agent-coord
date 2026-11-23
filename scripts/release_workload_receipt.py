@@ -23,6 +23,9 @@ WORKFLOW = ".github/workflows/release-macos.yml"
 ROOT = Path(__file__).resolve().parents[1]
 ARCHITECTURES = ("arm64", "x86_64")
 DESCRIPTION = "Signed upgrade passed the private interactive workload"
+# The reported slow recent-history read traversed 331 saved turns and 1,714 items.
+MIN_ARCHIVE_TURNS = 300
+MIN_ARCHIVE_ITEMS = 1000
 # Resource digests from the two notarized 0.1.12+63 update archives published by run 45079465559.
 AFFECTED_PAYLOADS = {
     "arm64": "0b429828658aee1d9fffa3e3ed4e9f0155ec2dd39810fff733773d75775de541",
@@ -194,6 +197,10 @@ def verify_workload(report):
         raise ValueError("Saved history fixtures must be distinct")
     for history in histories:
         minimum, maximum = bands[history["size_band"]]
+        if history["size_band"] == "medium" and (
+                history.get("storage_format") != "manifest" or history["turns"] < MIN_ARCHIVE_TURNS
+                or history.get("items", 0) < MIN_ARCHIVE_ITEMS):
+            raise ValueError("The medium conversation must exercise a long block-backed history")
         if (history["turns"] < 3 or any(type(history[k]) is not int or not minimum <= history[k] <= maximum
                                         for k in ("source_bytes", "sanitized_bytes"))):
             raise ValueError("Saved history size or turn count is outside its workload band")

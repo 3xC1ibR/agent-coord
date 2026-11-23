@@ -35,7 +35,7 @@ import urllib.parse
 import uuid
 
 from measure_backend_latency import BUDGETS
-from release_workload_receipt import database_bytes
+from release_workload_receipt import MIN_ARCHIVE_ITEMS, MIN_ARCHIVE_TURNS, database_bytes
 from runtime_upgrade_validation import Validation, listener_pids, process_command, processes_mentioning, runtime
 
 
@@ -157,7 +157,7 @@ def match_snapshot_size(snapshot, database):
     return {"source_database_bytes": source_bytes, "fixture_database_bytes": fixture_bytes}
 
 
-def copy_saved_histories(snapshot, database, root):
+def copy_saved_histories(snapshot, database, root, *, manifest_thread=None):
     """Import inert, text-redacted copies using the real item layout and chunk format."""
     from agent_coord.store import CoordinationStore
     from agent_coord import history_persistence as history
@@ -219,19 +219,29 @@ def copy_saved_histories(snapshot, database, root):
             ORDER BY b.updated_at DESC LIMIT 3"""
             )
         ]
-        ids = legacy + [
+        ids = legacy + ([manifest_thread] if manifest_thread else []) + [
             r[0]
             for r in source.execute(
                 "SELECT thread_id FROM browser_sessions WHERE archived=0 ORDER BY updated_at DESC LIMIT 200"
             )
         ]
-        for source_id in ids:
+        for source_id in dict.fromkeys(ids):
             row = source.execute(
                 "SELECT history_json FROM browser_history WHERE thread_id=?", (source_id,)
             ).fetchone()
             if not row:
                 continue
-            raw = history.decode_history(row[0], db=source)
+            stored = json.loads(row[0])
+            storage_format = "manifest" if history.MARKER in stored else "legacy"
+            if refs and refs[0]["size_band"] == "large":
+                if stored.get("layout") != "turns" or storage_format != "manifest":
+                    continue
+                if manifest_thread and source_id != manifest_thread:
+                    continue
+                archive = history._documents(source, [stored["root"]])[0]
+                if len(archive["turns"]) < MIN_ARCHIVE_TURNS:
+                    continue
+            raw = history.decode_history(row[0], db=source) if storage_format == "manifest" else stored
             turns = raw.get("turns") or []
             if len(turns) < 3:
                 continue
@@ -244,6 +254,11 @@ def copy_saved_histories(snapshot, database, root):
                 else None
             )
             if not band or any(r["size_band"] == band for r in refs):
+                continue
+            items = sum(len(t.get("items", ())) for t in turns)
+            if band == "medium" and (storage_format != "manifest" or stored.get("layout") != "turns"
+                    or len(turns) < MIN_ARCHIVE_TURNS or items < MIN_ARCHIVE_ITEMS
+                    or manifest_thread and source_id != manifest_thread):
                 continue
             identity = str(uuid.uuid5(uuid.NAMESPACE_OID, "signed-gate-" + band))
             safe = {"id": identity, "cwd": str(root), "turns": redact(turns)}
@@ -261,7 +276,6 @@ def copy_saved_histories(snapshot, database, root):
                     "INSERT INTO browser_sessions(thread_id,cwd,name,created_at,updated_at) VALUES(?,?,?,?,?)",
                     (identity, str(root), name, time.time(), time.time()),
                 )
-            storage_format = "manifest" if history.MARKER in json.loads(row[0]) else "legacy"
             if storage_format == "manifest":
                 prepared = history.prepare_history(safe)
                 history.stage_history(store, prepared)
@@ -277,14 +291,14 @@ def copy_saved_histories(snapshot, database, root):
                     "source_bytes": size,
                     "sanitized_bytes": sanitized_size,
                     "turns": len(turns),
-                    "items": sum(len(t.get("items", [])) for t in turns),
+                    "items": items,
                     "last_turn": safe["turns"][-1]["id"],
                     "storage_format": storage_format,
                 }
             )
             if len(refs) == 2:
                 return refs
-    raise ValueError("Snapshot lacks both representative medium and large saved histories")
+    raise ValueError("Snapshot needs a long block-backed medium conversation and a large saved conversation")
 
 
 def fetch(url, token, route, body=None, timeout=20):
@@ -306,6 +320,7 @@ class SignedUpgrade(Validation):
         self.old, self.new = previous, candidate
         self.profile_sample = args.profile_sample
         self.snapshot = args.snapshot
+        self.manifest_thread = getattr(args, "saved_manifest_thread", None)
         self.affected_report = args.affected_report
         self.source_baseline_report = getattr(args, "source_baseline_report", None)
         self.candidate_only = args.candidate_only
@@ -492,7 +507,7 @@ class SignedUpgrade(Validation):
 
     def start(self):
         seed_inventory(self.database, self.root, self.sources)
-        self.saved = copy_saved_histories(self.snapshot, self.database, self.root)
+        self.saved = copy_saved_histories(self.snapshot, self.database, self.root, manifest_thread=self.manifest_thread)
         if not self.candidate_only:
             self.report["workload"].update(match_snapshot_size(self.snapshot, self.database))
         self.report["saved_histories"] = self.saved
@@ -1670,6 +1685,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("previous", "candidate", "snapshot", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--saved-manifest-thread", help="Select a specific reported long conversation from the private snapshot")
     parser.add_argument(
         "--profile-sample",
         type=Path,

@@ -393,6 +393,35 @@ class HistoryPersistenceTests(unittest.TestCase):
             self.assertEqual(decode_history(self.raw(), db=db), history)
         self.assertLess(len(fetched), 100, "History reads crossed into Python for every small item")
 
+    def test_recent_manifest_reads_only_visible_turns_and_their_verified_items(self):
+        from agent_coord.history_window import RECENT_TURNS, recent_view
+        turns = [{"id": str(i), "status": "completed", "items": [
+            {"type": "commandExecution", "aggregatedOutput": str(i) + "output " * 1024}
+        ]} for i in range(RECENT_TURNS + 50)]
+        thread = {"id": "conversation", "turns": turns}
+        self.persistence.save("conversation", thread)
+        with closing(sqlite3.connect(self.store.database_path)) as db:
+            root = history_storage._documents(db, [json.loads(self.raw())["root"]])[0]
+            earlier = {tuple(ref) for ref in root["turns"][:-RECENT_TURNS]}
+            visible = history_storage._documents(db, root["turns"][-1:])[0]["items"][0][0]
+        windows = history_storage.SavedHistoryWindows()
+        with patch.object(history_storage, "_documents", wraps=history_storage._documents) as documents:
+            self.assertEqual(read_history(self.store, "conversation", windows=windows), recent_view(thread))
+        fetched = {tuple(ref) for call in documents.call_args_list for ref in call.args[1]}
+        self.assertFalse(earlier & fetched, "Recent refresh decoded archived turns")
+        with patch.object(history_storage, "_prefetch_blocks") as prefetch:
+            self.assertEqual(read_history(self.store, "conversation", windows=windows), recent_view(thread))
+            with history_storage._READ_AHEAD_SLOT:
+                self.assertEqual(read_history(self.store, "conversation", windows=history_storage.SavedHistoryWindows()),
+                                 recent_view(thread))
+            prefetch.assert_not_called()
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_history_chunks SET payload=? WHERE digest=?", (b"damaged", visible))
+        with self.assertRaisesRegex(HistoryUnavailableError, "integrity"):
+            read_history(self.store, "conversation", windows=windows)
+        with self.assertRaisesRegex(HistoryUnavailableError, "integrity"):
+            read_history(self.store, "conversation", windows=history_storage.SavedHistoryWindows())
+
     def test_existing_legacy_search_trigger_accepts_repeated_publication(self):
         with self.store._connection() as db:
             db.execute("CREATE TABLE legacy_dirty(thread_id TEXT PRIMARY KEY)")
