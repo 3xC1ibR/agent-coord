@@ -212,15 +212,19 @@ class WebPush:
 
     def _enqueue(self, db, device, event, kind, thread, expires, context=None):
         label = {"completed": "Turn finished", "failed": "Turn failed", "approval": "Approval needed", "question": "Answer needed",
-                 "snooze": "Reminder",
+                 "snooze": "Reminder", "stalled": "Agent needs progress review",
                  "test": "Phone notifications are working"}[kind]
         context = context or {}
+        if kind == "stalled" and context.get("classification") == "waiting_for_approval":
+            label = "Approval still waiting"
         if kind == "approval":
             label = {"muse": "Muse", "kimi": "Kimi", "antigravity": "Antigravity", "claude": "Claude"}.get(context.get("client"), "Codex") + " is requesting approval"
         # Match desktop alerts using notification metadata, never turn contents
         # or approval commands. Bound the encrypted Web Push payload size.
         group = str(context.get("project_name") or context.get("repository_name") or "Ribbon Field")[:160]
         title = str(context.get("title") or "")[:160]
+        if kind == "stalled":
+            title = (title + ". " + str(context.get("body") or "Review the affected agent"))[:320]
         payload = {"title": group + " · " + label if thread else "Ribbon Field", "body": title or label,
                    "tag": "agent-coord-" + hashlib.sha256(event.encode()).hexdigest()[:24],
                    "url": "/#" + quote(thread, safe="") if thread else "/"}
@@ -236,10 +240,14 @@ class WebPush:
             devices, origin = self.remote.active_device_ids(), self.remote.origin
         if not self.transport.available:
             return
-        approvals = self.sessions.approval_notifications(include_claimed=True)
+        from . import stall_notifications
+        approvals = [event for event in self.sessions.approval_notifications(include_claimed=True)
+                     if event["status"] != "stalled"]
+        stalls = stall_notifications.notifications(self.store, include_claimed=True, cwd=self.sessions.cwd)
         snoozes = self.sessions.snooze_notifications(include_claimed=True)
         active_approvals = {"approval:" + item["request_key"] for item in approvals}
         active_snoozes = {"snooze:" + str(item["id"]) for item in snoozes}
+        active_stalls = {item["request_key"] for item in stalls}
         now = self.clock()
         with self.lock, self.connection() as db:
             for row in db.execute("SELECT device,origin FROM subscriptions").fetchall():
@@ -260,6 +268,15 @@ class WebPush:
                 for sub in subscribers:
                     self._enqueue(db, sub["device"], "approval:" + event["request_key"], event["status"],
                                   event["thread_id"], now + 900, event)
+            for event in stalls:
+                key = event["request_key"]
+                for sub in subscribers:
+                    self._enqueue(db, sub["device"], key, "stalled", event["thread_id"], now + 3600, event)
+                    # Resume unsent deliveries after downtime. Keep successful
+                    # receipts until this exact occurrence is superseded/resolved.
+                    db.execute("""UPDATE outbox SET expires=?, next_attempt=?
+                                  WHERE device=? AND event=? AND done=0 AND expires<=?""",
+                               (now + 3600, now, sub["device"], key, now))
             for event in snoozes:
                 key = "snooze:" + str(event["id"])
                 for sub in subscribers:
@@ -276,10 +293,14 @@ class WebPush:
             for row in db.execute("SELECT DISTINCT event FROM outbox WHERE event LIKE 'snooze:%'").fetchall():
                 if row[0] not in active_snoozes:
                     db.execute("DELETE FROM outbox WHERE event=?", (row[0],))
+            for row in db.execute("SELECT DISTINCT event FROM outbox WHERE event LIKE 'stall:%'").fetchall():
+                if row[0] not in active_stalls:
+                    db.execute("DELETE FROM outbox WHERE event=?", (row[0],))
             # Keep approval tombstones while the request exists; never replay an
             # unanswered approval every time its delivery TTL expires.
             db.execute("""DELETE FROM outbox WHERE expires < ?
-                          AND event NOT LIKE 'approval:%' AND event NOT LIKE 'snooze:%'""", (now - 86400,))
+                          AND event NOT LIKE 'approval:%' AND event NOT LIKE 'snooze:%'
+                          AND event NOT LIKE 'stall:%'""", (now - 86400,))
             due = db.execute("SELECT device,event FROM outbox WHERE done=0 AND next_attempt<=? AND expires>? ORDER BY next_attempt LIMIT 20",
                              (now, now)).fetchall()
         for row in due:
@@ -288,6 +309,13 @@ class WebPush:
             self._send(row["device"], row["event"])
 
     def _send(self, device, event):
+        if event.startswith("stall:"):
+            from .stall_notifications import notifications
+            if not any(item["request_key"] == event for item in
+                       notifications(self.store, include_claimed=True, cwd=self.sessions.cwd)):
+                with self.lock, self.connection() as db:
+                    db.execute("DELETE FROM outbox WHERE device=? AND event=?", (device, event))
+                return
         # A completion may already be queued for retry when the user snoozes.
         # Recheck at delivery as well as filtering newly discovered events.
         if event.startswith("turn:") and not self.sessions.completion_notification_allowed(int(event[5:])):

@@ -96,6 +96,9 @@ def available_owners(db, store):
 
 def decide(thread, *, waiting=False, owners=()):
     """Return a presentation policy; never acknowledge messages or completions."""
+    incident = thread.get("stall_incident")
+    if incident and incident.get("last_user_alert_at") is not None:
+        return {"quiet": False, "notify": True, "owner_thread_id": thread["thread_id"], "needs_user": True}
     context = thread.get("notification_context") or {}
     origin = context.get("origin")
     owner = context.get("owner_thread_id")

@@ -134,6 +134,8 @@ class ThreadStore:
             notification_policy.initialize(db)
             # Serialize upgrades across independently running terminal hooks.
             db.execute("BEGIN IMMEDIATE")
+            from .stall_notifications import initialize as initialize_stalls
+            initialize_stalls(db)
             checkpoint_columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_checkpoints)")}
             for field in ("context_lifecycle_json", "context_lifecycle_turn_key"):
                 if field not in checkpoint_columns:
@@ -271,7 +273,9 @@ class ThreadStore:
             # A due reminder is visible immediately, even if the lifecycle
             # worker has not yet committed its durable notification receipt.
             row["attention"] = "now"
-        result = dict(row)
+        from .stall_notifications import projected_fields
+        fields = projected_fields(row, self.store.clock())
+        result = {**row, **fields}
         from .execution_state import read_many
         result["execution"] = (inventory.executions[row["thread_id"]] if inventory is not None else
                                read_many(self.store, db, [row["thread_id"]])[row["thread_id"]])
@@ -344,7 +348,8 @@ class ThreadStore:
             return self.organization.describe(db, result, association=inventory.associations.get(row["thread_id"]))
         return self.organization.describe(db, result)
 
-    _SELECT = """SELECT t.*, p.name AS project_name, p.root AS project_root,
+    from .stall_notifications import THREAD_FIELDS_SQL
+    _SELECT = """SELECT """ + THREAD_FIELDS_SQL + """, t.*, p.name AS project_name, p.root AS project_root,
                         s.cwd, s.client, s.ended_at, s.turn_active
                  FROM work_threads t JOIN work_projects p ON p.id = t.project_id
                  JOIN sessions s ON s.session_id = t.thread_id"""
@@ -571,6 +576,8 @@ class ThreadStore:
             # App-server notifications and lifecycle hooks may describe the same turn.
             if turn_id and row["turn_id"] == turn_id:
                 return
+            from .stall_notifications import clear_in_transaction
+            clear_in_transaction(db, session_id, row["turn_id"], now=self.store.clock(), reason="new_turn")
             self._mark_seen(db, session_id)
             self._mark_receipts(db, session_id, kind="handled")
             now = self.store.clock() if occurred_at is None else occurred_at
@@ -618,8 +625,11 @@ class ThreadStore:
         disconnects while completion bookkeeping is still pending.
         """
         with self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT OR IGNORE INTO turn_stop_requests VALUES (?, ?, ?)",
                        (session_id, turn_id, self.store.clock()))
+            from .stall_notifications import clear_in_transaction
+            clear_in_transaction(db, session_id, turn_id, now=self.store.clock(), reason="stop")
 
     def stop_requested(self, session_id: str, turn_id: str) -> bool:
         with self.store._connection() as db:
@@ -636,6 +646,8 @@ class ThreadStore:
             if not turn or not turn["turn_key"] or (turn_id and turn_id != turn["turn_id"]):
                 return
             now = self.store.clock() if occurred_at is None else occurred_at
+            from .stall_notifications import clear_in_transaction
+            clear_in_transaction(db, session_id, turn["turn_id"], now=now, reason="finished")
             inserted = db.execute("INSERT OR IGNORE INTO turn_completions (thread_id, turn_key, status, completed_at) VALUES (?, ?, ?, ?)",
                                   (session_id, turn["turn_key"], status, now)).rowcount
             if inserted:

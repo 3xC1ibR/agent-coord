@@ -88,17 +88,18 @@ class TurnNotifications {
   }
 
   async deliver(event) {
-    if (this.closed || !this.enabled() || !["completed", "failed", "approval", "question", "snooze"].includes(event.status)) return;
+    if (this.closed || !this.enabled() || !["completed", "failed", "approval", "question", "snooze", "stalled"].includes(event.status)) return;
     // The server claim is atomic across tabs and persists across reconnects.
     // Consume focused-thread events too, so they cannot pop up in another tab.
     const quiet = this.viewing(event.thread_id);
-    const approval = ["approval", "question"].includes(event.status);
+    const stalled = event.status === "stalled";
+    const approval = ["approval", "question"].includes(event.status) || stalled;
     const snooze = event.status === "snooze";
     if (!await (approval ? this.claimApproval(event.request_key) : snooze ? this.claimSnooze(event.id) : this.claim(event.id))) return;
     if (this.closed || !this.enabled() || quiet || this.viewing(event.thread_id)) return;
-    const label = event.status === "question" ? "Answer needed" : approval ? (event.client === "muse" ? "Muse Code" : event.client === "kimi" ? "Kimi" : event.client === "antigravity" ? "Antigravity" : event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
+    const label = stalled ? (event.classification === "waiting_for_approval" ? "Approval still waiting" : "Agent needs progress review") : event.status === "question" ? "Answer needed" : approval ? (event.client === "muse" ? "Muse Code" : event.client === "kimi" ? "Kimi" : event.client === "antigravity" ? "Antigravity" : event.client === "claude" ? "Claude" : "Codex") + " is requesting approval" : snooze ? "Reminder" : event.status === "failed" ? "Turn failed" : "Turn finished";
     const notification = new this.env.Notification(`${event.project_name || event.repository_name || "Ribbon Field"} · ${label}`, {
-      body: event.title, data: {thread_id: event.thread_id}, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
+      body: stalled ? `${event.title}. ${event.body}` : event.title, data: {thread_id: event.thread_id}, tag: approval ? "agent-coord-approval-" + event.request_key : (snooze ? "agent-coord-snooze-" : "agent-coord-turn-") + event.id,
     });
     notification.onclick = async () => {
       this.env.focus();

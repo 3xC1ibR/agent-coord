@@ -265,17 +265,14 @@ def notify_agent_failure(store, thread_id, *, event_key, stage, error=None, turn
             _notify(store, db, request, event_key=event_key, stage=stage, error=error, turn_id=turn_id)
 
 
-def notify_agent_stall(store, thread_id, *, turn_id, error):
-    with store._connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
-            return
-        request = db.execute("""SELECT * FROM app_control_requests WHERE operation = 'create'
-            AND thread_id = ? AND status = 'completed' ORDER BY created_at, request_id LIMIT 1""", (thread_id,)).fetchone()
-        if request:
-            _notify(store, db, request, event_key=["stall", turn_id], stage="watchdog", error=error,
-                    turn_id=turn_id, event="app_agent_stalled", guidance=
-                    "Inspect this exact turn and continue coordinating the original assignment. "
-                    "The runtime attempted state reconciliation and, when supported and safe, one same-turn continuation. "
-                    "Silence is not proof that the agent or its tools stopped. Confirm termination before transferring its write scope. "
-                    "No tool or original prompt was replayed. No reply is required.")
+def notify_agent_stall(store, thread_id, *, turn_id, error, progress_at=None, classification="stalled"):
+    """Compatibility entry point; new observers supply their confirmed progress epoch."""
+    from .stall_notifications import record_stall, snapshot
+    if progress_at is None:
+        current = snapshot(store, thread_id, turn_id)
+        # Legacy callers invoke this only after their inactivity threshold. Keep
+        # an established epoch so subsequent calls retain the durable cadence.
+        allowance = 1200 if classification in {"long_running_tool", "unverified_tool"} else 600
+        progress_at = current["progress_at"] if current else store.clock() - allowance
+    return record_stall(store, thread_id, turn_id, progress_at=progress_at,
+                        detail=error, classification=classification)

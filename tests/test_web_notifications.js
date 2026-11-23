@@ -305,3 +305,19 @@ test("notification delivery failures do not break subsequent completion handling
   assert.equal(f.shared.shown.length, 1);
   f.client.destroy();
 });
+
+test("stall escalation has its own receipt and opens the affected conversation", async () => {
+  const f = fixture();
+  await f.button.onclick();
+  const event = approval("stall:12", {status: "stalled", classification: "stalled", body: "Review the agent without confirmed progress"});
+  await f.client.receive([event, event]);
+  assert.equal(f.shared.shown.length, 1);
+  assert.equal(f.shared.shown[0].title, "agent-coord · Agent needs progress review");
+  assert.match(f.shared.shown[0].options.body, /Review/);
+  await f.shared.shown[0].onclick();
+  assert.deepEqual(f.opened, ["thread-one"]);
+  await f.client.receive([{...event, request_key: "stall:13", classification: "waiting_for_approval"}]);
+  assert.equal(f.shared.shown.length, 2);
+  assert.equal(f.shared.shown[1].title, "agent-coord · Approval still waiting");
+  f.client.destroy();
+});
