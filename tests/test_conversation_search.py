@@ -348,20 +348,20 @@ class ConversationSearchTests(unittest.TestCase):
         refresh_messages(self.store)
         # Include one oversized message and a match across the chunk boundary.
         text = "𐐀" * (conversation_search._TEXT_CHARACTERS - 3) + "complete boundary" + "ß" * 180000
-        items = [{"id": f"message-{i}", "type": "agentMessage", "text": text if i == 0 else "Replacement " + "x" * 18000}
-                 for i in range(140)]
+        items = [{"id": f"message-{i}", "type": "agentMessage", "text": text if i == 0 else "Replacement " + "x" * 120000}
+                 for i in range(24)]
         with self.store._connection() as db:
             db.execute("UPDATE browser_history SET history_json=? WHERE thread_id='thread'",
                        (json.dumps({"turns": [{"id": "turn", "items": items}]}),))
         stage = conversation_search._stage_batch
         counts = []
 
-        def inspect_batch(store, generation, batch):
+        def inspect_batch(store, generation, batch, revision):
             size = sum(sum(len(v.encode("utf-8")) if isinstance(v, str) else 8 for v in row) for _, row in batch)
             counts.append((len(batch), size))
             self.assertLessEqual(len(batch), conversation_search._STAGE_ROWS)
             self.assertLessEqual(size, conversation_search._STAGE_BYTES)
-            result = stage(store, generation, batch)
+            result = stage(store, generation, batch, revision)
             with store.reading(), store._connection() as db:
                 self.assertEqual([r[0] for r in db.execute("SELECT text FROM conversation_search_message_index")],
                                  ["Original content"], "A partial generation became visible")
@@ -378,7 +378,7 @@ class ConversationSearchTests(unittest.TestCase):
         self.assertEqual(hit["message_count"], 1)
         self.assertIn("complete boundary", hit["matches"][0]["excerpt"])
         with self.store.reading(), self.store._connection() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_message_index").fetchone()[0], 140)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM conversation_search_message_index").fetchone()[0], 24)
             self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index WHERE item_id='message-0'").fetchone()[0], text)
 
     def test_interrupted_stage_is_invisible_and_recovered_after_restart(self):
@@ -388,9 +388,9 @@ class ConversationSearchTests(unittest.TestCase):
         stage = conversation_search._stage_batch
         staged = []
 
-        def interrupt(store, generation, batch):
-            result = stage(store, generation, batch)
-            staged.append((generation, batch))
+        def interrupt(store, generation, batch, revision):
+            result = stage(store, generation, batch, revision)
+            staged.append((generation, batch, revision))
             raise RuntimeError("Simulated process interruption")
 
         with patch.object(conversation_search, "_stage_batch", interrupt), self.assertRaisesRegex(RuntimeError, "interruption"):
@@ -566,6 +566,140 @@ class ConversationSearchTests(unittest.TestCase):
             finally:
                 release.set()
             self.assertEqual(first.result(timeout=5)["remaining_sources"], 0)
+
+    def save_search_items(self, items):
+        history = {"turns": [{"id": "turn", "items": items}]}
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO browser_history VALUES ('thread', ?)
+                ON CONFLICT(thread_id) DO UPDATE SET history_json=excluded.history_json""", (json.dumps(history),))
+        return history
+
+    def test_growing_inline_history_indexes_only_changed_prose_and_occurrences(self):
+        self.create("thread")
+        items = [{"id": str(i), "type": "agentMessage", "text": f"Retained prose {i} Grüße " + "sample " * 10}
+                 for i in range(480)]
+        self.save_search_items(items)
+        conversation_search.ensure_message_schema(self.store)
+
+        def run_snapshot():
+            scheduled = []
+            list(conversation_search.index_search_snapshot(self.store, ["thread"], scheduled.append))
+            for job in scheduled:
+                list(job())
+
+        run_snapshot()
+        before = self.store.database_metrics()["operations"]
+        sources = conversation_search.search_metrics(self.store)["substring_stage"]["sources"]
+        items.append({"type": "commandExecution", "output": "excluded output " * 25000})
+        for i in range(12):
+            if i:
+                items[-1]["text"] = f"Corrected reply {i}"
+            items.append({"id": f"added-{i}", "type": "agentMessage", "text": f"Current reply {i}"})
+            history = self.save_search_items(items)
+            run_snapshot()
+        after = self.store.database_metrics()["operations"]
+        for name in ("search.stage", "search.cleanup"):
+            added = after.get(name, {}).get("count", 0) - before.get(name, {}).get("count", 0)
+            self.assertEqual(added, 0, f"{name} rebuilt retained prose during 12 small edits")
+        indexed = conversation_search.search_metrics(self.store)["substring_stage"]["sources"] - sources
+        self.assertEqual(indexed, 23)
+        with self.store.reading(), self.store._connection() as db:
+            routing = db.execute("SELECT evidence_json FROM conversation_search_routing_index").fetchone()[0]
+        self.assertEqual(json.loads(routing), conversation_search.routing_history(history))
+        self.assertEqual(search_threads(self.store, "GRÜSSE")["items"][0]["message_count"], 480)
+        self.assertEqual(search_threads(self.store, "current reply 0")["items"], [])
+        self.assertEqual(search_threads(self.store, "corrected reply 1")["items"][0]["message_count"], 3)
+        self.assertEqual(search_threads(self.store, "excluded output")["items"], [])
+
+    def test_incremental_publication_rejects_stale_snapshot_and_rolls_back_atomically(self):
+        self.create("thread")
+        items = [{"id": str(i), "type": "agentMessage", "text": f"Original conversation prose {i}"}
+                 for i in range(100)]
+        self.save_search_items(items)
+        refresh_messages(self.store)
+        reader = sqlite3.connect(self.store.database_path)
+        self.addCleanup(reader.close)
+        select = "SELECT text FROM conversation_search_message_index WHERE item_id='99'"
+        reader.execute("BEGIN")
+        self.assertEqual(reader.execute(select).fetchone()[0], "Original conversation prose 99")
+        items[-1]["text"] = "Superseded edit"
+        self.save_search_items(items)
+        stale = prepare_messages(self.store, "thread")
+        items[-1]["text"] = "Durable replacement"
+        # Duplicate ID moves the earlier occurrence to its last position. The
+        # exact timestamp must also survive a process restart and a delta.
+        items.append({"id": "2", "type": "userMessage", "timelineAt": 1793247626.5940921,
+                      "content": [{"type": "text", "text": "New user reply"}]})
+        self.save_search_items(items)
+        self.assertFalse(publish_messages(self.store, stale))
+        with self.store._connection() as db:
+            db.execute("""CREATE TRIGGER fail_delta BEFORE INSERT ON conversation_search_routing_chunks
+                          BEGIN SELECT RAISE(ABORT, 'interrupted publication'); END""")
+        reopened = CoordinationStore(self.store.database_path)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "interrupted publication"):
+            refresh_messages(reopened)
+        with self.store._connection() as db:
+            self.assertEqual(db.execute(select).fetchone()[0], "Original conversation prose 99")
+            self.assertIsNone(db.execute("SELECT evidence_json FROM conversation_search_routing_index").fetchone())
+            db.execute("DROP TRIGGER fail_delta")
+        refresh_messages(reopened)
+        self.assertEqual(reader.execute(select).fetchone()[0], "Original conversation prose 99")
+        reader.commit()
+        self.assertEqual(reader.execute(select).fetchone()[0], "Durable replacement")
+        self.assertEqual(tuple(reader.execute("""SELECT position,role,timestamp FROM conversation_search_message_index
+            WHERE item_id='2'""").fetchone()), (100, "user", 1793247626.5940921))
+        self.assertEqual(search_threads(reopened, "superseded")["items"], [])
+
+    def test_large_routing_window_reuses_generation_and_new_prose_is_searchable_before_trigram_work(self):
+        self.create("thread")
+        items = [{"id": str(i), "type": "agentMessage", "text": f"Message {i} " + "retained " * 300}
+                 for i in range(210)]
+        self.save_search_items(items)
+        refresh_messages(self.store)
+        with self.store.reading(), self.store._connection() as db:
+            original = db.execute("SELECT generation FROM conversation_search_heads").fetchone()[0]
+        items[0]["text"] = "Updated outside the routing window"
+        items[-1]["text"] = "Updated final receipt"
+        history = self.save_search_items(items)
+        jobs = []
+        self.assertTrue(publish_messages(self.store, prepare_messages(self.store, "thread"), schedule_index=jobs.append))
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT generation FROM conversation_search_heads").fetchone()[0], original)
+            packed = db.execute("SELECT evidence_json FROM conversation_search_routing_index").fetchone()[0]
+        self.assertGreater(len(packed), conversation_search._STAGE_BYTES)
+        self.assertEqual(json.loads(packed), conversation_search.routing_history(history))
+        self.assertEqual(search_threads(self.store, "updated final receipt")["items"][0]["thread_id"], "thread")
+        self.assertEqual(search_threads(self.store, "message 209")["items"], [])
+        self.assertEqual(len(jobs), 1)
+        list(jobs[0]())
+        self.assertEqual(search_threads(self.store, "outside the routing window")["items"][0]["thread_id"], "thread")
+
+    def test_bulk_generation_stops_staging_when_source_changes_between_batches(self):
+        self.create("thread", "Previous published prose")
+        refresh_messages(self.store)
+        items = [{"id": str(i), "type": "agentMessage", "text": "Superseded prose " + "x" * 50000}
+                 for i in range(24)]
+        self.save_search_items(items)
+        prepared = prepare_messages(self.store, "thread")
+        stage_batch = conversation_search._stage_batch
+        completed = []
+
+        def invalidate_after_first(*args):
+            result = stage_batch(*args)
+            completed.append(result)
+            if len(completed) == 1:
+                self.save("thread", "Current source after interruption")
+            return result
+
+        with patch.object(conversation_search, "_stage_batch", invalidate_after_first):
+            self.assertFalse(publish_messages(self.store, prepared))
+        self.assertEqual(completed, [True, False])
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT text FROM conversation_search_message_index").fetchone()[0],
+                             "Previous published prose")
+            self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_generations WHERE state='staging'").fetchone())
+        refresh_messages(self.store)
+        self.assertEqual(search_threads(self.store, "current source")["items"][0]["thread_id"], "thread")
 
     def test_immutable_documents_reuse_large_items_and_only_stage_changed_text(self):
         from agent_coord import history_persistence as storage

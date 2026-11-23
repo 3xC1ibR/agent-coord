@@ -426,10 +426,37 @@ def _document_rows(identity, item):
     _, _, role, timestamp, text, folded = found
     header = (identity, str(item["id"]) if item.get("id") else None,
               role, timestamp, text[:6000], len(text))
-    chunks = tuple((identity, start // _TEXT_CHARACTERS, text[start:start + _TEXT_CHARACTERS],
-                    folded[start:start + _TEXT_CHARACTERS])
-                   for start in range(0, max(len(text), len(folded)), _TEXT_CHARACTERS))
-    return header, chunks
+    return header, _prose_chunks(identity, text, folded)
+
+
+def _prose_chunks(identity, text, folded):
+    return tuple((identity, start // _TEXT_CHARACTERS, text[start:start + _TEXT_CHARACTERS],
+                  folded[start:start + _TEXT_CHARACTERS])
+                 for start in range(0, max(len(text), len(folded)), _TEXT_CHARACTERS))
+
+
+
+def _inline_document_records(store, records):
+    # Inline histories lack immutable item references. Reuse the same prose
+    # cache and substring sources as manifest histories. Occurrence identity,
+    # timestamp and position stay on the thread, even for identical prose.
+    occurrences, prose = [], {}
+    for position, turn, item, role, timestamp, text, folded in records:
+        key = "inline-v1:" + role + ":" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        occurrences.append((position, turn, item, role, timestamp, key))
+        prose[key] = (role, text, folded)
+    with store.reading(), store._connection() as db:
+        cached = _cached_documents(db, prose, metadata=False)
+
+    def missing():
+        for key, (role, text, folded) in prose.items():
+            if key not in cached:
+                header = (key, None, role, None, text[:6000], len(text))
+                yield header, _prose_chunks(key, text, folded)
+
+    for _ in _stage_document_steps(store, missing()):
+        pass
+    return tuple(occurrences)
 
 
 def _document_stage_rows(documents):
@@ -581,6 +608,12 @@ def _prepare_messages(store, thread_id):
         found, status = [], "unavailable"
     # Search keeps the last duplicate ID; routing intentionally keeps them all.
     records = {(record[0], record[1]): (position, *record) for position, record in enumerate(found)}
+    # A generation would stage at least two rows per inline message.
+    # Above one batch, give individual prose immutable identities so a change
+    # to another occurrence never invalidates their substring sources.
+    if len(records) >= _STAGE_ROWS // 2:
+        occurrences = _inline_document_records(store, records.values())
+        return PreparedMessages(thread_id, row["revision"], status, (), json.dumps(routing), occurrences)
     return PreparedMessages(thread_id, row["revision"], status, tuple(records.values()), json.dumps(routing))
 
 
@@ -610,7 +643,7 @@ def _stage_batches(rows, *, max_rows=_STAGE_ROWS, max_bytes=_STAGE_BYTES):
         yield batch
 
 
-def _stage_batch(store, generation, batch):
+def _stage_batch(store, generation, batch, revision):
     # Group SQL parameters before writer admission as well as history decoding.
     grouped = {}
     for table, row in batch:
@@ -622,12 +655,95 @@ def _stage_batch(store, generation, batch):
     with _measure(store, "stage") as measurement:
         with _operation(store, "search.stage"), store._connection() as db:
             renewed = db.execute("""UPDATE conversation_search_generations SET expires_at=?
-                WHERE generation=? AND state='staging'""", (time.time() + _STAGE_LEASE_SECONDS, generation))
+                WHERE generation=? AND state='staging' AND (SELECT r.revision FROM conversation_search_revisions r
+                    WHERE r.thread_id=conversation_search_generations.thread_id) IS ?""",
+                (time.time() + _STAGE_LEASE_SECONDS, generation, revision))
             if renewed.rowcount != 1:
+                db.execute("UPDATE conversation_search_generations SET state='garbage' "
+                           "WHERE generation=? AND state='staging'", (generation,))
                 return False
             for statement, parameters in statements:
                 db.execute(statement, parameters)
         measurement.update(rows=len(batch), bytes=size, max_rows=len(batch), max_bytes=size)
+    return True
+
+
+def _document_delta(store, prepared):
+    """Compare compact occurrences against one published snapshot outside the writer."""
+    if not prepared.document_records:
+        return None
+    with store.reading(), store._connection() as db:
+        db.execute("BEGIN")
+        head = db.execute("""SELECT h.generation,h.revision FROM conversation_search_heads h
+            WHERE h.thread_id=? AND NOT EXISTS (SELECT 1 FROM conversation_search_entries e
+                WHERE e.generation=h.generation)""", (prepared.thread_id,)).fetchone()
+        if head is None:
+            return None
+        generation, revision = head
+        # A large truncation gets a fresh generation plus bounded cleanup.
+        rows = db.execute("""SELECT position,turn_id,item_id,role,timestamp,document
+            FROM conversation_search_document_entries WHERE generation=? LIMIT ?""",
+            (generation, len(prepared.document_records) + _STAGE_ROWS + 1)).fetchall()
+        if len(rows) > len(prepared.document_records) + _STAGE_ROWS:
+            return None
+        old_records = {row[0]: tuple(row) for row in rows}
+        writes = [row for row in prepared.document_records if old_records.pop(row[0], None) != row]
+        changes = len(writes) + len(old_records)
+        if changes > _STAGE_ROWS:
+            return None
+        size = sum(sum(len(v.encode("utf-8")) if isinstance(v, str) else 8 for v in row) for row in writes)
+        if size > _STAGE_BYTES:
+            return None
+        routing = {offset // _TEXT_CHARACTERS: prepared.routing[offset:offset + _TEXT_CHARACTERS]
+                   for offset in range(0, len(prepared.routing), _TEXT_CHARACTERS)}
+        parts, removed_parts = [], []
+        # Read existing parts one at a time. Retain a large routing window
+        # when its changed parts fit the normal transaction budget.
+        for part, old_text in db.execute("""SELECT part,text FROM conversation_search_routing_chunks
+                WHERE generation=? ORDER BY part""", (generation,)):
+            new_text = routing.pop(part, None)
+            if new_text == old_text:
+                continue
+            if new_text is None:
+                removed_parts.append(part)
+            else:
+                parts.append((part, new_text))
+            size += max(len(old_text), len(new_text or ""))
+            if size > _STAGE_BYTES or changes + len(parts) + len(removed_parts) > _STAGE_ROWS:
+                return None
+    if (changes + len(parts) + len(removed_parts) + len(routing) > _STAGE_ROWS
+            or size + sum(map(len, routing.values())) > _STAGE_BYTES):
+        return None
+    parts.extend(routing.items())
+    return generation, revision, writes, tuple(old_records), parts, removed_parts
+
+
+def _publish_document_delta(store, prepared, delta):
+    # Published document keys are immutable. Only the thread occurrence map
+    # and its matching routing/status change, in a single bounded transaction.
+    generation, revision, writes, removed, parts, removed_parts = delta
+    with _operation(store, "search.publish"), store._connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        head = db.execute("""UPDATE conversation_search_heads SET revision=?,status=?
+            WHERE thread_id=? AND generation=? AND revision IS ?
+              AND (SELECT revision FROM conversation_search_revisions WHERE thread_id=?) IS ?""",
+            (prepared.revision, prepared.status, prepared.thread_id, generation, revision,
+             prepared.thread_id, prepared.revision))
+        if head.rowcount != 1:
+            return False
+        for table, column, values in (("conversation_search_document_entries", "position", removed),
+                                      ("conversation_search_routing_chunks", "part", removed_parts)):
+            if values:
+                db.execute(f"DELETE FROM {table} WHERE generation=? AND {column} IN ("
+                           + ",".join("?" * len(values)) + ")", (generation, *values))
+        if writes:
+            db.executemany("INSERT OR REPLACE INTO conversation_search_document_entries VALUES (?,?,?,?,?,?,?)",
+                           [(generation, *row) for row in writes])
+        if parts:
+            db.executemany("INSERT OR REPLACE INTO conversation_search_routing_chunks VALUES (?,?,?)",
+                           [(generation, part, text) for part, text in parts])
+        db.execute("UPDATE conversation_search_revisions SET indexed_revision=revision WHERE thread_id=?",
+                   (prepared.thread_id,))
     return True
 
 
@@ -640,31 +756,40 @@ def publish_messages(store, prepared, *, schedule_index=None):
 
 
 def _publish_messages(store, prepared, schedule_index):
-    generation = uuid.uuid4().hex if prepared.status is not None else None
-    index_steps = None
-    if generation is not None:
+    from .conversation_substrings import index_document_steps, index_generation_steps
+
+    delta = _document_delta(store, prepared)
+    generation = None
+    staged = True
+    if delta is None and prepared.status is not None:
+        generation = uuid.uuid4().hex
         with _operation(store, "search.stage"), store._connection() as db:
-            db.execute("INSERT INTO conversation_search_generations VALUES (?, ?, 'staging', ?)",
-                       (generation, prepared.thread_id, time.time() + _STAGE_LEASE_SECONDS))
-        for batch in _stage_batches(_stage_rows(prepared, generation)):
-            if not _stage_batch(store, generation, batch):
-                return False
-        from .conversation_substrings import index_document_steps, index_generation_steps
+            inserted = db.execute("""INSERT INTO conversation_search_generations
+                SELECT ?, ?, 'staging', ? WHERE
+                (SELECT revision FROM conversation_search_revisions WHERE thread_id=?) IS ?""",
+                (generation, prepared.thread_id, time.time() + _STAGE_LEASE_SECONDS,
+                 prepared.thread_id, prepared.revision))
+            staged = inserted.rowcount == 1
+        if staged:
+            staged = all(_stage_batch(store, generation, batch, prepared.revision)
+                         for batch in _stage_batches(_stage_rows(prepared, generation)))
+    with _measure(store, "publish") as measurement:
+        result = (_publish_document_delta(store, prepared, delta) if delta is not None
+                  else staged and _publish_head(store, prepared, generation))
+        measurement["published" if result else "discarded"] = 1
+    if result and prepared.status is not None:
         if prepared.document_records:
             documents = tuple(record[-1] for record in prepared.document_records)
             index_steps = partial(index_document_steps, store, documents)
         else:
             index_steps = partial(index_generation_steps, store, generation)
+        # Queries scan published prose until its trigram index is ready. A
+        # restart before this work completes is covered by startup backfill.
         if schedule_index is None:
             for _ in index_steps():
                 pass
-    with _measure(store, "publish") as measurement:
-        result = _publish_head(store, prepared, generation)
-        measurement["published" if result else "discarded"] = 1
-    if result and index_steps is not None and schedule_index is not None:
-        # Queries scan the published prose until its trigram index is ready.
-        # A restart before this callback runs is covered by the startup backfill.
-        schedule_index(index_steps)
+        else:
+            schedule_index(index_steps)
     return result
 
 
