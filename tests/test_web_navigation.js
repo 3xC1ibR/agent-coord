@@ -7,7 +7,8 @@ const request = "11111111-1111-4111-8111-111111111111";
 
 function historyNavigationFixture() {
   const listeners = new Map(), opened = [], restored = [];
-  const view = {history: {state: null}, addEventListener: (type, listener) => listeners.set(type, listener)};
+  const view = {history: {state: null}, location: {href: "https://mac.example/"},
+    addEventListener: (type, listener) => listeners.set(type, listener)};
   const navigation = new HistoryNavigation(view);
   const router = {open: async (...args) => opened.push(args), back: async snapshot => restored.push(snapshot)};
   const fragment = hash => listeners.get("hashchange")({newURL: "https://mac.example/" + hash});
@@ -41,6 +42,7 @@ test("Back and Forward restore full snapshots without duplicate fragment navigat
   await f.navigation.ready(f.router);
   const snapshot = {thread: "previous-thread", directory: "/work", filters: {search: "retained"}};
   f.view.history.state = {agentCoord: snapshot};
+  f.view.location.href = "https://mac.example/#previous-thread";
   f.listeners.get("popstate")({state: f.view.history.state});
   f.fragment("#previous-thread");
   assert.deepEqual(f.restored, [snapshot]);
@@ -54,6 +56,28 @@ test("notification fragments accept only bounded thread identities", async () =>
   assert.deepEqual(f.opened, []);
   f.fragment("#thread%2D1");
   assert.deepEqual(f.opened, [["agentcoord://thread/thread-1", {push: false}]]);
+});
+
+test("returning to the first conversation during a fragment open needs only popstate", async () => {
+  const f = historyNavigationFixture();
+  await f.navigation.ready(f.router);
+  f.view.location.href = "https://mac.example/#second";
+  f.listeners.get("popstate")({state: null});
+  f.fragment("#second");
+  f.view.location.href = "https://mac.example/#first";
+  f.listeners.get("popstate")({state: null});
+  assert.deepEqual(f.opened, ["second", "first"].map(id => ["agentcoord://thread/" + id, {push: false}]));
+});
+
+test("applying a native fragment never writes the previous thread over its URL", async () => {
+  const c = setup();
+  c.router.apply = async route => {
+    assert.equal(c.writes.length, 0);
+    c.snapshot().thread = route.id;
+  };
+  const result = await c.router.open("agentcoord://thread/second", {push: false});
+  assert.equal(result.status, "displayed");
+  assert.equal(c.entries[0].state.agentCoord.thread, "second");
 });
 
 test("dispatcher URLs retain the opt-in page and selected worker without changing overview URLs", () => {

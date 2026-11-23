@@ -49,20 +49,25 @@
     constructor(view) {
       this.pending = null;
       this.router = null;
+      let popstateURL = null;
+      const openFragment = url => {
+        try {
+          const thread = decodeURIComponent(new URL(url).hash.slice(1));
+          if (identity(thread)) this.dispatch({thread});
+        } catch { /* Ignore malformed fragments. */ }
+      };
       // Install before boot awaits anything. Native notification taps can change
       // the fragment while saved projects and conversations are still restoring.
       view.addEventListener("popstate", event => {
+        popstateURL = view.location.href;
         if (event.state?.agentCoord) this.dispatch({snapshot: event.state.agentCoord});
+        else openFragment(popstateURL);
       });
       view.addEventListener("hashchange", event => {
-        // Back/Forward with a saved snapshot is handled by popstate, including
-        // its filters, project and pane state. A native hash assignment has no
-        // saved state and needs to open the actual conversation explicitly.
-        if (view.history.state?.agentCoord) return;
-        try {
-          const thread = decodeURIComponent(new URL(event.newURL).hash.slice(1));
-          if (identity(thread)) this.dispatch({thread});
-        } catch { /* Ignore malformed fragments. */ }
+        // A navigation may emit both events, or only popstate when returning
+        // to a URL already in the address bar. Dispatch its destination once.
+        if (event.newURL !== popstateURL) openFragment(event.newURL);
+        popstateURL = null;
       });
     }
     dispatch(destination) {
@@ -103,7 +108,9 @@
         request = parse(url).request_id;
         const target = await this.api("navigation/resolve", {url});
         if (this.blocked?.()) throw new Error("Finish or close the open dialog before navigating.");
-        this.remember();
+        // Native fragment navigation already moved the browser to its new
+        // entry. Writing the previous thread here erases the requested URL.
+        if (push) this.remember();
         this.applying = true;
         await this.apply(target.route);
         const snapshot = this.capture();
