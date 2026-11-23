@@ -60,6 +60,8 @@ def observe_window_moves(app, address):
 
 def prepare_window_conversation(app, directory):
     """Seed a saved conversation before the disposable native backend starts."""
+    # The imported modules are sealed resources in the candidate application.
+    sys.dont_write_bytecode = True
     sys.path.insert(0, str(app / "Contents/Resources/backend"))
     from agent_coord.codex_app_server import BrowserSessions
     from agent_coord.store import CoordinationStore
@@ -184,6 +186,7 @@ def main() -> int:
                 matching.setdefault(ids, set()).update(values)
         if not any(expected <= origins for origins in matching.values()):
             raise RuntimeError("The same two native windows were not observed on both loopback origins")
+        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", args.app], check=True)
         result["observed_both_native_window_origins"] = True
         report.write_text(json.dumps(result, indent=2) + "\n")
         return 0
