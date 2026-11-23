@@ -222,8 +222,8 @@ test("the ordinary composer keeps the 202 queued and a concurrent stream confirm
 });
 
 test("Enter can submit an ordinary message behind a starting turn on a verified receiver", async () => {
-  for (const [ready, active, pending, expected] of [[true,null,false,null],[true,"current",false,"current"],
-      [true,"transient",true,null],[false,null,false,false]]) {
+  for (const [ready, active, pending, expected, mode] of [[true,null,false,null],[true,"current",false,"current"],
+      [true,"transient",true,null],[true,"chosen",true,"chosen","steer"],[true,null,true,false,"steer"],[false,null,false,false]]) {
     const input = {value:"ordinary message"};
     const detail = {...history(), acceptsUntargetedInput:ready, running:true, activeTurn:active,
       work_thread:{client:"codex",browser_session:true,attention:"now"}};
@@ -236,7 +236,7 @@ test("Enter can submit an ordinary message behind a starting turn on a verified 
       renderStatus(){}, isSessionDraft:()=>false, refreshList:async()=>{}, refreshDetail:async()=>{},showError(){},
       api:async(path,body)=>{requests.push(body);return {transferSubmission:receipt("request",1)};}});
     vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
-    await c.sendMessage();
+    await c.sendMessage(mode);
     assert.equal(requests.length, expected === false ? 0 : 1);
     if (expected === null) assert.equal("expectedTurnId" in requests[0], false);
     if (expected) assert.equal(requests[0].expectedTurnId, active);

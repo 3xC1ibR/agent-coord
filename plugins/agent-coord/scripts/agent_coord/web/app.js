@@ -3785,7 +3785,7 @@ document.addEventListener("keydown", event => {
 $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
-async function sendMessage(mode = "steer") {
+async function sendMessage(mode = "send") {
   const reviewing = state.detail?.reviews?.some(run => run.active);
   if (reviewing) mode = "steer";
   else if (state.detail?.running && ["antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
@@ -3799,9 +3799,9 @@ async function sendMessage(mode = "steer") {
   const draftId = draft?.draftId || id;
   const ticket = state.rollUp?.ticket(id);
   const images = state.attachments?.snapshot(draftId) || [];
-  const orderedInput = mode === "steer" && !dispatcher && !reviewing && !text.trimStart().startsWith("/") &&
+  const orderedInput = mode === "send" && !dispatcher && !reviewing && !text.trimStart().startsWith("/") &&
     state.outgoing?.pendingTransferCounts?.has(id) && ["codex", "claude"].includes(detail?.work_thread?.client);
-  const ordinaryStartingInput = mode === "steer" && (orderedInput || detail?.acceptsUntargetedInput) &&
+  const ordinaryStartingInput = mode === "send" && (orderedInput || detail?.acceptsUntargetedInput) &&
     ["codex", "claude"].includes(detail.work_thread?.client) && !text.trimStart().startsWith("/");
   if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
       (!dispatcher && !reviewing && detail.running && !detail.activeTurn && !ordinaryStartingInput) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
