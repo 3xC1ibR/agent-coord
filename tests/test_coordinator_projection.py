@@ -532,6 +532,36 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(transport.opened, [rpc.channel])
         self.assertTrue(rpc.ready)
 
+    def test_restored_readiness_finishes_retained_handshake_without_admitting_new_work(self):
+        from agent_coord.codex_app_server import BrowserBusyError, CodexRPC
+        transport = ProviderOwner(self.projection, {"codex": "closed"})
+        self.projection.client = transport
+        self.projection._mark_closed("codex")
+        launching = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = launching
+        channel = "codex:" + "1" * 32
+        # The durable open commits; the coordinator stops before registering initialize.
+        self.projection.open(channel, ["codex", "app-server"], {}, None, launching._message, provider="codex")
+
+        rpc = CodexRPC(self.store, self.sessions._event)
+        self.sessions.rpc = rpc
+        restored = CoordinatorProjection(self.sessions, transport)
+        self.sessions.projection = self.store.provider_projection = transport.projection = restored
+        restored.load()
+        self.assertEqual((rpc.channel, rpc.process.poll(), rpc.ready, rpc.initialized_response, rpc.pending_methods),
+                         (channel, None, False, False, {}))
+        self.sessions.admission.wrap(rpc, "request")
+        self.sessions.admission.pause()
+        self.addCleanup(self.sessions.admission.resume)
+
+        restored.start()
+        self.addCleanup(lambda: (restored.stopped.set(), restored.worker.join(timeout=3)))
+
+        self.assertTrue(rpc.ready)
+        self.assertEqual((transport.closed, transport.opened), ([], [channel]))
+        with self.assertRaises(BrowserBusyError):
+            rpc.request("thread/list", {})
+
     def test_exited_codex_provider_is_not_replaced_during_coordinator_handover(self):
         from agent_coord.codex_app_server import CodexRPC
         transport = ProviderOwner(self.projection, {"codex": "running"})

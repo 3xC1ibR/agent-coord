@@ -579,10 +579,13 @@ class CoordinatorProjection:
         self.worker.start()
         rpc = self.sessions.rpc
         process = getattr(rpc, "process", None)
-        # Readiness completes only a retained, running initialization. Admission
-        # is closed here, so an exited provider waits for its first admitted request.
+        # Readiness runs with admission closed. It finishes only the handshake of a
+        # retained, running provider, which restores existing work; this entry
+        # authorizes that handshake alone. An exited provider waits for its first
+        # admitted request.
         if process is not None and process.poll() is None and not rpc.ready:
-            rpc.start()
+            with self.sessions.admission.enter(maintenance=True):
+                rpc.start()
 
     def reconcile_restored_completion(self):
         identity, turn_id, status = self.restored_completions.popleft()
