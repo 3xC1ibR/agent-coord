@@ -11,6 +11,7 @@ from collections import deque
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import hmac
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -82,6 +83,8 @@ class InteractionGateway:
         self.delivery_retry_after = {}
         self.delivery_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="rf-update-input")
         self.revision = 0
+        self.watch_secret = secrets.token_bytes(32)
+        self.receipt_changes = deque(maxlen=256)
         self.fence = _private_json(self.directory / "transition.json")
         self.config = _private_json(self.directory / "browser-config.json")
         source_attachment = _private_json(self.directory / "source-authority.json")
@@ -272,8 +275,7 @@ class InteractionGateway:
             for stream in self.upstream_streams:
                 with contextlib.suppress(OSError):
                     stream.shutdown(socket.SHUT_RDWR)
-        self.revision += 1
-        self.condition.notify_all()
+        self.receipt_completed()
 
     def identity(self):
         with self.condition:
@@ -386,9 +388,7 @@ class InteractionGateway:
         submission = self.intake.accept(thread, body, serving_authority=receiver.authority)
         if submission is None:
             return None
-        with self.condition:
-            self.revision += 1
-            self.condition.notify_all()
+        self.receipt_completed(thread)
         try:
             self.intake.drain_to(thread, receiver, preflight=self._verify_delivery)
         except TEMPORARY:
@@ -396,9 +396,7 @@ class InteractionGateway:
             # cannot convert its receipt into a definitive client rejection.
             return 202, {"transferSubmission": self.intake.get(thread, body["requestId"])}
         finally:
-            with self.condition:
-                self.revision += 1
-                self.condition.notify_all()
+            self.receipt_completed(thread)
         return self.submission_response(thread, body, self.intake.get(thread, body["requestId"]))
 
     def submission_response(self, thread, body, submission):
@@ -460,8 +458,7 @@ class InteractionGateway:
         finally:
             with self.condition:
                 self.intake_writers -= 1
-                self.revision += 1
-                self.condition.notify_all()
+                self.receipt_completed(thread)
 
     def legacy_forward(self, thread_id, body):
         address, token, instance, payload = self.backend
@@ -492,18 +489,31 @@ class InteractionGateway:
                 result = self.intake.drain_one(thread, self._legacy_receipt,
                                               self.legacy_forward, preflight=self._verify_delivery)
                 if result and result["state"] in {"committed", "failed"}:
-                    with self.condition:
-                        self.revision += 1
-                        self.condition.notify_all()
+                    self.receipt_completed(thread)
         finally:
             with self.condition:
                 self.source_deliveries -= 1
                 self.condition.notify_all()
 
-    def receipt_completed(self):
+    def watch_key(self, thread):
+        return hmac.digest(self.watch_secret, thread.encode(), "sha256")[:16].hex()
+
+    def receipt_completed(self, thread=None):
         with self.condition:
             self.revision += 1
+            self.receipt_changes.append((self.revision, self.watch_key(thread) if thread else None))
             self.condition.notify_all()
+
+    def receipt_signal(self, previous, current):
+        signal = {"revision": current}
+        with self.condition:
+            if previous is None or previous < 0 or current <= previous:
+                return signal
+            keys = {key for revision, key in self.receipt_changes if previous < revision <= current}
+            if (self.receipt_changes and previous >= self.receipt_changes[0][0] - 1
+                    and keys and None not in keys):
+                signal["watchKeys"] = sorted(keys)
+        return signal
 
     def resume(self):
         if self.staged_source():
@@ -533,7 +543,7 @@ class InteractionGateway:
                 if result and result["state"] in {"queued", "uncertain"}:
                     self.delivery_retry_after[thread] = time.monotonic() + .5
                 if not self.receiver and result and result["state"] in {"committed", "failed"}:
-                    self.receipt_completed()
+                    self.receipt_completed(thread)
         if len(self.draining_threads) >= 4:
             return
         pending = self.intake.pending_threads()
@@ -548,7 +558,8 @@ class InteractionGateway:
                 continue
             if self.receiver:
                 job = self.delivery_pool.submit(self.intake.drain_batch, thread, self.receiver,
-                    preflight=self._verify_delivery, completed=self.receipt_completed, stopped=self.stop.is_set)
+                    preflight=self._verify_delivery, completed=lambda thread=thread: self.receipt_completed(thread),
+                    stopped=self.stop.is_set)
             else:
                 job = self.delivery_pool.submit(self.intake.drain_one, thread,
                     self._legacy_receipt, self.legacy_forward,
@@ -711,11 +722,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if not 0 <= after <= 2**63-1:
             raise ValueError("Invalid submission cursor")
         cursor, records = self.gateway.intake.thread_changes(thread, after)
-        self.json(200, dict(threadId=thread, cursor=cursor, submissions=records, more=len(records) == 16))
+        self.json(200, dict(threadId=thread, watchKey=self.gateway.watch_key(thread), cursor=cursor, submissions=records, more=len(records) == 16))
 
-    def signal_receipts(self, revision):
-        # The default SSE ID belongs to the provider/completion cursor.
-        self.wfile.write(f'event: update-submission-change\ndata: {{"revision":{revision}}}\n\n'.encode())
+    def signal_receipts(self, revision, previous=None):
+        # Receipt events share the stream without advancing the provider cursor.
+        signal = self.gateway.receipt_signal(previous, revision)
+        data = json.dumps(signal, separators=(",", ":"))
+        self.wfile.write(f"event: update-submission-change\ndata: {data}\n\n".encode())
         self.wfile.flush()
 
     @contextlib.contextmanager
@@ -801,7 +814,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     current = gateway.revision
                     if not frames.streaming:
                         if current != revision:
-                            self.signal_receipts(current)
+                            self.signal_receipts(current, revision)
                             revision = current
                             last_output = time.monotonic()
                         elif time.monotonic() - last_output >= 5:
@@ -849,7 +862,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     current = gateway.revision
                     observing = gateway.fence.get("state") in QUEUE_STATES and not _provider_and_receipt_events(gateway)
                 if current != revision:
-                    self.signal_receipts(current)
+                    self.signal_receipts(current, revision)
                     revision = current
                 else:
                     self.wfile.write(b": coordinator update\n\n")

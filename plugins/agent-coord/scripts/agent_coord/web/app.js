@@ -2063,6 +2063,11 @@ class UpdateSubmissionChanges {
     this.refresh();
   }
 
+  invalidate(watchKeys) {
+    if (this.selection?.watchKey && Array.isArray(watchKeys) && !watchKeys.includes(this.selection.watchKey)) return;
+    return this.refresh();
+  }
+
   refresh(retry = false) {
     const selected = this.selection;
     if (!selected) return;
@@ -2091,6 +2096,7 @@ class UpdateSubmissionChanges {
             ((page.more || page.submissions.length) && page.cursor === cursor)) {
           throw new Error("Invalid update receipt page.");
         }
+        selected.watchKey = page.watchKey;
         this.receive(selected.id, page.submissions);
         this.cursors.set(selected.id, page.cursor);
         selected.retries = 0;
@@ -2680,7 +2686,14 @@ function connect() {
   if (state.updateSubmissions) {
     // Broadcast only invalidation to this window and its same-origin panes.
     // Receipt contents are read using the selected conversation's own route.
-    const changed = () => window.dispatchEvent(new Event("agent-coord-update-submissions"));
+    const changed = event => {
+      let watchKeys;
+      if (event.data) {
+        try { watchKeys = JSON.parse(event.data).watchKeys; }
+        catch { /* Unknown signals refresh the selected conversation. */ }
+      }
+      window.dispatchEvent(new CustomEvent("agent-coord-update-submissions", {detail: watchKeys}));
+    };
     events.addEventListener("update-submission-change", changed);
     events.addEventListener("open", changed);
   }
@@ -4411,7 +4424,7 @@ async function boot() {
     });
     // Tiled conversations share the workspace window's existing provider stream.
     const owner = state.paneMode ? window.parent : window;
-    const refreshReceipts = () => state.updateSubmissions.refresh();
+    const refreshReceipts = event => state.updateSubmissions.invalidate(event.detail);
     owner.addEventListener("agent-coord-update-submissions", refreshReceipts);
     state.updateSubmissions.select(state.selected);
     window.addEventListener("pagehide", () => {

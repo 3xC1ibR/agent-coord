@@ -212,6 +212,28 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(self.g.intake.get("one","key")["state"],"committed")
             self.assertEqual(self.g.intake.get("one","second")["state"],"queued")
 
+    def test_receipt_signals_identify_only_authorized_watch_keys_and_recover_after_a_gap(self):
+        self.assertEqual(self.prepare()[0], 200)
+        path = "/api/browser/update-submissions?thread=one&after=0"
+        status, page = self.http("GET", path)
+        self.assertEqual(status, 200)
+        key = page["watchKey"]
+        self.assertNotEqual(key, "one")
+        first = self.g.revision
+        self.g.accept("one", {"requestId": "a", "message": "first"})
+        self.g.receipt_completed("other")
+        signal = self.g.receipt_signal(first, self.g.revision)
+        self.assertIn(key, signal["watchKeys"])
+        self.assertEqual(len(signal["watchKeys"]), 2)
+        self.assertNotIn("other", signal["watchKeys"])
+        self.assertEqual(self.g.receipt_signal(first + 1, self.g.revision)["watchKeys"],
+                         [self.g.watch_key("other")])
+        self.assertNotIn("watchKeys", self.g.receipt_signal(None, self.g.revision))
+        for unused in range(300):
+            self.g.receipt_completed("other")
+        self.assertNotIn("watchKeys", self.g.receipt_signal(first, self.g.revision))
+        self.assertEqual(self.http("GET", path.replace("thread=one", "thread=other"))[0], 409)
+
     def test_config_uses_current_provider_cursor_on_each_new_connection(self):
         self.assertEqual(self.http("GET", "/api/browser/config")[1]["eventCursor"], 0)
         with closing(sqlite3.connect(self.g.database)) as db:

@@ -69,6 +69,7 @@ class GatewayMultiplexTests(unittest.TestCase):
                                      condition=threading.Condition(), revision=0, fence={},
                                      backend=(f"http://127.0.0.1:{self.source.server_port}/",),
                                      upstream_streams=set(), url=f"http://127.0.0.1:{self.gateway.server_port}/")
+        self.owner.receipt_signal = lambda previous, current: {"revision": current}
         self.owner.verify_origin = lambda _backend: None
         self.owner.staged_source = lambda: not self.owner.fence
         self.gateway.gateway = self.owner

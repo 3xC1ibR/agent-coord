@@ -111,6 +111,25 @@ test("receipt changes coalesce while one GET is in flight and drain all cursor p
   assert.deepEqual(received, [["one", "first"], ["one", "second"]]);
 });
 
+test("unrelated transfer activity does not start foreground receipt reads", async () => {
+  const reads = [];
+  const updates = new UpdateSubmissionChanges({
+    load: async id => {
+      reads.push(id);
+      return {threadId: id, watchKey: "my-watch-key", cursor: 0, more: false, submissions: []};
+    },
+    receive() {}
+  });
+  updates.select("selected");
+  await new Promise(setImmediate);
+  for (let i = 0; i < 100; i++) updates.invalidate(["other-watch-key"]);
+  await new Promise(setImmediate);
+  assert.deepEqual(reads, ["selected"]);
+  await updates.invalidate(["my-watch-key"]);
+  await updates.invalidate(null);
+  assert.deepEqual(reads, ["selected", "selected", "selected"]);
+});
+
 test("navigation aborts the previous GET, ignores its late result and retains each thread's own cursor", async () => {
   const calls = [], received = [];
   const updates = new UpdateSubmissionChanges({
@@ -139,8 +158,8 @@ test("three configured windows allocate exactly three provider streams and fetch
     const state = {config: {interactionContinuity: true}, selected: id,
       outgoing: {transfers: () => false}};
     const context = {state, UpdateSubmissionChanges, AbortController, setTimeout, clearTimeout,
-      base: "/api/browser/", Event, window: new EventTarget(),
-      api: async path => { reads.push(path); return {threadId: id, submissions: [], more: false, cursor: 0}; },
+      base: "/api/browser/", Event, CustomEvent, window: new EventTarget(),
+      api: async path => { reads.push(path); return {threadId: id, watchKey: "watch-" + id, submissions: [], more: false, cursor: 0}; },
       EventSource: class extends EventTarget {
         constructor(url) { super(); this.url = url; connections.push(this); }
       }};
@@ -152,9 +171,16 @@ test("three configured windows allocate exactly three provider streams and fetch
   await new Promise(setImmediate);
   assert.deepEqual(reads, [...["one", "two", "three"], ...["one", "two", "three"]]
     .map(id => "update-submissions?thread=" + id + "&after=0"));
+  for (const connection of connections) {
+    connection.dispatchEvent(Object.assign(new Event("update-submission-change"), {
+      data: JSON.stringify({revision: 10, watchKeys: ["watch-two"]})
+    }));
+  }
+  await new Promise(setImmediate);
+  assert.deepEqual(reads.slice(6), ["update-submissions?thread=two&after=0"]);
   connections[0].dispatchEvent(new Event("open"));
   await new Promise(setImmediate);
-  assert.equal(reads.length, 7, "reconnection refreshes this window's selected thread");
+  assert.equal(reads.length, 8, "reconnection refreshes this window's selected thread");
 });
 
 test("a saved snapshot cannot settle an accepted transfer; a fresh native view settles it once", () => {
