@@ -146,7 +146,7 @@ class RuntimeExecution:
             "effective_mode": record.get("permission_mode_effective"),
             "recorded_at": _iso(self.store.clock()), "runtime_id": self.runtime_id}
 
-    def capture(self, thread_id, *, state=None, source="provider_event", turn_id=None):
+    def capture(self, thread_id, *, state=None, source="provider_event", turn_id=None, accepted_input=False):
         if not thread_id:
             return
         sessions = self.sessions
@@ -196,7 +196,11 @@ class RuntimeExecution:
                     observed_at=excluded.observed_at, pending_json=excluded.pending_json,
                     permissions_json=excluded.permissions_json
                     WHERE execution_snapshots.observed_at <= excluded.observed_at""", (*payload, thread_id))
-        sessions.persistence.submit(persist, key=thread_id, coalesce="execution", required=False)
+        # Accepted input already owns a native receipt. Its supplemental running/idle
+        # snapshot can drain in order after a follow-up. Pending requests and
+        # every independently received provider transition retain the input barrier.
+        sessions.persistence.submit(persist, key=thread_id, coalesce="execution", required=False,
+                                    blocks_input=not (accepted_input and not pending and state in {"running", "idle"}))
 
     def close(self):
         with self.store._connection() as db:

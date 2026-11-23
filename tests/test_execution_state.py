@@ -56,6 +56,19 @@ class ExecutionEvidenceTests(unittest.TestCase):
         self.runtime.capture("s")
         self.assertEqual(self.read()["state"], "running")
 
+    def test_input_acknowledgement_cannot_bypass_a_pending_approval_or_stop_observation(self):
+        persistence = self.sessions.persistence
+        with patch.object(persistence, "submit", wraps=persistence.submit) as submit:
+            self.runtime.capture("s", accepted_input=True)
+            self.assertFalse(submit.call_args.kwargs["blocks_input"])
+            self.approval()
+            self.runtime.capture("s", accepted_input=True)
+            self.assertTrue(submit.call_args.kwargs["blocks_input"])
+            self.sessions.requests.clear()
+            self.runtime.capture("s", state="stopped", source="user_stop", accepted_input=True)
+            self.assertTrue(submit.call_args.kwargs["blocks_input"])
+        self.assertTrue(persistence.flush())
+
     def test_long_wait_remains_live_when_runtime_heartbeats(self):
         self.approval()
         self.now += 3600

@@ -2372,8 +2372,8 @@ class BrowserSessions:
             raise CoordinationError(f"{label} must contain 1–{limit} characters.")
         return value.strip()
 
-    def _await_persistence(self, thread_id: str) -> None:
-        if self.persistence.flush(key=thread_id):
+    def _await_persistence(self, thread_id: str, *, before_input=False) -> None:
+        if self.persistence.flush(key=thread_id, before_input=before_input):
             return
         if self.persistence.failure(thread_id):
             raise BrowserBusyError("Conversation state could not be saved. Review the runtime diagnostic before continuing.")
@@ -2679,7 +2679,8 @@ class BrowserSessions:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
-            self._await_persistence(thread_id)
+            ordinary_input = not (automatic or recovery or start_only or coordination_delivery or completed_turn_id)
+            self._await_persistence(thread_id, before_input=ordinary_input)
         message, images = message_images(body)
         if literal or preserve_text or body.get("mentions"):
             message = body["message"]  # Selected ranges refer to the untrimmed composer text.
@@ -2778,9 +2779,9 @@ class BrowserSessions:
                 finally:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
-                self.persistence.submit(lambda: self.store.threads.user_turn_context(thread_id, turn_id), key=thread_id)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
-                self._record_accepted_input(thread_id, user_input=True)
+                self._record_accepted_input(thread_id, turn_id, {"origin": "user", "owner_thread_id": thread_id},
+                                            user_input=True)
                 self._publish("browser/changed", {"threadId": thread_id})
                 return result
             if record["model"]:
@@ -2828,11 +2829,7 @@ class BrowserSessions:
                     # with the turn, or rejects admission with a native error.
                     self.permission_effective[thread_id] = record["permission_mode"]
                     self.execution.observe_permissions(thread_id, {**record, "permission_mode_effective": record["permission_mode"]})
-                    self.execution.capture(thread_id, turn_id=result["turn"]["id"])
-                # Some providers reply before emitting turn/started. Save by
-                # the accepted ID too; the callback path covers fast completion.
-                self.persistence.submit(lambda: self.store.threads.remember_notification_context(
-                    thread_id, result["turn"]["id"], context), key=thread_id)
+                    self.execution.capture(thread_id, turn_id=result["turn"]["id"], accepted_input=True)
             except Exception:
                 with self.lock:
                     self.active.pop(thread_id, None)
@@ -2848,16 +2845,17 @@ class BrowserSessions:
                 if thread_id in self.active:
                     self.active[thread_id] = result["turn"]["id"]
             # Some app-server versions omit input items from turn/started.
-            self._record_accepted_input(thread_id, user_input=not automatic and not recovery,
+            self._record_accepted_input(thread_id, result["turn"]["id"], context, user_input=not automatic and not recovery,
                                         original_request=message or "\n".join("[Image]" for _ in images))
             self._publish("browser/changed", {"threadId": thread_id})
             return result
 
-    def _record_accepted_input(self, thread_id, *, user_input, original_request=None):
+    def _record_accepted_input(self, thread_id, turn_id, context, *, user_input, original_request=None):
         # These state changes all describe the same provider acknowledgement.
         # Commit them together before publishing browser/changed.
         with self.store.database_operation("send.record_accepted_input"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
             if user_input:
                 self.store.threads.user_message(thread_id, connection=db)
                 if original_request is not None:

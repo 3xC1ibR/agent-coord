@@ -566,8 +566,8 @@ class ThreadStore:
         """An accepted direct follow-up takes precedence over automatic origin."""
         self.remember_notification_context(session_id, turn_id, {"origin": "user", "owner_thread_id": session_id})
 
-    def remember_notification_context(self, session_id: str, turn_id: str, context: dict) -> None:
-        with self.store._connection() as db:
+    def remember_notification_context(self, session_id: str, turn_id: str, context: dict, *, connection=None) -> None:
+        with (nullcontext(connection) if connection is not None else self.store._connection()) as db:
             notification_policy.record_context(db, session_id, turn_id, context)
             notification_policy.snapshot_checkpoint(db, session_id, turn_id)
 

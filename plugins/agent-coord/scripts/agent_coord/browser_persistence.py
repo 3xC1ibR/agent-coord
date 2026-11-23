@@ -62,6 +62,7 @@ class _Write:
     coalesce: object
     required: bool
     created_at: float
+    blocks_input: bool = True
     due_at: float = 0
     attempts: int = 0
     started: bool = False
@@ -116,7 +117,7 @@ class BrowserPersistence:
         with self.condition:
             return bool(self.queues)
 
-    def submit(self, callback, *, key=None, coalesce=None, required=True):
+    def submit(self, callback, *, key=None, coalesce=None, required=True, blocks_input=True):
         captured = getattr(_CAPTURE, "writes", None)
         if captured is not None:
             captured.append((callback, required))
@@ -141,6 +142,7 @@ class BrowserPersistence:
                     if not write.started and write.coalesce == coalesce:
                         write.callback = callback
                         write.required |= required
+                        write.blocks_input |= blocks_input
                         self.condition.notify_all()
                         return sequence
             if len(queue) >= self.max_pending_per_key:
@@ -148,7 +150,7 @@ class BrowserPersistence:
                 logging.getLogger(__name__).error("Browser bookkeeping backlog exceeded capacity for %s", key)
                 self.condition.notify_all()
                 return sequence
-            queue.append(_Write(callback, key, sequence, coalesce, required, time.monotonic()))
+            queue.append(_Write(callback, key, sequence, coalesce, required, time.monotonic(), blocks_input=blocks_input))
             if self.worker is None:
                 self.worker = threading.Thread(target=self._run, name="browser-persistence", daemon=True)
                 self.worker.start()
@@ -269,8 +271,11 @@ class BrowserPersistence:
             failure = self.failures.get(key)
             return failure[1] if failure else None
 
-    def flush(self, timeout=5, *, key=ALL_KEYS):
-        """Wait for the sequence accepted before this call, not future events."""
+    def flush(self, timeout=5, *, key=ALL_KEYS, before_input=False):
+        """Wait for previously submitted writes. Ordinary input can proceed past
+        an optional acknowledgement observation only when no input dependency
+        was coalesced into that write. The worker still persists it in order.
+        """
         with self.condition:
             barrier = self.sequence
 
@@ -279,8 +284,9 @@ class BrowserPersistence:
                            if key is ALL_KEYS or identity == key)
 
             def pending():
-                return any(write.sequence <= barrier for identity, queue in self.queues.items()
-                           if key is ALL_KEYS or identity == key for write in queue)
+                return any(write.sequence <= barrier and (not before_input or write.required or write.blocks_input)
+                           for identity, queue in self.queues.items() if key is ALL_KEYS or identity == key
+                           for write in queue)
 
             self.condition.wait_for(lambda: failed() or not pending() or self.stopped, timeout=timeout)
             return not failed() and not pending()

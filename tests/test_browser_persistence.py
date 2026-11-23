@@ -270,6 +270,32 @@ class BrowserPersistenceTests(unittest.TestCase):
         self.assertFalse(persistence.flush(timeout=0, key="conversation"))
         second.set()
 
+    def test_input_waits_for_required_state_and_coalesced_request_or_stop_observations(self):
+        persistence = BrowserPersistence()
+        self.addCleanup(persistence.close)
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def hold_worker():
+            started.set()
+            release.wait(4)
+
+        persistence.submit(hold_worker, key="other")
+        self.assertTrue(started.wait(1))
+        for keys in [(True, False), (False, True)]:
+            thread = str(keys)
+            for blocks in keys:
+                persistence.submit(lambda: None, key=thread, coalesce="execution", required=False, blocks_input=blocks)
+            self.assertFalse(persistence.flush(timeout=0, key=thread, before_input=True))
+
+        persistence.submit(lambda: None, key="required", blocks_input=False)
+        self.assertFalse(persistence.flush(timeout=0, key="required", before_input=True))
+        persistence.submit(lambda: None, key="acknowledgement", required=False, blocks_input=False)
+        self.assertTrue(persistence.flush(timeout=0, key="acknowledgement", before_input=True))
+        self.assertFalse(persistence.flush(timeout=0, key="acknowledgement"))
+        release.set()
+        self.assertTrue(persistence.flush())
+
     def test_snapshot_coalescing_never_crosses_required_lifecycle_boundary(self):
         persistence = BrowserPersistence()
         self.addCleanup(persistence.close)

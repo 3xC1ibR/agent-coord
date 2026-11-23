@@ -159,6 +159,51 @@ class BrowserSessionTests(unittest.TestCase):
             self.sessions.submit(identity, body)
         self.assertEqual([name for name, _ in self.sessions.rpc.calls].count("turn/start"), 1)
 
+    def test_next_input_reaches_provider_while_prior_accepted_status_is_pending(self):
+        identity = self.create()
+        rpc = self.sessions.rpc
+        submit_write = self.sessions.persistence.submit
+        request = rpc.request
+        accepted, blocked, release, steering = (threading.Event() for _ in range(4))
+
+        def rpc_request(method, params=None):
+            if method == "turn/steer":
+                steering.set()
+            reply = request(method, params)
+            if method == "turn/start":
+                accepted.set()
+            return reply
+
+        def submit(callback, **options):
+            if accepted.is_set() and options.get("coalesce") == "execution":
+                accepted.clear()
+                def delayed():
+                    blocked.set()
+                    release.wait(4)
+                    return callback()
+                return submit_write(delayed, **options)
+            return submit_write(callback, **options)
+
+        with patch.object(rpc, "request", side_effect=rpc_request), patch.object(self.sessions.persistence, "submit", side_effect=submit):
+            first = self.sessions.submit(identity, {"message": "Begin", "requestId": "first"})
+            self.assertTrue(blocked.wait(2))
+            with ThreadPoolExecutor(max_workers=1) as worker:
+                followup = worker.submit(self.sessions.submit, identity, {"message": "Continue", "requestId": "second",
+                                         "expectedTurnId": first["turn"]["id"]})
+                try:
+                    self.assertTrue(steering.wait(1), "The next native input waited for prior status telemetry")
+                finally:
+                    release.set()
+                followup.result(timeout=4)
+        self.assertTrue(self.sessions.persistence.flush(key=identity))
+        with self.store.reading(), self.store._connection() as db:
+            receipts = db.execute("SELECT request_id,state FROM browser_submission_receipts ORDER BY request_id").fetchall()
+            origin = db.execute("SELECT origin FROM turn_notification_context WHERE thread_id=? AND turn_key=?",
+                                (identity, first["turn"]["id"])).fetchone()[0]
+        self.assertEqual([tuple(row) for row in receipts], [("first", "completed"), ("second", "completed")])
+        self.assertEqual(origin, "user")
+        self.assertEqual([name for name, _ in rpc.calls if name.startswith("turn/")], ["turn/start", "turn/steer"])
+
     def test_superseding_an_absent_review_needs_no_write_transaction(self):
         identity = self.create()
         with self.store.reading():
