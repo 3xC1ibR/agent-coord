@@ -331,7 +331,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         ensure_message_schema(store)
     else:
         refresh_messages(store, schedule_index=schedule_index)
-    dirty = {}
+    settled = []
     with _measure(store, "query"), _search_connection(store) as (db, tables):
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
@@ -348,7 +348,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             folded_rows = message_source(include_text=False, indexed=indexed is not None)
             history_rows = "conversation_search_history_index"
             if snapshot_dirty and "browser_history" in tables:
-                dirty, hits = pending_search_evidence(db, terms, thread_ids, user_only=my_messages)
+                dirty, hits, settled = pending_search_evidence(db, terms, thread_ids, user_only=my_messages)
                 if dirty:
                     params["dirty_histories"] = json.dumps(dirty)
                     params["dirty_hits"] = json.dumps(hits)
@@ -524,8 +524,8 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     "measure": json.dumps([c.thread_id for c in page if c.uncertain and c.measured is None])}).fetchone()
         finally:
             db.commit()
-    if dirty and schedule_index is not None:
-        schedule_index(lambda: index_search_snapshot(store, tuple(dirty), schedule_index),
+    if settled and schedule_index is not None:
+        schedule_index(lambda: index_search_snapshot(store, settled, schedule_index),
                        coalesce="search-snapshot")
     if overlay:
         from .browser_persistence import database_busy

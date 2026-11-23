@@ -789,12 +789,14 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only):
 
     filter_ids = "" if thread_ids is None else " WHERE p.thread_id IN (SELECT value FROM json_each(?))"
     parameters = () if thread_ids is None else (json.dumps(sorted(thread_ids)),)
-    rows = db.execute(f"""SELECT p.thread_id, h.history_json FROM ({_PENDING}) p
-        LEFT JOIN browser_history h ON h.thread_id=p.thread_id{filter_ids}""", parameters)
-    statuses, matches = {}, []
-    for identity, serialized in rows:
+    rows = db.execute(f"""SELECT p.thread_id, h.history_json, s.turn_active FROM ({_PENDING}) p
+        LEFT JOIN browser_history h ON h.thread_id=p.thread_id
+        LEFT JOIN sessions s ON s.session_id=p.thread_id{filter_ids}""", parameters)
+    statuses, matches, settled = {}, [], []
+    for identity, serialized, active in rows:
         statuses[identity] = None
         if serialized is None:
+            settled.append(identity)
             continue
         try:
             history = decode_history(serialized, db=db)
@@ -812,14 +814,22 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only):
                     found.pop(key, None)
             matches.extend(found.values())
             statuses[identity] = "partial" if history.get("historyUnavailable") else "saved"
+            if not active and not any(turn.get("status") == "inProgress" for turn in history.get("turns", [])
+                                      if isinstance(turn, dict)):
+                settled.append(identity)
         except (ValueError, TypeError, AttributeError, KeyError):
             statuses[identity] = "unavailable"
-    return statuses, matches
+    return statuses, matches, settled
 
 
 def index_search_snapshot(store, identities, schedule_index):
     """Try each observed thread once. A later search can schedule a newer revision."""
     for identity in identities:
+        with store.reading(), store._connection() as db:
+            pending = db.execute(f"""SELECT 1 FROM ({_PENDING}) p LEFT JOIN sessions s ON s.session_id=p.thread_id
+                WHERE p.thread_id=? AND COALESCE(s.turn_active, 0)=0""", (identity,)).fetchone()
+        if pending is None:
+            continue
         publish_messages(store, prepare_messages(store, identity), schedule_index=schedule_index)
         yield
     _cleanup_messages(store)

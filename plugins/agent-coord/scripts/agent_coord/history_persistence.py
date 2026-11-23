@@ -199,34 +199,40 @@ def compact_history(prepared):
 
 
 def _documents(db, references):
-    digests = set()
+    digests, multiblock = set(), set()
     for reference in references:
         if not isinstance(reference, list) or not reference or any(
                 not isinstance(value, str) or len(value) != 64 or
                 any(character not in "0123456789abcdef" for character in value) for value in reference):
             raise HistoryUnavailableError("Saved conversation has an invalid block reference.")
         digests.update(reference)
-    digests = sorted(digests)
+        if len(reference) > 1:
+            multiblock.update(reference)
     blocks = {}
-    for offset in range(0, len(digests), READ_CHUNKS):
-        batch = digests[offset:offset + READ_CHUNKS]
-        try:
-            # One native aggregate avoids a GIL handoff for every tiny item.
-            # Hex preserves arbitrary corrupt bytes for the integrity check;
-            # typeof retains the distinction between stored BLOBs and TEXT.
-            # At most 32 * 64 KiB of valid payload enters one result (4 MiB hex).
-            packed = db.execute("""SELECT json_group_array(json_array(digest, typeof(payload), hex(payload)))
-                FROM browser_history_chunks WHERE digest IN ("""
-                + ",".join("?" for _ in batch) + ")", batch).fetchone()[0]
-        except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc):
-                raise
-            raise HistoryUnavailableError("Saved conversation blocks are unavailable.") from exc
-        for digest, kind, encoded in json.loads(packed):
-            payload = bytes.fromhex(encoded)
-            if kind != "blob" or hashlib.sha256(payload).hexdigest() != digest:
-                raise HistoryUnavailableError("Saved conversation block failed its integrity check.")
-            blocks[digest] = payload
+    try:
+        for binary, group in ((True, multiblock), (False, digests - multiblock)):
+            ordered = sorted(group)
+            for offset in range(0, len(ordered), READ_CHUNKS):
+                batch = ordered[offset:offset + READ_CHUNKS]
+                source = " FROM browser_history_chunks WHERE digest IN (" + ",".join("?" for _ in batch) + ")"
+                if binary:
+                    # Full blocks already occupy 64 KiB. Returning their bytes avoids
+                    # doubling a streamed message into hexadecimal and JSON strings.
+                    rows = db.execute("SELECT digest, CASE typeof(payload) WHEN 'blob' THEN payload END" + source, batch)
+                else:
+                    # A single native aggregate avoids a GIL handoff for every tiny item.
+                    packed = db.execute("SELECT json_group_array(json_array(digest, typeof(payload), hex(payload)))"
+                                        + source, batch).fetchone()[0]
+                    rows = ((digest, bytes.fromhex(encoded) if kind == "blob" else None)
+                            for digest, kind, encoded in json.loads(packed))
+                for digest, payload in rows:
+                    if payload is None or hashlib.sha256(payload).hexdigest() != digest:
+                        raise HistoryUnavailableError("Saved conversation block failed its integrity check.")
+                    blocks[digest] = payload
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        raise HistoryUnavailableError("Saved conversation blocks are unavailable.") from exc
     if len(blocks) != len(digests):
         raise HistoryUnavailableError("Saved conversation is missing one or more blocks.")
     try:

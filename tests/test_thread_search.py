@@ -303,6 +303,27 @@ class SearchExecutionTests(unittest.TestCase):
         self.assertEqual(stale["items"], [])
         self.assertTrue(scheduled)
 
+    def test_search_does_not_queue_index_publication_for_a_streaming_turn(self):
+        from types import SimpleNamespace
+        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
+        history = {"turns": [{"id": "turn", "status": "inProgress", "items": [
+            {"id": "message", "type": "agentMessage", "text": "live evidence"}]}]}
+        with self.store._connection() as db:
+            db.execute("INSERT INTO browser_history VALUES (?, ?)", ("stream", json.dumps(history)))
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='stream'")
+        queued = []
+        sessions = SimpleNamespace(cwd=str(self.root), persistence=SimpleNamespace(
+            submit=lambda callback, **options: queued.append(callback)))
+        result = search_browser_threads(self.store, sessions, {"q": ["live evidence"]})
+        self.assertEqual([r["thread_id"] for r in result["items"]], ["stream"])
+        self.assertEqual(queued, [])
+        history["turns"][0]["status"] = "completed"
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_history SET history_json=? WHERE thread_id='stream'", (json.dumps(history),))
+            db.execute("UPDATE sessions SET turn_active=0 WHERE session_id='stream'")
+        search_browser_threads(self.store, sessions, {"q": ["live evidence"]})
+        self.assertEqual(len(queued), 1)
+
     def test_dirty_snapshot_pages_match_indexed_pages_and_coverage(self):
         self.seed(16)
         coverage = search_threads(self.store, "radio", snapshot_dirty=True)["coverage"]

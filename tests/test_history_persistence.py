@@ -63,6 +63,23 @@ class HistoryPersistenceTests(unittest.TestCase):
         self.assertEqual(decode_history(self.raw(), database_path=self.store.database_path), history)
         self.assertGreater(result["staged_chunks"], 10)
 
+    def test_multiblock_output_is_read_without_hex_encoding_the_payload(self):
+        history = large_history(size=4 * CHUNK_BYTES)
+        prepared = prepare_history(history)
+        stage_history(self.store, prepared)
+        digest = prepared.documents[(0, 0)].references[0]
+        statements = []
+        with self.store.reading(), self.store._connection() as db:
+            db.set_trace_callback(statements.append)
+            try:
+                restored = decode_history(prepared.serialized, db=db)
+            finally:
+                db.set_trace_callback(None)
+        self.assertEqual(restored, history)
+        payload_reads = [s.lower() for s in statements if digest in s]
+        self.assertTrue(payload_reads)
+        self.assertFalse(any("hex(payload)" in s for s in payload_reads))
+
     def test_growing_output_reuses_verified_chunks_and_detects_changed_prefixes(self):
         history = large_history(size=4 * CHUNK_BYTES)
         previous = prepare_history(history)
