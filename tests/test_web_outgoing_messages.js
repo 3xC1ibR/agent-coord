@@ -347,7 +347,7 @@ test("a rejected send is marked not sent and its text returns to the composer", 
   await assert.rejects(c.sendMessage(), /disconnected/);
   assert.match(c.$("timeline").text, /Ship the fix Not sent · Claude Code disconnected\./);
   assert.equal(c.$("message").value, "Ship the fix");
-  assert.equal(c.state.submissionQueue.active.size, 0);
+  assert.equal(c.state.submissionQueue.lanes.size, 0);
 });
 
 test("a committed acceptance event resolves a lost HTTP response without replaying", async () => {

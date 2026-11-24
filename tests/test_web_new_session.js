@@ -588,7 +588,8 @@ test("first sends stay with their projects while another project's draft is crea
     } else {
       assert.equal(c.state.selected, "b");
       assert.equal(c.state.newSessionDraft, null);
-      assert.equal(c.state.submissionQueue.active.size, 1, "A's completion must not settle B's delivery");
+      assert.deepEqual([...c.state.submissionQueue.lanes.keys()], ["b"], "A's completion must not settle B's delivery");
+      assert.equal(c.state.submissionQueue.lanes.get("b").entries.size, 1);
     }
     assert.equal(c.$("message").value, "");
     c.$("message").value = "Next B";
@@ -689,7 +690,7 @@ test("an existing send and its refresh cannot block another project's send or cl
   assert.equal(c.$("message").value, "Next B");
   refresh.resolve(); await first;
   assert.equal(c.state.drafts.get("a") || "", "");
-  assert.equal(c.state.submissionQueue.active.size, 0);
+  assert.equal(c.state.submissionQueue.lanes.size, 0);
 });
 
 test("first submission seeds a usable conversation and refreshes inventory once after acceptance", async () => {

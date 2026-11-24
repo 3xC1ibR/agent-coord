@@ -212,7 +212,7 @@ test("accepted sends release the composer before detail and inventory refreshes 
   c.state.drafts.set("one", "Next draft");
   accept({turnId: "turn-one"}); await sending;
   assert.equal(c.$("send").disabled, false);
-  assert.equal(c.state.submissionQueue.active.size, 0);
+  assert.equal(c.state.submissionQueue.lanes.size, 0);
   assert.equal(c.$("message").value, "Next draft");
   assert.equal(c.state.drafts.get("one"), "Next draft");
   assert.ok(finishDetail);
