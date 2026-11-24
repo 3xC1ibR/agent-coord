@@ -211,6 +211,60 @@ class ACPProjectionTests(unittest.TestCase):
             self.assertEqual(future.result(timeout=2), {"turnId": self.turn_id})
         self.assertEqual(adapter.turns[self.identity]["items"][-1]["content"][0]["text"], "steered input")
 
+    def test_acp_text_and_reasoning_emit_deltas_without_copying_growing_items(self):
+        for provider in ("antigravity", "kimi"):
+            with self.subTest(provider=provider):
+                adapter, connection = self.bind(provider)
+                self.projection.stream_delta_protocol = 1
+                events = []
+                adapter.on_event = events.append
+                for kind, expected_method in (("agent_message_chunk", "item/agentMessage/delta"),
+                                              ("agent_thought_chunk", "item/reasoning/summaryTextDelta")):
+                    message = {"method": "session/update", "params": {"sessionId": "native-session", "update": {
+                        "sessionUpdate": kind, "content": {"type": "text", "text": "x"}}}}
+                    connection._message(message)
+                    with patch.object(copy, "deepcopy", side_effect=AssertionError("Growing item copied")):
+                        for _ in range(100):
+                            connection._message(message)
+                    deltas = [event for event in events if event["method"] == expected_method]
+                    self.assertEqual(len(deltas), 101)
+                    self.assertTrue(all(event["params"]["delta"] == "x" for event in deltas))
+                self.assertEqual(sum(event["method"] == "item/started" for event in events), 2)
+                self.assertEqual(adapter.turns[self.identity]["items"][-1]["summary"], ["x" * 101])
+
+    def test_tool_delta_requires_an_unchanged_text_prefix(self):
+        adapter, connection = self.bind()
+        self.projection.stream_delta_protocol = 1
+        events = []
+        adapter.on_event = events.append
+        adapter.turns[self.identity]["items"] = [{"id": "tool", "type": "mcpToolCall", "result": "prefix"}]
+        turn = adapter.turns[self.identity]
+        with patch.object(copy, "deepcopy", side_effect=AssertionError("Growing item copied")):
+            self.assertTrue(acp_state.append_tool_delta(adapter, self.identity, turn,
+                {"sessionUpdate": "tool_call_update", "toolCallId": "tool", "rawOutput": "prefix suffix"}))
+        self.assertEqual(events[-1]["params"]["delta"], " suffix")
+        self.assertFalse(acp_state.append_tool_delta(adapter, self.identity, turn,
+            {"sessionUpdate": "tool_call_update", "toolCallId": "tool", "rawOutput": "replaced"}))
+
+    def test_muse_text_output_and_reasoning_native_deltas_avoid_item_snapshots(self):
+        adapter, connection = self.bind("muse")
+        self.projection.stream_delta_protocol = 1
+        adapter.items[self.identity] = {}
+        events = []
+        adapter.on_event = events.append
+        cases = [("agentMessage", "text", "item/agentMessage/delta"),
+                 ("toolCall", "output", "item/mcpToolCall/outputDelta"),
+                 ("reasoning", "summary.0", "item/reasoning/summaryTextDelta")]
+        for kind, field, normalized in cases:
+            native = {"itemId": kind, "turnId": self.turn_id, "kind": kind, "revision": 1, "status": "inProgress"}
+            if kind == "reasoning":
+                native["summary"] = [""]
+            adapter._update_item(self.identity, "item/started", {"turnId": self.turn_id, "item": native})
+            with patch.object(adapter, "_item", side_effect=AssertionError("Growing item rendered")):
+                adapter._update_item(self.identity, "item/delta", {"turnId": self.turn_id, "itemId": kind, "field": field, "delta": "x"})
+            self.assertEqual(events[-1]["method"], normalized)
+            self.assertEqual(events[-1]["params"]["delta"], "x")
+
 
 class ACPCancellationTests(unittest.TestCase):
     def test_cancel_waits_for_native_terminal_reply_before_close(self):

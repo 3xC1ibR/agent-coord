@@ -248,3 +248,42 @@ def settle_muse_decision(projection, thread_id, decision, receipt):
             for browser_key, request in list(projection.sessions.requests.items()):
                 if request.get("id") == key:
                     projection.sessions.requests.pop(browser_key, None)
+
+
+def stream_deltas(adapter):
+    """New delta shapes require matching browser-history and web reducers."""
+    projection = getattr(adapter.store, "provider_projection", None)
+    return getattr(projection, "stream_delta_protocol", 0) >= 1
+
+
+def append_text_delta(adapter, thread_id, turn, item_type, delta):
+    import uuid
+    item = turn["items"][-1] if turn["items"] else {}
+    if item.get("type") != item_type:
+        item = {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{turn['id']}:{item_type}:{len(turn['items'])}")),
+                "type": item_type, **({"text": ""} if item_type == "agentMessage" else {"summary": [""]})}
+        turn["items"].append(item)
+        adapter._emit("item/started", thread_id, turnId=turn["id"], item=copy.deepcopy(item))
+    if item_type == "agentMessage":
+        item["text"] += delta
+        adapter._emit("item/agentMessage/delta", thread_id, turnId=turn["id"], itemId=item["id"], delta=delta)
+    else:
+        item["summary"][0] += delta
+        adapter._emit("item/reasoning/summaryTextDelta", thread_id, turnId=turn["id"], itemId=item["id"], summaryIndex=0, delta=delta)
+
+
+def append_tool_delta(adapter, thread_id, turn, update):
+    """A cumulative native string is a delta only if its prefix is unchanged."""
+    if set(update) - {"sessionUpdate", "toolCallId", "rawOutput"} or not isinstance(update.get("rawOutput"), str):
+        return False
+    item = next((item for item in turn["items"] if item["id"] == update.get("toolCallId")), None)
+    if item is None or not isinstance(item.get("result"), str):
+        return False
+    previous, current = item["result"], update["rawOutput"]
+    if len(current) > 64000 or not current.startswith(previous):
+        return False
+    delta = current[len(previous):]
+    item["result"] = current
+    if delta:
+        adapter._emit("item/mcpToolCall/outputDelta", thread_id, turnId=turn["id"], itemId=item["id"], delta=delta)
+    return True

@@ -612,6 +612,27 @@ class MuseRPC:
                     return
                 native["turnId"] = identity
                 items[native["itemId"]] = native
+            if method == "item/delta" and acp_state.stream_deltas(self):
+                rendered = next((item for item in turn["items"] if item["id"] == native["itemId"]), None)
+                delta = params["delta"]
+                if rendered is not None:
+                    normalized, extra = None, {}
+                    if field == "text" and rendered["type"] == "agentMessage":
+                        rendered["text"] = native["text"]
+                        normalized = "item/agentMessage/delta"
+                    elif field == "visibleOutput" and rendered["type"] == "mcpToolCall":
+                        rendered["result"] = native["visibleOutput"]
+                        normalized = "item/mcpToolCall/outputDelta"
+                    elif field.startswith("summary.") and rendered["type"] == "reasoning":
+                        index = int(field.split(".")[1])
+                        summary = rendered.setdefault("summary", [])
+                        while len(summary) <= index:
+                            summary.append("")
+                        summary[index] = native["summary"][index]
+                        normalized, extra = "item/reasoning/summaryTextDelta", {"summaryIndex": index}
+                    if normalized:
+                        self._emit(normalized, thread_id, turnId=turn["id"], itemId=rendered["id"], delta=delta, **extra)
+                        return
             item = self._item(native)
             index = next((i for i, old in enumerate(turn["items"]) if old["id"] == item["id"]), None)
             if index is None:

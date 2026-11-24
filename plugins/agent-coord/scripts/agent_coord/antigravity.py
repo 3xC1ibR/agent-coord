@@ -650,6 +650,9 @@ class AntigravityRPC:
                 if content.get("type") != "text":
                     return
                 item_type = "agentMessage" if kind == "agent_message_chunk" else "reasoning"
+                if acp_state.stream_deltas(self):
+                    acp_state.append_text_delta(self, thread_id, turn, item_type, content.get("text", ""))
+                    return
                 item = turn["items"][-1] if turn["items"] else {}
                 if item.get("type") != item_type:
                     item = {"id": str(uuid.uuid4()), "type": item_type, **({"text": ""} if item_type == "agentMessage" else {"summary": [""]})}
@@ -659,6 +662,8 @@ class AntigravityRPC:
                 else:
                     item["summary"][0] += content.get("text", "")
             elif kind in {"tool_call", "tool_call_update"}:
+                if acp_state.stream_deltas(self) and acp_state.append_tool_delta(self, thread_id, turn, update):
+                    return
                 item_id = update.get("toolCallId")
                 if not item_id:
                     return

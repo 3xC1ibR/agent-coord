@@ -706,7 +706,12 @@ class ClaudeRPC:
                         self._emit("item/agentMessage/delta", thread_id, turnId=turn["id"], itemId=item["id"], delta=delta.get("text", ""))
                     elif delta.get("type") == "thinking_delta":
                         item["summary"][0] += delta.get("thinking", "")
-                        self._item(thread_id, item)
+                        from .acp_state import stream_deltas
+                        if stream_deltas(self):
+                            self._emit("item/reasoning/summaryTextDelta", thread_id, turnId=turn["id"],
+                                       itemId=item["id"], summaryIndex=0, delta=delta.get("thinking", ""))
+                        else:
+                            self._item(thread_id, item)
             elif event.get("type") == "content_block_stop":
                 item = self.blocks.get(thread_id, {}).get(index)
                 if item:
