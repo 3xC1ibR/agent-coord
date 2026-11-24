@@ -11,12 +11,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
 
-from agent_coord import desktop_runtime as runtime, runtime_gateway_lifecycle as gateway
+from historical_gateway import desktop_runtime as runtime, runtime_gateway_lifecycle as gateway
 
 
 class GatewayLifecycleTests(unittest.TestCase):
@@ -148,7 +149,7 @@ class GatewayLifecycleTests(unittest.TestCase):
         self.assertEqual(gateway.status(self.database, {})["interaction_request_id"], "original")
 
     def test_detached_serve_recovers_authorized_request_after_helper_exits_with_fence_ready(self):
-        from agent_coord import runtime_interaction_gateway
+        from historical_gateway import runtime_interaction_gateway
 
         class HelperExited(BaseException):
             pass
@@ -265,6 +266,7 @@ class DetachedGatewayTests(unittest.TestCase):
             package.mkdir(parents=True)
             for module in (ROOT / "plugins/agent-coord/scripts/agent_coord").glob("*.py"):
                 shutil.copyfile(module, package / module.name)
+            historical_gateway_fixture.copy_to(package)
             shutil.copyfile(ROOT / "desktop/macos/backend.py", resources / "backend.py")
             (package / "runtime_interaction_gateway.py").write_text(r'''import json, os, secrets
 from pathlib import Path

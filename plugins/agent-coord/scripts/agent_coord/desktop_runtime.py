@@ -563,12 +563,15 @@ def discover(database, *, timeout=25):
 
 
 def attach_desktop(database, record, payload, require_confirmation, interaction_continuity, stable_origin):
-    from . import runtime_edge, runtime_gateway_lifecycle as gateway
+    from . import runtime_edge, runtime_gateway_retirement as gateway
+    stable_origin = stable_origin or interaction_continuity
     if stable_origin:
         directory = runtime_directory(database)
         previous = gateway.status(database, {})
         if previous.get("interaction_url") and not previous.get("interaction_settled"):
             return gateway.attach(database, record, payload, require_confirmation)
+        if previous.get("interaction_url"):
+            gateway.retire(database)
         if record.get("stable_origin") == 1:
             runtime_edge.ensure(database, payload)
             status = control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
@@ -585,8 +588,6 @@ def attach_desktop(database, record, payload, require_confirmation, interaction_
         status = control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
         runtime_edge.publish_predecessor(directory, status)
         return runtime_edge.status_for_desktop(directory, status)
-    if interaction_continuity:
-        return gateway.attach(database, record, payload, require_confirmation)
     return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
 
 
@@ -629,12 +630,24 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
               interaction_continuity=False, stable_origin=False):
     database = str(Path(database).expanduser().resolve())
     directory = runtime_directory(database)
+    stable_origin = stable_origin or interaction_continuity
     launcher = lock_file(directory / "launch.lock", blocking=True)
     try:
         payload = stage_payload(Path(resources), directory)
         selected_payload = payload
         if stable_origin:
-            from . import runtime_edge, runtime_update
+            from . import runtime_edge, runtime_update, runtime_gateway_retirement
+            previous = runtime_gateway_retirement.status(database, {})
+            if previous.get("interaction_url") and not previous.get("interaction_settled"):
+                update = runtime_update.read(directory)
+                try:
+                    source = discover(database, timeout=2)
+                except RuntimeOwnerUnavailableError:
+                    source = None
+                observed = control(source, "status", timeout=2) if source else {"status": "preparing", "update": update}
+                return {**observed, **previous}
+            if previous.get("interaction_url"):
+                runtime_gateway_retirement.retire(database)
             update = runtime_update.read(directory)
             edge = runtime_edge.read_address(directory)
             if edge and update and update["phase"] not in runtime_update.TERMINAL:
@@ -644,15 +657,6 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
                     observed = None
                 if observed and observed.get("status") == "updating":
                     return runtime_edge.status_for_desktop(directory, observed)
-        if interaction_continuity:
-            from . import runtime_gateway_lifecycle as gateway, runtime_update
-            # A reopening desktop can attach to its stable origin even while
-            # the supervisor owns the DB and neither coordinator serves HTTP.
-            update = runtime_update.read(directory)
-            if update and update["phase"] not in runtime_update.TERMINAL:
-                observed = gateway.status(database, {"status": "updating", "update": update})
-                if observed.get("interaction_url"):
-                    return observed
         deadline = time.monotonic() + 20
         while True:
             try:
@@ -2188,11 +2192,12 @@ def main(argv=None):
         return 0
     if not args.db:
         parser.error("--db is required")
-    if args.runtime_interaction_gateway or args.runtime_interaction_continuity:
-        from . import runtime_gateway_lifecycle as gateway
+    args.runtime_stable_origin = args.runtime_stable_origin or args.runtime_interaction_continuity
+    if args.runtime_interaction_gateway or args.runtime_interaction_continuity or args.runtime_stable_origin:
+        from . import runtime_gateway_retirement as gateway
     if args.runtime_interaction_gateway:
         database = str(Path(args.db).expanduser().resolve())
-        return gateway.serve(database, gateway.gateway_directory(database), args.inherit_owner_fd, args.ready_fd)
+        return gateway.serve_existing(database, args.inherit_owner_fd, args.ready_fd)
     if args.runtime_bootstrap:
         print(json.dumps(bootstrap(args.db, args.resources, start_paused=args.runtime_start_paused,
                                    require_confirmation=args.runtime_confirm_updates,
@@ -2295,10 +2300,11 @@ def main(argv=None):
             print(json.dumps(result), flush=True)
             return 0
         if args.runtime_command == "activate-update" and args.runtime_stable_origin:
-            from . import runtime_gateway_lifecycle
-            previous = runtime_gateway_lifecycle.status(args.db, {})
+            previous = gateway.status(args.db, {})
             if previous.get("interaction_url") and not previous.get("interaction_settled"):
                 raise RuntimeError("Wait for the preceding update to settle its accepted input.")
+            if previous.get("interaction_url"):
+                gateway.retire(args.db)
             if record.get("stable_origin") == 1:
                 result = control(record, "activate-update", **values)
             else:
@@ -2307,8 +2313,6 @@ def main(argv=None):
                     result = adopt_predecessor(record, **values)
                 finally:
                     os.close(launcher)
-        elif args.runtime_command == "activate-update" and args.runtime_interaction_continuity:
-            result = gateway.activate(record, **values)
         else:
             result = control(record, args.runtime_command, **values)
         if args.runtime_command == "status" and args.runtime_interaction_continuity:

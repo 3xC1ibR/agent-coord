@@ -12,10 +12,11 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord.runtime_interaction_gateway import GatewayHandler, _ProviderEventFrames
+from historical_gateway.runtime_interaction_gateway import GatewayHandler, _ProviderEventFrames
 
 
 class SourceHandler(BaseHTTPRequestHandler):

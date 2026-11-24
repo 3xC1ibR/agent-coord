@@ -1,0 +1,10 @@
+{
+  "revision": "84d6a59",
+  "files": {
+    "desktop_runtime.py": "8009d5d0e1458b7da0b924adfb660141a0a781a3dc2361d2ed21c1724922a665",
+    "runtime_gateway_lifecycle.py": "ca637eacdf7ebe63b11cce181d2fe6a5b2357cb985e1bc2d95888eaf736aa68b",
+    "runtime_interaction_gateway.py": "311a90ce5adb671a44ec53a3be929e2152118b8ba1f6483d2198bcedec710ca1",
+    "runtime_saved_views.py": "fa9c04983a73853e3c3a9e16832b929bfd6695182eadfd896889b7c510751936",
+    "runtime_message_intake.py": "0101a9074917312b43fae5b5b4d54fa2f5721bd24a4bdce3b9f1791c13d08008"
+  }
+}

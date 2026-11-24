@@ -9,10 +9,11 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord import runtime_interaction_gateway as gateway
+from historical_gateway import runtime_interaction_gateway as gateway
 
 
 class SourceAuthorityTests(unittest.TestCase):

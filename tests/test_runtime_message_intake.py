@@ -7,10 +7,11 @@ import sys
 import tempfile
 import threading
 import unittest
+import historical_gateway_fixture
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
-from agent_coord.runtime_message_intake import ComposerNotReserved, IntakeFull, OrdinaryComposerReceiver, RuntimeMessageIntake, canonical_receipt
+from historical_gateway.runtime_message_intake import ComposerNotReserved, IntakeFull, OrdinaryComposerReceiver, RuntimeMessageIntake, canonical_receipt
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.submission_receipts import SubmissionReceipts
 
@@ -87,7 +88,8 @@ class RuntimeMessageIntakeTests(unittest.TestCase):
     def test_process_exit_after_backend_commit_recovers_without_another_provider_call(self):
         self.intake.accept("one", self.body)
         code = """import os, sys
-from agent_coord.runtime_message_intake import RuntimeMessageIntake, canonical_receipt
+import historical_gateway_fixture
+from historical_gateway.runtime_message_intake import RuntimeMessageIntake, canonical_receipt
 from agent_coord.store import CoordinationStore
 from agent_coord.submission_receipts import SubmissionReceipts
 intake = RuntimeMessageIntake(sys.argv[1])
@@ -100,7 +102,7 @@ intake.drain_one("one", lambda t, b: canonical_receipt(store.database_path, t, b
 """
         backend = str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts")
         child = subprocess.run([sys.executable, "-B", "-c", code, str(self.directory),
-                                str(self.store.database_path)], env=dict(os.environ, PYTHONPATH=backend),
+                                str(self.store.database_path)], env=dict(os.environ, PYTHONPATH=backend + os.pathsep + str(Path(__file__).resolve().parent)),
                                capture_output=True, timeout=10)
         self.assertEqual(child.returncode, 42, child.stderr)
         self.intake = RuntimeMessageIntake(self.directory)
@@ -172,13 +174,14 @@ intake.drain_one("one", lambda t, b: canonical_receipt(store.database_path, t, b
         second = {**self.body, "requestId": "second", "message": "after the crash"}
         self.intake.accept("one", second)
         code = """import os, sys
-from agent_coord.runtime_message_intake import RuntimeMessageIntake, OrdinaryComposerReceiver
+import historical_gateway_fixture
+from historical_gateway.runtime_message_intake import RuntimeMessageIntake, OrdinaryComposerReceiver
 receiver = OrdinaryComposerReceiver(sys.argv[2], "coordinator-one", "signed-payload", lambda *_: os._exit(42))
 RuntimeMessageIntake(sys.argv[1]).drain_to("one", receiver)
 """
         backend = str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts")
         child = subprocess.run([sys.executable, "-B", "-c", code, str(self.directory), str(self.store.database_path)],
-                               env=dict(os.environ, PYTHONPATH=backend), capture_output=True, timeout=10)
+                               env=dict(os.environ, PYTHONPATH=backend + os.pathsep + str(Path(__file__).resolve().parent)), capture_output=True, timeout=10)
         self.assertEqual(child.returncode, 42, child.stderr)
         self.assertIsNone(self.lookup("one", self.body))
         intake = RuntimeMessageIntake(self.directory)
@@ -425,7 +428,7 @@ class OrderedTerminalDrainTests(unittest.TestCase):
         self.assertEqual([body["requestId"] for _, body in self.effects], ["0", "later"])
 
     def test_one_terminal_scheduling_pass_dispatches_consecutive_receipts_in_order(self):
-        from agent_coord.runtime_interaction_gateway import InteractionGateway
+        from historical_gateway.runtime_interaction_gateway import InteractionGateway
         self.enqueue(8)
         gateway = InteractionGateway(self.store.database_path, self.directory, self.directory)
         self.addCleanup(gateway.delivery_pool.shutdown, wait=True)
