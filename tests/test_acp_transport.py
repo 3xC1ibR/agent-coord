@@ -349,6 +349,68 @@ class ACPProjectionTests(unittest.TestCase):
                     self.assertFalse(resource.exists())
 
 
+    def test_three_native_acp_stream_callbacks_avoid_database_and_copies_under_browser_lock(self):
+        import sqlite3
+        for provider in ('kimi', 'antigravity', 'muse'):
+            with self.subTest(provider=provider):
+                adapter, connection = self.bind(provider)
+                item_id = provider + '-output'
+                rendered = {'id': item_id, 'type': 'agentMessage', 'text': ''}
+                adapter.turns[self.identity]['items'] = [rendered]
+                self.sessions._event({'method': 'item/started', 'params': {
+                    'threadId': self.identity, 'turnId': self.turn_id, 'item': rendered}})
+                if provider == 'muse':
+                    adapter.ready.add(self.identity)
+                    adapter.items[self.identity] = {item_id: {
+                        'itemId': item_id, 'turnId': self.turn_id, 'kind': 'agentMessage',
+                        'text': '', 'revision': 1, 'status': 'inProgress'}}
+                    message = {'method': 'item/delta', 'params': {
+                        'sessionId': 'native-session', 'threadId': self.identity, 'turnId': self.turn_id, 'itemId': item_id, 'field': 'text', 'delta': 'once'}}
+                else:
+                    message = {'method': 'session/update', 'params': {'sessionId': 'native-session', 'update': {
+                        'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': 'once'}}}}
+                self.projection.checkpoint()
+                database = self.store._connection
+                def checked(*args, **kwargs):
+                    self.assertFalse(self.sessions.lock._is_owned(), 'native delta SQLite under browser lock')
+                    return database(*args, **kwargs)
+                count = self.projection.stream_metrics['events']
+                with patch.object(copy, 'deepcopy', side_effect=AssertionError('native delta copy')), \
+                        patch.object(self.store, '_connection', side_effect=checked), \
+                        patch.object(self.projection, '_save', side_effect=AssertionError('native delta checkpoint')):
+                    self.projection.project(self.event(self.projection.cursor + 1, message, channel=provider))
+                self.assertEqual(self.projection.stream_metrics['events'], count + 1)
+                item = next(item for item in self.sessions.histories[self.identity]['turns'][-1]['items'] if item['id'] == item_id)
+                self.assertEqual(item['text'], 'once')
+
+
+    def test_muse_failure_restores_native_rendered_and_seen_cursor(self):
+        adapter, connection = self.bind('muse')
+        item_id = 'muse-output'
+        rendered = {'id': item_id, 'type': 'agentMessage', 'text': ''}
+        adapter.turns[self.identity]['items'] = [rendered]
+        adapter.ready.add(self.identity)
+        adapter.seen[self.identity] = set()
+        native = {'itemId': item_id, 'turnId': self.turn_id, 'kind': 'agentMessage',
+                  'text': '', 'revision': 1, 'status': 'inProgress'}
+        adapter.items[self.identity] = {item_id: native}
+        self.sessions._event({'method':'item/started', 'params':{
+            'threadId':self.identity, 'turnId':self.turn_id, 'item':rendered}})
+        self.projection.checkpoint()
+        original = connection.callback
+        def fail_after_update(message):
+            original(message)
+            raise ValueError('Muse callback failure')
+        connection.callback = fail_after_update
+        message = {'method':'item/delta', 'params':{'sessionId':'native-session', 'turnId':self.turn_id,
+                   'itemId':item_id, 'field':'text', 'delta':'discard', 'viewCursor':'cursor-1'}}
+        self.projection.project(self.event(1, message, channel='muse'))
+        self.assertEqual(native['text'], '')
+        self.assertEqual(rendered['text'], '')
+        self.assertEqual(adapter.seen[self.identity], set())
+        self.assertIn('muse', self.projection.quarantined)
+
+
 class ACPCancellationTests(unittest.TestCase):
     def test_cancel_waits_for_native_terminal_reply_before_close(self):
         import os

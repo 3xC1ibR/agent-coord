@@ -249,6 +249,7 @@ class CoordinatorProjection:
         self.checkpoint_cursor = self.cursor
         self.stream_rows.clear()
         self.stream_writes.clear()
+        self.stream_reviews.clear()
         self.recover_commands(operations={"open"})
         with self.store.reading(), self.store._connection() as db:
             records = db.execute("""SELECT c.*, o.outcome AS launch_outcome FROM coordinator_channels c
@@ -663,9 +664,11 @@ class CoordinatorProjection:
         self.project_batch([event])
 
     def _acknowledge(self):
-        floor = min([self.checkpoint_cursor] +
-                    [value["first_sequence"] - 1 for value in self.quarantined.values()])
-        self.client.call("acknowledge_events", cursor=self.cursor, retain_after=floor)
+        with self.lock:
+            floor = min([self.checkpoint_cursor] +
+                        [value["first_sequence"] - 1 for value in self.quarantined.values()])
+            cursor = self.cursor
+        self.client.call("acknowledge_events", cursor=cursor, retain_after=floor)
 
     def flush_stream(self):
         if self.cursor > self.checkpoint_cursor or self.stream_writes or self.stream_rows:
@@ -718,7 +721,7 @@ class CoordinatorProjection:
             target = stream_projection.identify(self, event, message)
             if target is None:
                 return False
-            undo = stream_projection.ledger(self.sessions, target, entry)
+            undo = stream_projection.ledger(self.sessions, target, entry, message)
             old_returncode = entry["process"].returncode
             undo.capture(entry)
             try:
@@ -814,6 +817,8 @@ class CoordinatorProjection:
 
     def _commit_through_reply(self, decoded, *, checkpoint_only=False):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
+            if checkpoint_only:
+                decoded = [({**decoded[0][0], "sequence": self.cursor}, None)]
             decoded = [(event, message) for event, message in decoded
                        if event["sequence"] > self.cursor or checkpoint_only]
             if not decoded:

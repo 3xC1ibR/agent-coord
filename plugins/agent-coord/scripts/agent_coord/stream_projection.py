@@ -141,7 +141,7 @@ def identify(projection, event, message):
     return identity, turn, item, native
 
 
-def ledger(sessions, target, entry):
+def ledger(sessions, target, entry, message):
     identity, turn, item, native = target
     undo = MutationLedger()
     undo.item(item)
@@ -155,6 +155,21 @@ def ledger(sessions, target, entry):
         undo.capture(watchdog.get('tools'))
     delivery = getattr(sessions, 'delivery_inflight', {}).get(identity)
     undo.capture(delivery)
+    if entry['provider'] == 'muse':
+        adapter = sessions.muse
+        rendered_turn = adapter.turns.get(identity, {})
+        if rendered_turn.get('id') != turn.get('id'):
+            rendered_turn = adapter.background_turns.get(identity, {}).get(turn.get('id'), {})
+        undo.item(next((value for value in rendered_turn.get('items', []) if value.get('id') == item.get('id')), None))
+        params = message.get('params') or {}
+        cursor = params.get('viewCursor')
+        if cursor:
+            key = (message.get('method'), cursor,
+                   params.get('approvalId') or params.get('userInputId') or params.get('itemId') or params.get('item', {}).get('itemId'),
+                   params.get('currentRequirementId', {}).get('sourceIndex'),
+                   params.get('change', {}).get('kind'),
+                   params.get('change', {}).get('requirementId', {}).get('sourceIndex'))
+            undo.member(sessions.muse.seen[identity], key)
     if entry['provider'] == 'antigravity':
         adapter = sessions.antigravity
         undo.capture(adapter.delivery_turns.get(identity))
