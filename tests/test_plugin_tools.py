@@ -21,6 +21,24 @@ spec.loader.exec_module(tools)
 
 
 class PluginToolsTests(unittest.TestCase):
+    @staticmethod
+    def stop_native_process_group(process):
+        # Native Codex may leave marketplace Git downloads running after exit.
+        # Each fixture client owns a separate process group, including its helpers.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(.02)
+        raise AssertionError(f"Native fixture process group {process.pid} did not exit")
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -207,7 +225,11 @@ class PluginToolsTests(unittest.TestCase):
             try:
                 inventory = rpc.request("hooks/list", {"cwds": [str(self.root)]})
             finally:
-                rpc.close()
+                try:
+                    rpc.close()
+                finally:
+                    if rpc.process is not None:
+                        self.stop_native_process_group(rpc.process)
         self.assertNotIn("unsupported plugin entry type", json.dumps(inventory))
         self.assertFalse(inventory["data"][0]["errors"], inventory)
         with (home / "config.toml").open("a") as config:
@@ -216,11 +238,17 @@ class PluginToolsTests(unittest.TestCase):
                 config.write('\n[hooks.state.' + json.dumps(hook["key"]) + ']\n'
                     'enabled = true\ntrusted_hash = ' + json.dumps(command_hash) + '\n'
                     'trusted_content_hash = ' + json.dumps(content_hash) + '\n')
-        result = subprocess.run(["codex", "exec",
+        process = subprocess.Popen(["codex", "exec",
             "--trust", "--skip-git-repo-check", "--sandbox", "read-only", "--json",
             "Hook execution fixture."], cwd=self.root,
-            env={**os.environ, "CODEX_HOME": str(home)}, capture_output=True, text=True, timeout=30)
-        evidence = result.stdout + result.stderr + json.dumps(inventory)
+            env={**os.environ, "CODEX_HOME": str(home)}, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            output, errors = process.communicate(timeout=30)
+        finally:
+            self.stop_native_process_group(process)
+            process.communicate(timeout=5)
+        evidence = output + errors + json.dumps(inventory)
         self.assertNotIn("unsupported plugin entry type", evidence)
         self.assertTrue(receipt.exists(), evidence)
         events = [json.loads(line)["hook_event_name"] for line in receipt.read_text().splitlines()]
@@ -243,7 +271,11 @@ class PluginToolsTests(unittest.TestCase):
             try:
                 result = rpc.request("skills/list", {"cwds": [str(self.root)], "forceReload": True})
             finally:
-                rpc.close()
+                try:
+                    rpc.close()
+                finally:
+                    if rpc.process is not None:
+                        self.stop_native_process_group(rpc.process)
         skills = {skill["name"]: Path(skill["path"]).resolve() for group in result["data"]
                   for skill in group["skills"] if skill["enabled"]}
         for skill in (self.plugin / "skills").iterdir():
