@@ -832,8 +832,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
     func windowDidEnterFullScreen(_ notification: Notification) { windowDidResize(notification) }
     func windowDidExitFullScreen(_ notification: Notification) { windowDidResize(notification) }
-    func windowDidMiniaturize(_ notification: Notification) { scheduleWindowSave() }
-    func windowDidDeminiaturize(_ notification: Notification) { scheduleWindowSave() }
+    func windowDidMiniaturize(_ notification: Notification) { saveWindowSet() }
+    func windowDidDeminiaturize(_ notification: Notification) { saveWindowSet() }
 
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow,
@@ -1524,7 +1524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if allowed {
                     self.checkingQuit = false
                     self.quitting = true
-                    for item in self.windows { item.window.orderOut(nil) }
+                    for item in self.windows where !item.window.isMiniaturized { item.window.orderOut(nil) }
                     self.backend.detach()
                     // Release before Sparkle launches the replacement desktop.
                     if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }

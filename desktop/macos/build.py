@@ -130,6 +130,26 @@ def register_app(destination: Path) -> None:
                     "-f", str(destination)], check=True)
 
 
+def stage_legacy_web_entry(web: Path, snapshot: dict[str, str]) -> None:
+    distribution = web / "dist"
+    index = (distribution / "index.html").read_bytes()
+    for extension, alias in (("js", "app.js"), ("css", "styles.css")):
+        suffix = extension.encode("ascii")
+        assets = set(re.findall(rb"/dist/(app-([a-f0-9]{20})\." + suffix + rb")(?=[\"'])", index))
+        if len(assets) != 1:
+            raise ValueError(f"The workspace distribution must reference one hashed .{extension} asset.")
+        filename, expected_digest = assets.pop()
+        data = (distribution / filename.decode("ascii")).read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest[:20].encode("ascii") != expected_digest:
+            raise ValueError(f"The workspace asset does not match its content hash: {filename.decode('ascii')}")
+        (web / alias).write_bytes(data)
+        snapshot["agent_coord/web/" + alias] = digest
+        index = index.replace(b"/dist/" + filename, b"/" + alias.encode("ascii"))
+    (web / "index.html").write_bytes(index)
+    snapshot["agent_coord/web/index.html"] = hashlib.sha256(index).hexdigest()
+
+
 def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]:
     snapshot = {}
     for source in sorted((SCRIPTS / "agent_coord").rglob("*")):
@@ -171,7 +191,12 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
     # asset allowlist. Load new modules through established URLs until its safe
     # idle handover, rather than requiring new HTTP routes to boot the interface.
     web = resources / "backend/agent_coord/web"
-    if not (web / "dist/index.html").is_file() and (web / "index.html").is_file():
+    if (web / "dist/index.html").is_file():
+        # Retained runtimes can serve these aliases through their existing
+        # allowlist while the new coordinator is staged. New runtimes still
+        # serve the canonical distribution and immutable hashed assets.
+        stage_legacy_web_entry(web, snapshot)
+    elif (web / "index.html").is_file():
         index = (web / "index.html").read_text()
         modules = ("html-preview.js", "response-actions.js", "permission-menu.js")
         scripts = []
