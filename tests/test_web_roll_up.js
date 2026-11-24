@@ -248,7 +248,7 @@ function projectAppFixture({known = true} = {}) {
     folders: {selected: {cwd: "/home"}, adopt(folder) { this.selected = folder; }}}, $, items,
     document: {getElementById: $, querySelector: () => null, addEventListener() {}}, setupRollUp,
     Option: function (text, value) { Object.assign(this, {text, value}); },
-    inProject,
+    inProject, showError: assert.fail,
     savedViews: {remember() {}, restoreScroll() {}, sync() {}, setProject: async () => {}},
     navigation: {remember() {}}, notifications: {syncFocus() {}}, threadOrganization: {NONE: "__none__"},
     renderFolders() {}, renderList() {}, renderStatus() {}, renderSessionSettings() {}, renderTitle() {}, setNavigation() {}, setChatExpanded() {},

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -100,6 +101,48 @@ for line in sys.stdin:
 '''
 
 
+def write_fake_provider(path, python):
+    # The shell quotes spaced interpreter paths and exits on exec failure;
+    # kernel ENOENT from a Python shebang would search PATH for another codex.
+    # Keep the Python body in this file for the bookkeeping fixture's injection.
+    path.write_text("#!/bin/sh\n"
+                    f"'''exec' {shlex.quote(str(python))} \"$0\" \"$@\"\n"
+                    "' '''\n" + FAKE)
+    path.chmod(0o755)
+
+
+class RuntimeFixtureTests(unittest.TestCase):
+    def test_fake_provider_handles_interpreter_path_with_spaces(self):
+        with tempfile.TemporaryDirectory(prefix="ribbon fixture ") as directory:
+            root = Path(directory)
+            python = root / "Python runtime's executable"
+            python.symlink_to(sys.executable)
+            write_fake_provider(root / "codex", python)
+            result = subprocess.run(["codex", "app-server"], input='{"id":1,"method":"initialize"}\n',
+                                    env=dict(os.environ, PATH=str(root), RIBBON_FAKE_ROOT=str(root)),
+                                    text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"id": 1, "result": {}})
+            self.assertTrue((root / "provider.pid").exists())
+
+    def test_missing_interpreter_cannot_fall_through_to_another_provider(self):
+        with tempfile.TemporaryDirectory(prefix="ribbon fixture ") as directory:
+            root = Path(directory)
+            write_fake_provider(root / "codex", root / "missing Python executable")
+            fallback = root / "fallback"
+            fallback.mkdir()
+            alternate = fallback / "codex"
+            alternate.write_text("#!/bin/sh\nprintf 'unexpected provider'\n")
+            alternate.chmod(0o755)
+            result = subprocess.run(["codex", "app-server"], input="",
+                                    env=dict(os.environ, PATH=os.pathsep.join((str(root), str(fallback))),
+                                             RIBBON_FAKE_ROOT=str(root)),
+                                    text=True, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(result.stdout, "")
+            self.assertFalse((root / "provider.pid").exists())
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="ribbon-runtime-")
@@ -116,9 +159,7 @@ class RuntimeTests(unittest.TestCase):
                                                               **runtime.compatibility_metadata("1+1")}))
         tools = self.root / "bin"
         tools.mkdir()
-        fake = tools / "codex"
-        fake.write_text("#!" + sys.executable + "\n" + FAKE)
-        fake.chmod(0o755)
+        write_fake_provider(tools / "codex", sys.executable)
         self.env = dict(os.environ, PYTHONPATH=str(self.resources / "backend"),
                         PATH=str(tools) + os.pathsep + os.environ["PATH"], RIBBON_FAKE_ROOT=str(self.root),
                         PYTHONWARNINGS="error::ResourceWarning")
