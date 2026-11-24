@@ -360,6 +360,36 @@ test("a committed acceptance event resolves a lost HTTP response without replayi
   assert.equal(c.$("message").value, "");
 });
 
+test("acceptance for an evicted pending send still resolves a lost HTTP response", async () => {
+  const c = composer();
+  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
+  vm.runInContext(source.slice(source.indexOf("function applyEvent("), source.indexOf("let listTimer,")), c);
+  c.conversationEntry("one").detail = c.state.detail;
+  let rejectResponse, submitted, requests = 0;
+  c.api = (path, body) => {
+    requests++;
+    submitted = body;
+    return new Promise((resolve, reject) => { rejectResponse = reject; });
+  };
+  const sending = c.sendMessage();
+  for (let index = 0; index < 5; index++) {
+    c.state.selected = "visited-" + index;
+    c.conversationEntry(c.state.selected);
+  }
+  assert.equal(c.state.conversations.has("one"), false);
+  assert.equal(c.state.outgoing.list("one").length, 1, "eviction retains the unresolved sender echo");
+  c.$("message").value = "Draft in the selected conversation";
+  c.applyEvent({method: "browser/messageAccepted", params: acceptance(submitted.requestId, submitted.message,
+    {threadId: "one", afterItemId: null})});
+  rejectResponse(new Error("Response disconnected after acceptance."));
+  await assert.doesNotReject(sending);
+  assert.equal(requests, 1);
+  assert.equal(c.state.outgoing.list("one")[0].status, "sent");
+  assert.equal(c.state.outgoing.list("one")[0].acceptance.requestId, submitted.requestId);
+  assert.equal(c.state.drafts.has("one"), false, "accepted input is not restored as an unsent draft");
+  assert.equal(c.$("message").value, "Draft in the selected conversation");
+});
+
 test("queued and command input keep their own displays", async () => {
   for (const [mode, text] of [["queue", "Later"], ["steer", "/compact"]]) {
     const c = composer({running: mode === "queue"});

@@ -2661,9 +2661,9 @@ function applyEvent(event) {
   const cached = state.conversations?.get(event.params.threadId);
   if (event.method === "browser/messageAccepted") {
     const id = event.params.threadId;
-    // Unopened conversations restore receipts on their next read. Do not retain
-    // reconciliation state for every thread broadcast by the shared stream.
-    if (!cached && state.selected !== id) return;
+    // Unopened conversations restore receipts on their next read. An evicted
+    // conversation still needs acceptance while its outgoing send is unresolved.
+    if (!cached && state.selected !== id && !state.outgoing?.list(id).length) return;
     const detail = cached?.detail || (state.selected === id ? state.detail : null);
     if (state.outgoing?.confirm(id, [event.params])) {
       if (cached) cached.revision++;
