@@ -56,6 +56,7 @@ final class Backend {
     private(set) var supportsRuntimeUpdates = false
     private(set) var supportsUninterruptedUpdates = false
     private(set) var continuesInterruptedProviders = false
+    private(set) var retainsProviderSessions = false
     var updateInProgress: Bool { expectedUpdate != nil }
     private var expectedUpdate: (id: String, payload: String)?
     private var reportedUpdate: String?
@@ -66,7 +67,6 @@ final class Backend {
     private var database: String?
     private var python: URL?
     private var helperResources: URL?
-    private var interactionResources: URL?
     private var interactionRequestID: String?
     private var legacyInteractionURL: URL?
     private var edgeURL: URL?
@@ -115,12 +115,10 @@ final class Backend {
               let config = configuration, let database = database else {
             throw Self.failure("The runtime has not been configured.")
         }
-        // The serving predecessor may predate interaction continuity. Its
-        // control helper must never authorize an upgrade around the gateway.
+        // The interface helper owns stable-origin and retained-predecessor
+        // compatibility; ordinary controls still use the serving payload.
         let continuity = arguments.contains("--runtime-interaction-continuity") || arguments.contains("--runtime-stable-origin")
-        let gatewayHelper = arguments.contains("--runtime-stable-origin") || arguments.contains("--runtime-bootstrap")
-            ? self.resources : (interactionResources ?? self.resources)
-        let resources = continuity ? (gatewayHelper ?? retained) : retained
+        let resources = continuity ? (self.resources ?? retained) : retained
         let python = continuity ? try JSONDecoder().decode(BackendConfiguration.self,
             from: Data(contentsOf: resources.appendingPathComponent("backend.json"))).pythonURL(resources: resources) : defaultPython
         let child = Process(), output = Pipe(), errors = Pipe(), stdin = Pipe()
@@ -226,11 +224,11 @@ final class Backend {
                 edgeURL = url
                 edgeObserver = observer
                 legacyInteractionURL = nil
-                interactionResources = nil
                 interactionRequestID = nil
             }
             gatewaySettled = true
         } else if status["interaction_url"] != nil {
+            guard edgeURL == nil else { throw Self.failure("A stable runtime cannot return to a predecessor gateway.") }
             let url = try loopbackURL(status["interaction_url"])
             guard let settled = status["interaction_settled"] as? Bool, let path = status["interaction_payload"] as? String,
                   let db = database.map({ URL(fileURLWithPath: $0).resolvingSymlinksInPath() }) else {
@@ -243,7 +241,6 @@ final class Backend {
                   legacyInteractionURL == nil || legacyInteractionURL == url else {
                 throw Self.failure("Interaction gateway identity changed before the previous intake settled.")
             }
-            interactionResources = helper
             interactionRequestID = settled ? nil : status["interaction_request_id"] as? String
             legacyInteractionURL = url
             gatewaySettled = settled
@@ -320,7 +317,9 @@ final class Backend {
         pendingUpdate = pending
         supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
         supportsUninterruptedUpdates = (status["uninterrupted_updates"] as? Int ?? 0) >= 1
-        continuesInterruptedProviders = (status["interrupted_provider_continuation"] as? Int ?? 0) >= 1
+        retainsProviderSessions = (status["unbrokered_provider_wait"] as? Int ?? 0) >= 1
+        continuesInterruptedProviders = !retainsProviderSessions
+            && (status["interrupted_provider_continuation"] as? Int ?? 0) >= 1
         pendingUpdateRequiresConfirmation = (status["runtime_update_prompts"] as? Int ?? 0) >= 1
             && status["pending_confirmation"] as? Bool == true
         self.instance = instance
@@ -346,7 +345,7 @@ final class Backend {
         guard !polling, !stopping else { return }
         polling = true
         if let edgeURL = edgeURL, let observer = edgeObserver {
-            var request = URLRequest(url: edgeURL.appendingPathComponent("_runtime/health"))
+            var request = URLRequest(url: edgeURL.appendingPathComponent("_runtime").appendingPathComponent("health"))
             request.setValue(observer, forHTTPHeaderField: "X-Ribbon-Runtime-Observer")
             healthSession.dataTask(with: request) { [weak self] data, response, error in
                 DispatchQueue.main.async {
@@ -414,7 +413,7 @@ final class Backend {
         }
         if expectedUpdate != nil { completion(Self.failure("The requested backend update is still being observed.")); return }
         let request = interactionRequestID ?? UUID().uuidString
-        if interactionURL != nil { interactionRequestID = request }
+        if legacyInteractionURL != nil { interactionRequestID = request }
         expectedUpdate = (request, payload)
         worker.async {
             do {

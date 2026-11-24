@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import weakref
@@ -67,12 +68,16 @@ def _prepare(history):
 class SearchStore:
     def __init__(self, path, *, initialize=True):
         self.path = Path(path).resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rf-search-index')
         self._closed = False
         self._futures = set()
         self._future_lock = threading.Lock()
         if initialize:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # The index contains transcript prose. SQLite derives new journal
+            # permissions from the database file mode at creation.
+            with os.fdopen(os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600), 'rb') as file:
+                os.fchmod(file.fileno(), 0o600)
             with self.connection() as db:
                 db.execute('PRAGMA journal_mode=WAL')
                 db.executescript(_SCHEMA)
@@ -241,6 +246,28 @@ class SearchStore:
                 revision=record['revision'], metadata=record.get('metadata')).result()
             yield {'thread_id': record['thread_id'], 'revision': record['revision'], 'accepted': accepted}
 
+    def matches_record(self, db, record):
+        """Compare stored search rows and normalized metadata with one source history."""
+        expected, digest, status = _prepare(record['history'])
+        identity = record['thread_id']
+        head = db.execute('SELECT * FROM search_threads WHERE thread_id=?', (identity,)).fetchone()
+        if (head is None or head['digest'] != digest or head['status'] != status
+                or head['revision'] != record['revision']):
+            return False
+        fields = ('title', 'request', 'summary', 'artifacts', 'domain')
+        if record.get('metadata') is not None:
+            expected_fields = self._metadata(record['metadata'], head)
+            if expected_fields != tuple(head[k] for k in fields):
+                return False
+            context = db.execute('''SELECT title,domain,body FROM search_fts
+                WHERE rowid=-(SELECT rowid FROM search_threads WHERE thread_id=?)''', (identity,)).fetchone()
+            if context is None or tuple(context) != (expected_fields[0], expected_fields[4], ' '.join(expected_fields[1:4])):
+                return False
+        actual = db.execute('''SELECT t.turn_id,t.item_id,t.role,t.created_at,t.excerpt,f.body
+            FROM search_turns t LEFT JOIN search_fts f ON f.rowid=t.id
+            WHERE t.thread_id=? ORDER BY t.turn_seq''', (identity,))
+        return [tuple(row) for row in actual] == [tuple(row) for row in expected]
+
     def verify(self, records):
         self.flush()
         failures, count, identities = [], 0, set()
@@ -248,21 +275,10 @@ class SearchStore:
             db.execute('BEGIN IMMEDIATE')
             for record in records:
                 count += 1
-                expected, digest, status = _prepare(record['history'])
                 identity = record['thread_id']
-                if identity in identities:
+                if identity in identities or not self.matches_record(db, record):
                     failures.append(identity)
                 identities.add(identity)
-                head = db.execute('SELECT * FROM search_threads WHERE thread_id=?', (identity,)).fetchone()
-                actual = db.execute('''SELECT t.turn_id,t.item_id,t.role,t.created_at,t.excerpt,f.body
-                    FROM search_turns t LEFT JOIN search_fts f ON f.rowid=t.id
-                    WHERE t.thread_id=? ORDER BY t.turn_seq''', (identity,)).fetchall()
-                if (head is None or head['digest'] != digest or head['status'] != status
-                        or head['revision'] != record['revision']
-                        or [tuple(row) for row in actual] != [tuple(row) for row in expected]
-                        or (record.get('metadata') is not None and self._metadata(record['metadata'], head)
-                            != tuple(head[key] for key in ('title', 'request', 'summary', 'artifacts', 'domain')))):
-                    failures.append(identity)
             extras = {row[0] for row in db.execute('SELECT thread_id FROM search_threads')} - identities
             failures.extend(sorted(extras))
             failures = sorted(set(failures))

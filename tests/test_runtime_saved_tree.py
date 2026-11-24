@@ -7,12 +7,14 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 import test_ui
 from test_subagent_close import attach
-from agent_coord import desktop_runtime, runtime_interaction_gateway as gateway, supervision
-from agent_coord.runtime_saved_views import SavedRuntimeViews
+from historical_gateway import desktop_runtime, runtime_interaction_gateway as gateway
+from agent_coord import supervision
+from historical_gateway.runtime_saved_views import SavedRuntimeViews
 
 
 class SavedTreeHTTPTests(unittest.TestCase):

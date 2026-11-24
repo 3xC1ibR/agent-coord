@@ -49,6 +49,12 @@ def restore(sessions, saved):
                 journal.path = Path(journal.path) if journal.path else None
                 journal.anchor = bytes.fromhex(journal.anchor)
                 adapter.journals[identity] = journal
+        projection = getattr(adapter.store, "provider_projection", None)
+        for channel in state.get("connections", {}):
+            entry = projection.channels.get(channel, {}) if projection is not None else {}
+            connection = getattr(entry.get("callback"), "__self__", None)
+            if getattr(connection, "channel", None) == channel:
+                adapter.connections[connection.thread_id] = connection
         for connection in adapter.connections.values():
             channel = getattr(connection, "channel", None)
             if channel in state.get("connections", {}):

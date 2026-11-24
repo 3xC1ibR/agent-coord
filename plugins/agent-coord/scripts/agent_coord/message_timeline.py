@@ -7,6 +7,8 @@ from .workspaces import matches_workspace
 
 
 TIMELINE_BATCH_ROWS = 128
+# Reply lookup must stay within the exchange. The recipient/sequence index can
+# otherwise scan every later message to a busy recipient for each visible row.
 _TIMELINE_ROWS = """SELECT m.*, sender.client AS sender_client, recipient.client AS recipient_client,
     COALESCE(st.title, sender.name, sender.session_id) AS sender_title,
     COALESCE(rt.title, recipient.name, recipient.session_id) AS recipient_title,
@@ -14,7 +16,8 @@ _TIMELINE_ROWS = """SELECT m.*, sender.client AS sender_client, recipient.client
     exchange.closed_at, a.outcome AS wake_outcome,
     d.attempted_at AS delivery_attempted_at, d.submitted_at AS delivery_submitted_at,
     d.error AS delivery_error, d.evidence AS delivery_evidence,
-    (SELECT r.id FROM messages r WHERE r.thread_id = m.thread_id AND r.id > m.id
+    (SELECT r.id FROM messages r INDEXED BY messages_exchange_idx
+        WHERE r.thread_id = m.thread_id AND r.id > m.id
         AND r.sender_session_id = m.recipient_session_id
         AND r.recipient_session_id = m.sender_session_id
         AND (r.in_reply_to = m.id OR r.in_reply_to IS NULL)

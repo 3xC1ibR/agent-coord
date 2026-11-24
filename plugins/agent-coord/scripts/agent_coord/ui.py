@@ -4,6 +4,7 @@ import errno
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import queue
 import re
@@ -26,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
 from .conversation_open import open_route_thread
+from .history_response import read_snapshot_json
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
@@ -909,11 +911,12 @@ def _handler(
                         raise ValueError
                 except ValueError as exc:
                     raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
-                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
-                if thread is None:
+                thread_json = browser_sessions.read_history_window_json(
+                    unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
+                if thread_json is None:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Saved turn was not found."})
                 else:
-                    self._json(HTTPStatus.OK, {"thread": thread})
+                    self._send(HTTPStatus.OK, "application/json; charset=utf-8", b'{"thread":' + thread_json + b'}')
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
@@ -925,13 +928,10 @@ def _handler(
                     if not result["legacyDetailRequired"]:
                         self._json(HTTPStatus.OK, result)
                         return
-                with store.reading():
-                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
-                    if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
-                        from .thread_control import ThreadControl
-                        work = result["work_thread"]
-                        work["close_when_done"] = ThreadControl(store).status(work["thread_id"])
-                self._json(HTTPStatus.OK, result)
+                body = read_snapshot_json(
+                    browser_sessions, unquote(route[9:]), recent=view == "recent",
+                    controls=self.headers.get("X-Agent-Coord-Thread-Controls") == "1")
+                self._send(HTTPStatus.OK, "application/json; charset=utf-8", body)
             elif route == "events":
                 try:
                     cursor = (self.headers.get("Last-Event-ID") or query.get("after", ["0"])[0]).split(":")
@@ -1536,8 +1536,12 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
+        self._storage_stopped = threading.Event()
+        self._migration_index = None
         self._idle_workers = []
         self._workers_closing = False
+        self._startup_cancelled = threading.Event()
+        self._startup_worker = None
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
@@ -1562,12 +1566,71 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 return
             request, client_address = next_request
 
+    def start_storage_maintenance(self, owner_guard):
+        """Start migration only after the serving runtime owns its committed database."""
+        from .search_publication import SearchPublicationWorker, prepare_search_publication
+        from .search_store import SearchStore
+        from .transcript_migration import start_runtime_migration
+
+        sessions = self.browser_sessions
+        store = sessions.store
+
+        def available():
+            return owner_guard() and not self._storage_stopped.is_set() and not sessions.admission.paused
+
+        def prepare_search():
+            if not available():
+                return False
+            if self.search_publications is not None:
+                return True
+            self._migration_index = SearchStore.for_store(store)
+            if not prepare_search_publication(store, stopped=self._storage_stopped, owner_guard=available):
+                return False
+            with sessions.admission.enter() as allowed:
+                if not allowed or not available():
+                    return False
+                self.search_publications = SearchPublicationWorker.start_if_active(store)
+            return self.search_publications is not None
+
+        if available():
+            with sessions.admission.enter() as allowed:
+                if allowed:
+                    self.search_publications = SearchPublicationWorker.start_if_active(store)
+                    if self.search_publications is None:
+                        sessions.start_search_index()
+        start_runtime_migration(sessions, owner_guard=owner_guard, search_handshake=prepare_search)
+
+    def start_services(self, operations, *, background=False):
+        if not background:
+            for operation in operations:
+                operation()
+            return
+
+        def start_pending():
+            for operation in operations:
+                if self._startup_cancelled.is_set():
+                    return
+                try:
+                    operation()
+                except Exception:
+                    logging.getLogger(__name__).exception("Coordinator background service failed to start")
+
+        self._startup_worker = threading.Thread(target=start_pending, name="runtime-services", daemon=True)
+        self._startup_worker.start()
+
     def server_close(self) -> None:
+        self._storage_stopped.set()
+        migration = getattr(self.browser_sessions, "transcript_migration", None)
+        if migration is not None:
+            migration.close(timeout=None)
         with self._worker_lock:
             self._workers_closing = True
             for mailbox in self._idle_workers:
                 mailbox.put(None)
             self._idle_workers.clear()
+        self._startup_cancelled.set()
+        if self._startup_worker is not None:
+            self._startup_worker.join()
         try:
             if self.notification_broadcast is not None:
                 self.notification_broadcast.close()
@@ -1593,6 +1656,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 try:
                     if self.search_publications is not None:
                         self.search_publications.close()
+                    elif self._migration_index is not None:
+                        self._migration_index.close()
                 finally:
                     super().server_close()
 
@@ -1620,6 +1685,8 @@ def make_ui_server(
     remote_access: RemoteAccess | None = None,
     admission_paused: bool = False,
     csrf_token: str | None = None,
+    native_transport=None,
+    defer_services: bool = False,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
@@ -1635,7 +1702,7 @@ def make_ui_server(
         sessions.admission.pause()
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
-    native = NativePush(store, sessions, remote)
+    native = NativePush(store, sessions, remote, transport=native_transport)
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
@@ -1656,35 +1723,34 @@ def make_ui_server(
     server.coordination_metrics = coordination_metrics
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions, provider_limits)
+    from .snapshot_cache import prepare_snapshot_cache
+    prepare_snapshot_cache(store)
     sessions.admission.wrap(server.thread_control, "process_once", automatic=True)
     sessions.admission.wrap(server.app_control, "process_once", automatic=True)
     server.runtime_admission_ready = True
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
-    remote.restore(f"http://{target_host}:{bound_port}")
-    try:
-        sessions.start_database_checkpoint()
-        from .search_publication import SearchPublicationWorker
-        server.search_publications = SearchPublicationWorker.start_if_active(store)
-        if server.search_publications is None:
-            sessions.start_search_index()
-        push.start()
-        native.start()
-        server.thread_control.start()
-        server.app_control.start()
-        sessions.schedules.start()
-        sessions.inbox_wake.start()
-        sessions.event_subscriptions.start()
-        sessions.sidecars.start()
-        sessions.reviews.start()
-        sessions.watchdog.start()
-        sessions.start_residency()
-        sessions.dispatch.wake()
+    def start_stoic():
         # Standalone distributions can omit application-specific connectors.
         from importlib.util import find_spec
         if find_spec(".stoic_integration", __package__) is not None:
             from .stoic_integration import start_connector
             server.stoic_integration = start_connector(server.external_work)
+
+    automatic_services = (
+        server.thread_control.start, server.app_control.start, sessions.schedules.start,
+        sessions.inbox_wake.start, sessions.event_subscriptions.start, sessions.sidecars.start,
+        sessions.reviews.start, sessions.watchdog.start, sessions.start_residency,
+        sessions.dispatch.wake,
+    )
+    maintenance = (sessions.start_database_checkpoint,)
+    notifications = (push.start, native.start)
+    try:
+        remote.restore(f"http://{target_host}:{bound_port}")
+        if defer_services:
+            server.runtime_services = (*automatic_services, *notifications, *maintenance, start_stoic)
+        else:
+            server.start_services((*maintenance, *notifications, *automatic_services, start_stoic))
     except BaseException:
         server.server_close()
         raise

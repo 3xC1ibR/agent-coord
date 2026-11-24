@@ -947,7 +947,7 @@ def main():
         for _ in range(arguments.windows):
             Window(client, target, stop, samples).start()
         if arguments.hook_rate:
-            hooks.append(subprocess.Popen([sys.executable, "-c", HOOK_SOURCE, str(database), str(arguments.hook_rate),
+            hooks.append(subprocess.Popen([sys.executable, "-B", "-c", HOOK_SOURCE, str(database), str(arguments.hook_rate),
                                            json.dumps(busy or [target])]))
         watcher = EventWatcher(client)
         watcher.start()

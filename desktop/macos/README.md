@@ -305,13 +305,13 @@ repeat dialogs for that version until the next interface launch; the update menu
 remains available. The staged backend stays inactive until explicitly installed.
 Signed releases use the same two choices while retaining Sparkle's verified
 download, progress, and installation checks. Development builds still do not
-check production release feeds. Runtimes advertising `uninterrupted_updates: 1`
-retain Codex and Claude provider processes and native turns across compatible
-coordinator upgrades. Active unsupported providers defer replacement. First
-adoption from a legacy backend uses one guarded restart, retains rollback state,
-and continues eligible saved conversations; that first transition interrupts
-execution. Approvals, Stop, queued user input and uncertain submissions take
-precedence. Use the matching installed helper's
+check production release feeds. Compatible coordinators retain transport-owned Codex, Claude, Kimi,
+Antigravity and Muse channels across backend upgrades. For first adoption,
+inspect the outgoing runtime. Build 98 can interrupt an eligible Kimi,
+Antigravity or Muse turn during an explicit update. Let those turns finish
+before requesting activation if uninterrupted execution is required. A guarded
+interruption retains rollback state and observes approvals, Stop, queued user
+input and uncertain submissions. Use the matching installed helper's
 [`--runtime-command status`](../../docs/runtime-updates.md#runtime-maintenance-controls)
 to check ownership, pending payload and busy reasons; while work continues,
 verify that its runtime instance remains unchanged. After activation,
@@ -413,10 +413,10 @@ menu, including development builds without Sparkle. Passive staging still waits
 for idle. An incompatible update or unavailable runtime check defers installation.
 
 An explicit backend update retains the old executable and a SQLite rollback
-snapshot until the candidate is ready and durably committed. Saved conversations
-can continue after restart; running provider/tool processes are not preserved.
-Recovery checks native history for Codex and Claude. Other providers require
-explicit continuation until they supply an authoritative native recovery check.
+snapshot until the candidate is ready and durably committed. The retained transport keeps provider processes,
+active native turns and pending requests across compatible coordinator
+replacements. On older builds that own provider pipes, the guarded restart
+uses saved native-session recovery and reports each outcome separately.
 Runtime status includes per-conversation recovery outcomes and reasons. Failed
 or forced shutdown leaves work paused for review; Stop Work and Quit cancels
 recovery. See the contract for recovery and rollback limits.

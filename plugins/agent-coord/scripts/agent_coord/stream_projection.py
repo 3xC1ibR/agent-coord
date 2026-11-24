@@ -15,6 +15,7 @@ class MutationLedger:
         self.objects = []
         self.seen = set()
         self.entries = []
+        self.members = []
 
     def capture(self, value):
         if id(value) in self.seen or not isinstance(value, (dict, list, set, deque)):
@@ -25,12 +26,17 @@ class MutationLedger:
     def entry(self, mapping, key):
         self.entries.append((mapping, key, key in mapping, mapping.get(key)))
 
+    def member(self, values, identity):
+        self.members.append((values, identity, identity in values))
+
     def item(self, item):
         if isinstance(item, dict):
             self.capture(item)
             self.capture(item.get('summary'))
 
     def restore(self):
+        for values, identity, existed in reversed(self.members):
+            values.add(identity) if existed else values.discard(identity)
         for value, saved in reversed(self.objects):
             if isinstance(value, dict):
                 value.clear()
@@ -135,20 +141,35 @@ def identify(projection, event, message):
     return identity, turn, item, native
 
 
-def ledger(sessions, target, entry):
+def ledger(sessions, target, entry, message):
     identity, turn, item, native = target
     undo = MutationLedger()
     undo.item(item)
     undo.capture(turn)
     undo.item(native)
     undo.entry(sessions.history_revisions, identity)
-    undo.capture(sessions.dirty_histories)
+    undo.member(sessions.dirty_histories, identity)
     watchdog = sessions.watchdog.observed.get(identity)
     undo.capture(watchdog)
     if watchdog:
         undo.capture(watchdog.get('tools'))
     delivery = getattr(sessions, 'delivery_inflight', {}).get(identity)
     undo.capture(delivery)
+    if entry['provider'] == 'muse':
+        adapter = sessions.muse
+        rendered_turn = adapter.turns.get(identity, {})
+        if rendered_turn.get('id') != turn.get('id'):
+            rendered_turn = adapter.background_turns.get(identity, {}).get(turn.get('id'), {})
+        undo.item(next((value for value in rendered_turn.get('items', []) if value.get('id') == item.get('id')), None))
+        params = message.get('params') or {}
+        cursor = params.get('viewCursor')
+        if cursor:
+            key = (message.get('method'), cursor,
+                   params.get('approvalId') or params.get('userInputId') or params.get('itemId') or params.get('item', {}).get('itemId'),
+                   params.get('currentRequirementId', {}).get('sourceIndex'),
+                   params.get('change', {}).get('kind'),
+                   params.get('change', {}).get('requirementId', {}).get('sourceIndex'))
+            undo.member(sessions.muse.seen[identity], key)
     if entry['provider'] == 'antigravity':
         adapter = sessions.antigravity
         undo.capture(adapter.delivery_turns.get(identity))

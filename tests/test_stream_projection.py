@@ -130,3 +130,46 @@ class StreamProjectionTests(unittest.TestCase):
         self.assertEqual(self.client.commands[-1][1]['retain_after'], 1)
         self.projection.load()
         self.assertEqual(self.projection.quarantined['bad']['first_sequence'], 2)
+
+    def test_validated_delta_does_not_enter_raw_diagnostic_or_authorization_handlers(self):
+        self.projection.project(self.event(1, 'item/started', item={
+            'id': 'output', 'type': 'agentMessage', 'text': ''}))
+        self.projection.channels['codex']['stdout_callback'] = lambda raw: self.fail('Raw handler under delta lock')
+        self.projection.project(self.event(2, 'item/agentMessage/delta', itemId='output', delta='https://example.test/oauth'))
+        self.assertEqual(self.projection.stream_metrics['events'], 1)
+
+    def test_native_claude_token_updates_mirror_without_sqlite_copies_or_noop_bookkeeping(self):
+        item = {'id': 'output', 'type': 'agentMessage', 'text': ''}
+        self.projection.project(self.event(1, 'item/started', item=item))
+        self.sessions.claude.turns[self.identity] = {'id': self.turn_id, 'status': 'inProgress', 'items': [item]}
+        self.sessions.claude.blocks[self.identity] = {0: item}
+        self.projection.attach('claude', 123, lambda message: self.sessions.claude._message(self.identity, message),
+                               provider='claude', thread_id=self.identity)
+        import json
+        native = {'sequence': 2, 'channel': 'claude', 'stream': 'stdout', 'data': json.dumps({
+            'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+                'delta': {'type': 'text_delta', 'text': 'once'}}})}
+        database = self.store._connection
+        def checked(*args, **kwargs):
+            self.assertFalse(self.sessions.lock._is_owned())
+            return database(*args, **kwargs)
+        with patch.object(self.store, '_connection', side_effect=checked), \
+                patch('agent_coord.coordinator_projection.copy.deepcopy', side_effect=AssertionError('native Claude copy')):
+            self.projection.project(native)
+        self.assertEqual(item['text'], 'once')
+        self.assertEqual(self.sessions.histories[self.identity]['turns'][-1]['items'][-1]['text'], 'once')
+        self.assertEqual(self.projection.stream_writes, [])
+
+    def test_idle_checkpoint_cannot_rewind_a_concurrently_advanced_cursor(self):
+        self.projection.project(self.event(1, 'item/started', item={
+            'id': 'output', 'type': 'agentMessage', 'text': ''}))
+        self.projection.project(self.event(2, 'item/agentMessage/delta', itemId='output', delta='first'))
+        commit = self.projection._commit_through_reply
+        def advanced(decoded, **options):
+            self.projection.project(self.event(3, 'item/agentMessage/delta', itemId='output', delta=' second'))
+            return commit(decoded, **options)
+        with patch.object(self.projection, '_commit_through_reply', side_effect=advanced):
+            self.projection.flush_stream()
+        self.assertEqual(self.projection.cursor, 3)
+        self.assertEqual(self.projection.checkpoint_cursor, 3)
+        self.assertEqual(self.sessions.histories[self.identity]['turns'][-1]['items'][-1]['text'], 'first second')

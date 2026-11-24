@@ -37,6 +37,7 @@ import uuid
 from measure_backend_latency import BUDGETS
 from release_workload_receipt import MIN_ARCHIVE_ITEMS, MIN_ARCHIVE_TURNS, database_bytes
 from runtime_upgrade_validation import Validation, listener_pids, process_command, processes_mentioning, runtime
+from agent_coord import runtime_edge
 
 
 METRIC_NAMES = {
@@ -316,6 +317,8 @@ def fetch(url, token, route, body=None, timeout=20):
 
 class SignedUpgrade(Validation):
     def __init__(self, args, previous, candidate):
+        if getattr(args, "private_apfs_fixture", False) and args.candidate_only:
+            raise ValueError("Private APFS fixtures require guarded upgrade qualification")
         super().__init__(args.report, 1, "signed-responsiveness")
         self.old, self.new = previous, candidate
         self.profile_sample = args.profile_sample
@@ -324,6 +327,8 @@ class SignedUpgrade(Validation):
         self.affected_report = args.affected_report
         self.source_baseline_report = getattr(args, "source_baseline_report", None)
         self.candidate_only = args.candidate_only
+        self.stable_origin = getattr(args, "stable_origin", False)
+        self.private_apfs_fixture = getattr(args, "private_apfs_fixture", False)
         self.browser_module = args.playwright_module
         self.browser = None
         self.browser_err = None
@@ -399,12 +404,87 @@ class SignedUpgrade(Validation):
         arguments = ["--runtime-bootstrap"]
         if hold:
             arguments.append("--runtime-confirm-updates")
-            if self.gateway_capable():
+            if getattr(self, "stable_origin", False):
+                arguments.append("--runtime-stable-origin")
+            elif self.gateway_capable():
                 arguments.append("--runtime-interaction-continuity")
         return self.signed_helper(resources, arguments)
 
     def gateway_capable(self):
-        return (self.new[0] / "backend/agent_coord/runtime_gateway_lifecycle.py").is_file()
+        return not getattr(self, "stable_origin", False) and (
+            self.new[0] / "backend/agent_coord/runtime_gateway_lifecycle.py").is_file()
+
+    def bind_stable_origin(self, held):
+        directory = runtime.runtime_directory(self.database)
+        edge = runtime_edge.read_address(directory)
+        if (not edge or held.get("edge_url") != edge["url"]
+                or held.get("edge_observer") != edge["observer"]):
+            raise RuntimeError("The verified payload did not establish a stable origin")
+        command = process_command(edge["pid"]) or ""
+        if ("-m agent_coord.runtime_edge" not in command or str(directory) not in command
+                or not any(str(directory / "payloads" / bundle[1]["payload_digest"]) in command
+                           for bundle in (self.old, self.new))):
+            raise RuntimeError("The stable listener does not execute a retained signed payload")
+        self.edge = edge
+        self.edge_observations = []
+        self.address = edge["url"], fetch(edge["url"], "", "config", timeout=5)["token"]
+        self.report["stable_origin"] = {"url": edge["url"], "listener_instance": edge["instance"]}
+
+    def observe_stable_origin(self, stop):
+        while not stop.is_set():
+            before = time.monotonic()
+            try:
+                status = runtime_edge.probe(self.edge) or {}
+            except (OSError, ValueError, http.client.HTTPException):
+                status = {}
+            self.edge_observations.append({"before": before, "after": time.monotonic(),
+                "serving": status.get("instance") if status.get("status") == "serving" else None,
+                "edge_instance": status.get("edge_instance")})
+            stop.wait(.01)
+
+    def verify_stable_origin(self):
+        report = self.report["stable_origin"]
+        previous = self.report["initial_runtime"]["instance"]
+        successor = self.report["candidate_runtime"]["instance"]
+        observations = self.edge_observations
+        ready = next((sample for sample in observations if sample["serving"] == successor), None)
+        before = max((sample["before"] for sample in observations if sample["serving"] == previous
+                      and ready and sample["after"] < ready["before"]), default=None)
+        milliseconds = 1000 * (ready["after"] - before) if ready and before is not None else None
+        report["cutover_ms"] = max(milliseconds, report.get("fenced_ms") or 0) if milliseconds is not None else None
+        traffic = [row for row in self.report["samples"]
+                   if row["phase"] == "upgrade" and row["kind"] in {"send", "detail", "history"}]
+        browser = [row for row in self.report.get("browser_observations", [])
+                   if row["phase"] == "upgrade" and row["kind"] in {"browser_send", "browser_open"}]
+        sends = [1000 * (row["end"] - row["start"]) for row in traffic if row["kind"] == "send"]
+        sends.extend(row["responded"] - row["requested"] for row in browser if row["kind"] == "browser_send"
+                     and row.get("responded") is not None and row.get("requested") is not None)
+        sends.sort()
+        report["send_p99_ms"] = sends[math.ceil(len(sends) * .99) - 1] if sends else None
+        report["http_failures"] = sum(row["outcome"] not in {"accepted", "success"} for row in traffic)
+        report["http_failures"] += sum(not row["ok"] for row in browser)
+        attachments = [row for row in self.report.get("browser_observations", [])
+                       if row["kind"] == "browser_attachment"]
+        network_path = self.root / "browser-network.json"
+        document_loads = collections.Counter()
+        if network_path.exists():
+            for key, count in json.loads(network_path.read_text())["counts"].items():
+                phase, page, origin, _, route, result = key.split(" ", 5)
+                if route == "document":
+                    document_loads[page] += count
+                if (phase == "upgrade" and route in {"sessions.messages", "sessions.detail", "threads.detail"}
+                        and (not result.isdigit() or int(result) >= 400)):
+                    report["http_failures"] += count
+        report["browser_reloads"] = sum(max(0, count - 1) for count in document_loads.values())
+        report["verified"] = bool(ready and before is not None and traffic and browser and sends
+            and report["cutover_ms"] < 250 and report["send_p99_ms"] < 150
+            and not report["http_failures"] and not report["browser_reloads"]
+            and document_loads == {"opening": 1, "composing": 1, "receiving": 1}
+            and {row["page"] for row in attachments} == {"opening", "composing", "receiving"}
+            and all(row["origin"] == report["url"].rstrip("/") for row in attachments)
+            and all(row["edge_instance"] in {None, report["listener_instance"]} for row in observations))
+        if not report["verified"]:
+            self.report["violations"].append({"phase": "upgrade", "kind": "stable origin qualification failed"})
 
     def gateway_control(self, route, *, body=None):
         directory = runtime.runtime_directory(self.database)
@@ -443,18 +523,26 @@ class SignedUpgrade(Validation):
         now = time.monotonic()
         stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
         next_sample = now
-        lowest = None
+        previous_pending = None
+        credited_head = None
         while now < min(deadline, stall_deadline):
             if self.gateway_control("identity").get("settled") is True:
                 return
             if now >= next_sample and intake.is_file():
                 with closing(sqlite3.connect(intake.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                    pending, = db.execute("SELECT COUNT(*) FROM intake WHERE state IN ('uncertain','queued')").fetchone()
-                self.report.setdefault("intake_settlement_observations", []).append({"at_ms": time.time()*1000,
-                                                                                   "pending": pending})
-                if lowest is None or pending < lowest:
-                    lowest = pending
+                    pending, head = db.execute(
+                        "SELECT count(*), min(sequence) FROM intake WHERE state IN ('uncertain','queued')"
+                    ).fetchone()
+                self.report.setdefault("intake_settlement_observations", []).append(
+                    {"at_ms": time.time()*1000, "pending": pending, "oldest_pending_sequence": head})
+                # A burst of new arrivals can exceed the initial depth. Credit
+                # a shrinking queue only when the oldest outstanding request
+                # also advances. All arrivals still have to finish by deadline.
+                if previous_pending is None or (pending < previous_pending and
+                        (head is None or credited_head is None or head > credited_head)):
                     stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
+                    credited_head = head
+                previous_pending = pending
                 next_sample = now + 5
             time.sleep(.25)
             now = time.monotonic()
@@ -506,10 +594,17 @@ class SignedUpgrade(Validation):
                 and r.get("continuity") is True and r.get("status") == 200} == {"opening", "composing", "receiving"}
 
     def start(self):
+        if getattr(self, "private_apfs_fixture", False):
+            from private_upgrade_fixture import prepare_private_clone
+            self.report["workload"]["fixture_preparation"] = prepare_private_clone(
+                self.snapshot, self.database, self.root)
         seed_inventory(self.database, self.root, self.sources)
         self.saved = copy_saved_histories(self.snapshot, self.database, self.root, manifest_thread=self.manifest_thread)
         if not self.candidate_only:
             self.report["workload"].update(match_snapshot_size(self.snapshot, self.database))
+        if getattr(self, "private_apfs_fixture", False):
+            from private_upgrade_fixture import extent_evidence
+            self.report["workload"]["fixture_preparation"]["seeded_fixture"] = extent_evidence(self.database)
         self.report["saved_histories"] = self.saved
         self.open_targets = [r["fixture_id"] for r in self.saved]
         profile = {"raw_bytes": LARGE_OUTPUT_BYTES * 3 // 4, "interval_seconds": 1}
@@ -744,6 +839,8 @@ class SignedUpgrade(Validation):
         if not path.exists():
             return None
         update = json.loads(path.read_bytes())
+        if getattr(self, "stable_origin", False):
+            update = runtime_edge.adoption_status(directory, {"update": update})["update"]
         if update["id"] != request:
             return None
         source = self.report["initial_runtime"]
@@ -844,6 +941,7 @@ class SignedUpgrade(Validation):
 
     def swap_signed(self, staged=None):
         gateway = self.gateway_capable()
+        stable = getattr(self, "stable_origin", False)
         held, record, target = staged or self.stage_signed()
         initial = self.report["initial_runtime"]
         if gateway and staged is None:
@@ -866,13 +964,23 @@ class SignedUpgrade(Validation):
         request = self.report["activation_request_id"] = str(uuid.uuid4())
         errors = self.report["guarded_control_observation_errors"] = []
         watcher = None
+        edge_stop = threading.Event()
+        edge_watcher = None
+        if stable:
+            # The predecessor and replacement must both be sampled, even when
+            # the activation command returns before the route is switched.
+            edge_watcher = threading.Thread(target=self.observe_stable_origin, args=(edge_stop,), daemon=True)
+            edge_watcher.start()
         if getattr(self, "peers", None):
             stop = threading.Event()
             watcher = threading.Thread(target=self.observe_control_files, args=(stop,), daemon=True)
             watcher.start()
         try:
             try:
-                if gateway:
+                if stable:
+                    self.signed_helper(self.new[0], ["--runtime-command", "activate-update", "--runtime-stable-origin"],
+                                       body={"payload": target, "request_id": request}, timeout=75)
+                elif gateway:
                     self.signed_helper(self.new[0], ["--runtime-command", "activate-update",
                                        "--runtime-interaction-continuity"],
                                        body={"payload": target, "request_id": request}, timeout=75)
@@ -911,6 +1019,8 @@ class SignedUpgrade(Validation):
                         ):
                             operation = "status"
                             status = runtime.control(candidate, "status", timeout=2)
+                            if stable:
+                                status = runtime_edge.adoption_status(runtime.runtime_directory(self.database), status)
                             if (
                                 status.get("status") == "serving"
                                 and status.get("payload") == target
@@ -923,7 +1033,18 @@ class SignedUpgrade(Validation):
                                     fetch(status["url"], "", "config", timeout=3)["token"],
                                 )
                                 self.report["candidate_runtime"] = self.identity(status)
-                                if gateway:
+                                if stable:
+                                    edge_status = runtime_edge.probe(self.edge) or {}
+                                    if (edge_status.get("status") != "serving"
+                                            or edge_status.get("payload") != target
+                                            or edge_status.get("instance") != candidate["instance"]
+                                            or edge_status.get("edge_instance") != self.edge["instance"]):
+                                        continue
+                                    if fetch(*self.address, "config", timeout=3)["token"] != self.address[1]:
+                                        raise RuntimeError("The browser token changed during activation")
+                                    self.report["stable_origin"]["fenced_ms"] = edge_status.get("edge_handover_ms")
+                                    time.sleep(.03)  # Let the observer collect the confirmed route.
+                                elif gateway:
                                     if self.address[0] == direct[0]:
                                         raise AssertionError("Interaction gateway is the coordinator endpoint")
                                     self.candidate_direct_address = direct
@@ -944,6 +1065,9 @@ class SignedUpgrade(Validation):
                 time.sleep(0.1)
             raise AssertionError("Could not verify the signed candidate serving the committed guarded update")
         finally:
+            if edge_watcher is not None:
+                edge_stop.set()
+                edge_watcher.join(1)
             if watcher is not None:
                 stop.set()
                 watcher.join(2)
@@ -1460,7 +1584,11 @@ class SignedUpgrade(Validation):
             else:
                 self.report["mode"] = "signed_guarded_upgrade"
                 staged = None
-                if self.gateway_capable():
+                if self.stable_origin:
+                    staged = self.stage_signed()
+                    self.bind_stable_origin(staged[0])
+                    self.window("baseline")
+                elif self.gateway_capable():
                     self.report["baseline_endpoint"] = "staged_gateway"
                     self.record_source_baseline()
                     staged = self.stage_signed()
@@ -1513,6 +1641,8 @@ class SignedUpgrade(Validation):
                 self.summarize()
             if self.peers and getattr(self, "composer", None):
                 self.verify_receipts()
+            if self.stable_origin and self.report.get("candidate_runtime"):
+                self.verify_stable_origin()
             if self.report.get("pending_work", {}).get("preserved"):
                 self.release_pending_work()
             if "baseline" in self.report.get("results", {}) and self.old[1]["version"] == "0.1.12+63":
@@ -1653,6 +1783,23 @@ class SignedUpgrade(Validation):
 
 
 def run_and_clean_up(runner):
+    if getattr(runner, "private_apfs_fixture", False):
+        from private_upgrade_fixture import cleanup_on_exit
+        # Residual source free pages and every rollback copy are local-only.
+        # Preserve all existing teardown/receipt failures, then remove the root
+        # even when an unsuccessful gate would normally retain diagnostics.
+        try:
+            with cleanup_on_exit(runner.root) as cleanup:
+                runner.report['private_workspace_cleanup'] = cleanup
+                return _run_and_clean_up(runner)
+        finally:
+            # Persist the reaped guardian's exit status after its context has
+            # verified removal, including when the qualification itself fails.
+            runner.persist()
+    return _run_and_clean_up(runner)
+
+
+def _run_and_clean_up(runner):
     try:
         try:
             runner.execute()
@@ -1686,6 +1833,8 @@ def main():
     for name in ("previous", "candidate", "snapshot", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--saved-manifest-thread", help="Select a specific reported long conversation from the private snapshot")
+    parser.add_argument("--private-apfs-fixture", action="store_true",
+                        help="Opt in to a local-only APFS clone, logically isolated before anonymized seeding")
     parser.add_argument(
         "--profile-sample",
         type=Path,
@@ -1706,8 +1855,12 @@ def main():
     parser.add_argument(
         "--candidate-only", action="store_true", help="Diagnostic only; never issues an upgrade pass"
     )
+    parser.add_argument("--stable-origin", action="store_true",
+                        help="Qualify the signed candidate through its permanent desktop origin")
     args = parser.parse_args()
     old, new = signed_resources(args.previous), signed_resources(args.candidate)
+    if args.stable_origin and (args.candidate_only or not (new[0] / "backend/agent_coord/runtime_edge.py").is_file()):
+        parser.error("Stable-origin qualification requires a capable upgrade candidate")
     if old[1]["payload_digest"] == new[1]["payload_digest"]:
         parser.error("Two distinct signed builds are required")
     args.report = args.report.resolve()

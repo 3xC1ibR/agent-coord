@@ -286,9 +286,9 @@ class ACPConnection:
         if self.channel:
             if getattr(self.store.provider_projection.sessions, "transport_handover", False):
                 return
-            self.store.provider_projection.close_channel(self.channel)
-            self.closed = True
-            self._fail(CoordinationError(f"{self.label} connection closed."))
+            projection = self.store.provider_projection
+            projection.close_channel(self.channel)
+            projection.after_commit(self._close_retained)
             return
         self.closed = True
         self._fail(CoordinationError(f"{self.label} connection closed."))
@@ -311,3 +311,14 @@ class ACPConnection:
                 reader.join(timeout=3)
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             stream.close()
+        self._release_resources()
+
+    def _close_retained(self):
+        if self.closed:
+            return
+        self.closed = True
+        self._fail(CoordinationError(f"{self.label} connection closed."))
+        self._release_resources()
+
+    def _release_resources(self):
+        """Release provider-specific resources after durable close acceptance."""

@@ -655,11 +655,13 @@ class ClaudeRPC:
     def _handle_message(self, thread_id, message):
         # Results can describe background work outside the visible turn.
         from .browser_persistence import capturing_writes
-        if capturing_writes():
-            self.persistence.submit(lambda: self.usage.capture(thread_id, message), key=thread_id, required=False)
-        else:
-            self.usage.capture(thread_id, message)
         kind = message.get("type")
+        content_delta = kind == "stream_event" and (message.get("event") or {}).get("type") == "content_block_delta"
+        if not content_delta:
+            if capturing_writes():
+                self.persistence.submit(lambda: self.usage.capture(thread_id, message), key=thread_id, required=False)
+            else:
+                self.usage.capture(thread_id, message)
         if kind == "system" and not message.get("parent_tool_use_id") and message.get("permissionMode"):
             mode = message["permissionMode"]
             self.effective_permissions[thread_id] = "default" if mode == "manual" else mode

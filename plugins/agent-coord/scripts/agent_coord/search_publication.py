@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -53,7 +54,7 @@ def _search_history(store, thread_id):
     transcripts = TranscriptStore(store)
     page = transcripts.read_window(thread_id, limit=200)
     if page is None:
-        return read_history(store, thread_id) or {"turns": [], "historyUnavailable": True}
+        return read_history(store, thread_id)
     pages = [page["turns"]]
     while page.get("beforeSeq"):
         page = transcripts.read_window(thread_id, before_seq=page["beforeSeq"], limit=200)
@@ -61,6 +62,95 @@ def _search_history(store, thread_id):
             raise ValueError("Transcript generation changed during search publication")
         pages.append(page["turns"])
     return {**page, "turns": [turn for turns in reversed(pages) for turn in turns]}
+
+
+def _source_versions(store, identity=None):
+    sql = """SELECT t.thread_id, COALESCE(h.sequence,0), COALESCE(m.sequence,0)
+        FROM work_threads t
+        LEFT JOIN search_publications h ON h.thread_id=t.thread_id AND h.kind='history'
+        LEFT JOIN search_publications m ON m.thread_id=t.thread_id AND m.kind='metadata'"""
+    args = ()
+    if identity is not None:
+        sql += " WHERE t.thread_id=?"
+        args = (identity,)
+    with store.reading(), store._connection() as db:
+        return {key: (history, metadata) for key, history, metadata in db.execute(sql, args)}
+
+
+def prepare_search_publication(store, *, stopped, owner_guard):
+    """Verify a resumable baseline against a source revision before switching reads.
+
+    The owning migration installs source change capture before copying any roots.
+    Records newer than the verified snapshot remain in that persistent outbox.
+    """
+    from .search_store import SearchStore
+
+    def permitted():
+        return not store.read_only and not stopped.is_set() and owner_guard()
+
+    if not permitted():
+        return False
+    index = SearchStore.for_store(store)
+    if index.active:
+        return True
+    with index.connection() as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS search_baseline_receipts (
+            thread_id TEXT PRIMARY KEY, history_sequence INTEGER NOT NULL,
+            metadata_sequence INTEGER NOT NULL) WITHOUT ROWID""")
+        verified = {key: (history, metadata) for key, history, metadata in
+                    db.execute("SELECT thread_id,history_sequence,metadata_sequence FROM search_baseline_receipts")}
+    versions = _source_versions(store)
+    for identity, version in versions.items():
+        if not permitted():
+            return False
+        if verified.get(identity) == version:
+            continue
+        with store.reading(), store._connection() as db:
+            metadata = read_metadata(db, identity)
+        if metadata is None:
+            continue
+        history = _search_history(store, identity)
+        if _source_versions(store, identity).get(identity) != version or not permitted():
+            continue
+        record = dict(thread_id=identity, history=history, metadata=metadata, revision=version[0])
+        index.enqueue_history(identity, history, revision=version[0], metadata=metadata).result()
+        with index.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not index.matches_record(db, record):
+                raise ValueError("Search baseline differs from the source history or metadata")
+            db.execute("INSERT OR REPLACE INTO search_baseline_receipts VALUES (?,?,?)", (identity, *version))
+        verified[identity] = version
+
+    current = _source_versions(store)
+    if any(verified.get(key) != value for key, value in current.items()) or not permitted():
+        return False
+    with index.connection(readonly=True) as db:
+        extra = {row[0] for row in db.execute("SELECT thread_id FROM search_threads")} - current.keys()
+    for identity in extra:
+        if not permitted():
+            return False
+        index.delete(identity).result()
+        with index.connection() as db:
+            db.execute("DELETE FROM search_baseline_receipts WHERE thread_id=?", (identity,))
+    # Any change after this source snapshot is durable and replayed by the
+    # owning worker. Recording the verified revisions and activation together
+    # avoids exposing an incomplete index across a coordinator restart.
+    if not permitted():
+        return False
+    with index.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if {row[0] for row in db.execute("SELECT thread_id FROM search_threads")} != current.keys():
+            return False
+        db.execute("""CREATE TABLE IF NOT EXISTS applied_publications (
+            thread_id TEXT NOT NULL, kind TEXT NOT NULL, sequence INTEGER NOT NULL,
+            PRIMARY KEY(thread_id,kind)) WITHOUT ROWID""")
+        db.executemany("INSERT OR REPLACE INTO applied_publications VALUES (?,?,?)",
+                       ((key, kind, seq) for key, version in current.items()
+                        for kind, seq in zip(("history", "metadata"), version)))
+        db.execute("INSERT OR REPLACE INTO search_control VALUES ('verified',?)",
+                   (json.dumps({"threads": len(current), "failures": []}),))
+        db.execute("INSERT OR REPLACE INTO search_control VALUES ('active','1')")
+    return True
 
 
 class SearchPublicationWorker:

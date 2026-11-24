@@ -60,7 +60,7 @@ def ensure_coordination_hooks(profile):
         config["ribbon-field-coordination"] = {"PreToolUse": [{
             "matcher": "|".join(sorted(ANTIGRAVITY_WRITE_TOOLS)),
             "hooks": [{"type": "command", "timeout": 10,
-                "command": shlex.join(["env", "AGENT_COORD_CLIENT=antigravity", sys.executable, str(hook)])}],
+                "command": shlex.join(["env", "AGENT_COORD_CLIENT=antigravity", sys.executable, "-B", str(hook)])}],
         }]}
         updated = json.dumps(config, indent=2) + "\n"
         if updated == original:
@@ -112,7 +112,7 @@ class AntigravityConnection(ACPConnection):
         # must never open a browser or start an implicit login.
         helper = 'print("' + BROWSER_MARKER + '"+__import__("sys").argv[1],file=__import__("sys").stderr)'
         env.update(GEMINI_HOME=str(profile), AGY_ACP_FORCE_FILE_STORAGE="1", PYTHONUNBUFFERED="1",
-                   ANTIGRAVITY_HARNESS_PATH=str(harness), BROWSER=shlex.join([sys.executable, "-c", helper]) + " %s")
+                   ANTIGRAVITY_HARNESS_PATH=str(harness), BROWSER=shlex.join([sys.executable, "-B", "-c", helper]) + " %s")
         self.temporary = tempfile.TemporaryDirectory(prefix="process-", dir=root)
         env.update({key: self.temporary.name for key in ("TMPDIR", "TMP", "TEMP")})
         try:
@@ -153,10 +153,7 @@ class AntigravityConnection(ACPConnection):
     def _consume_line(self, line):
         return self._authorization(line)
 
-    def close(self):
-        super().close()
-        if not self.closed:
-            return
+    def _release_resources(self):
         if self.temporary:
             self.temporary.cleanup()
         elif getattr(self, "resource_path", None):

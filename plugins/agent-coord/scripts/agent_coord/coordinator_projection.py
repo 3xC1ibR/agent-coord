@@ -249,6 +249,7 @@ class CoordinatorProjection:
         self.checkpoint_cursor = self.cursor
         self.stream_rows.clear()
         self.stream_writes.clear()
+        self.stream_reviews.clear()
         self.recover_commands(operations={"open"})
         with self.store.reading(), self.store._connection() as db:
             records = db.execute("""SELECT c.*, o.outcome AS launch_outcome FROM coordinator_channels c
@@ -663,9 +664,11 @@ class CoordinatorProjection:
         self.project_batch([event])
 
     def _acknowledge(self):
-        floor = min([self.checkpoint_cursor] +
-                    [value["first_sequence"] - 1 for value in self.quarantined.values()])
-        self.client.call("acknowledge_events", cursor=self.cursor, retain_after=floor)
+        with self.lock:
+            floor = min([self.checkpoint_cursor] +
+                        [value["first_sequence"] - 1 for value in self.quarantined.values()])
+            cursor = self.cursor
+        self.client.call("acknowledge_events", cursor=cursor, retain_after=floor)
 
     def flush_stream(self):
         if self.cursor > self.checkpoint_cursor or self.stream_writes or self.stream_rows:
@@ -718,10 +721,9 @@ class CoordinatorProjection:
             target = stream_projection.identify(self, event, message)
             if target is None:
                 return False
-            undo = stream_projection.ledger(self.sessions, target, entry)
+            undo = stream_projection.ledger(self.sessions, target, entry, message)
             old_returncode = entry["process"].returncode
             undo.capture(entry)
-            inventory = self.sessions.inventory_generation
             try:
                 with capture_writes() as writes:
                     self.in_event.active = self.in_event.streaming = True
@@ -730,7 +732,7 @@ class CoordinatorProjection:
                     self.in_event.publications = []
                     self.in_event.commands = []
                     self.in_event.completions = []
-                    self._dispatch(event, message, entry)
+                    self._dispatch(event, message, entry, stream_only=True)
                     if self.in_event.commands or self.in_event.completions:
                         raise ValueError("A pure delta attempted a provider operation or completion")
                 rows = list(self.in_event.publications)
@@ -743,7 +745,6 @@ class CoordinatorProjection:
             except BaseException:
                 undo.restore()
                 entry["process"].returncode = old_returncode
-                self.sessions.inventory_generation = inventory
                 raise
             finally:
                 self.in_event.active = self.in_event.streaming = False
@@ -760,12 +761,12 @@ class CoordinatorProjection:
             public["reviewStage"] = step["stage"]
         return public, True
 
-    def _dispatch(self, event, message, entry):
+    def _dispatch(self, event, message, entry, *, stream_only=False):
         try:
             consumed = False
             if event["stream"] == "stderr" and entry.get("stderr_callback"):
                 entry["stderr_callback"](event["data"])
-            elif event["stream"] == "stdout" and entry.get("stdout_callback"):
+            elif not stream_only and event["stream"] == "stdout" and entry.get("stdout_callback"):
                 consumed = entry["stdout_callback"](event["data"])
             if event["stream"] == "stdout" and isinstance(message, dict) and not consumed:
                 entry["callback"](message)
@@ -784,11 +785,12 @@ class CoordinatorProjection:
 
     def _quarantine(self, event, error):
         channel = event["channel"]
-        previous = self.quarantined.get(channel)
-        self.quarantined[channel] = {"first_sequence": previous["first_sequence"] if previous else event["sequence"],
-                                     "last_sequence": event["sequence"], "error": str(error)}
-        self.cursor = event["sequence"]
-        logging.getLogger(__name__).error("Provider channel %s quarantined at %s: %s", channel, self.cursor, error)
+        with self.lock:
+            previous = self.quarantined.get(channel)
+            self.quarantined[channel] = {"first_sequence": previous["first_sequence"] if previous else event["sequence"],
+                                         "last_sequence": event["sequence"], "error": str(error)}
+            self.cursor = event["sequence"]
+        logging.getLogger(__name__).error("Provider channel %s quarantined at %s: %s", channel, event["sequence"], error)
 
     def project_batch(self, events):
         for event in events:
@@ -808,13 +810,15 @@ class CoordinatorProjection:
                     self._commit_through_reply([(event, message)])
             except (sqlite3.Error, OSError, TransportError):
                 raise  # Storage or ownership failure must not retire source evidence.
-            except ChannelProjectionError as error:
+            except (ChannelProjectionError, KeyError, TypeError, AttributeError, ValueError) as error:
                 self._quarantine(event, error)
         if events:
             self._acknowledge()
 
     def _commit_through_reply(self, decoded, *, checkpoint_only=False):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
+            if checkpoint_only:
+                decoded = [({**decoded[0][0], "sequence": self.cursor}, None)]
             decoded = [(event, message) for event, message in decoded
                        if event["sequence"] > self.cursor or checkpoint_only]
             if not decoded:

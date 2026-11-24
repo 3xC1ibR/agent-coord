@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -17,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 from agent_coord.coordinator_projection import pack
 from agent_coord.desktop_runtime import runtime_directory
 from agent_coord.history_persistence import prepare_history, publish_history, stage_history, ensure_schema
-from agent_coord.runtime_saved_views import SavedRuntimeViews
+from historical_gateway.runtime_saved_views import SavedRuntimeViews
 from agent_coord.schedules import ScheduledPrompts
 from agent_coord.thread_inventory import ThreadInventory
 from agent_coord.store import CoordinationError, CoordinationStore
@@ -202,7 +203,7 @@ class SavedViewTests(unittest.TestCase):
             blob = zlib.compress(json.dumps(pack(state),separators=(",",":")).encode())
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO coordinator_projection VALUES(1,1,?)",(blob,))
-            with patch("agent_coord.runtime_saved_views.zlib.decompress", side_effect=AssertionError("decoded unrelated tool output")):
+            with patch("historical_gateway.runtime_saved_views.zlib.decompress", side_effect=AssertionError("decoded unrelated tool output")):
                 if requests:
                     with self.assertRaisesRegex(CoordinationError, "decision is pending"):
                         self.views.authorize_composer(self.identity,body)
@@ -212,7 +213,7 @@ class SavedViewTests(unittest.TestCase):
     def test_unrelated_commits_and_identical_packed_rows_reuse_the_decoded_input(self):
         self.save_projection(active={self.identity: "running"})
         body = {"message": "continue", "requestId": "input", "expectedTurnId": "running"}
-        with patch("agent_coord.runtime_saved_views.zlib.decompress", wraps=zlib.decompress) as decode:
+        with patch("historical_gateway.runtime_saved_views.zlib.decompress", wraps=zlib.decompress) as decode:
             self.assertTrue(self.views.authorize_composer(self.identity, body))
             for revision in range(8):
                 with self.store._connection() as db:
@@ -233,7 +234,7 @@ class SavedViewTests(unittest.TestCase):
         body = {"message": "continue", "requestId": "input", "expectedTurnId": "running"}
         request = {"key": "permission", "method": "item/fileChange/requestApproval",
                    "params": {"threadId": self.identity}}
-        with patch("agent_coord.runtime_saved_views.zlib.decompress", wraps=zlib.decompress) as decode:
+        with patch("historical_gateway.runtime_saved_views.zlib.decompress", wraps=zlib.decompress) as decode:
             self.save_projection(active=active)
             self.assertTrue(self.views.authorize_composer(self.identity, body))
             self.save_projection(active=active, requests={"permission": request})
@@ -249,7 +250,7 @@ class SavedViewTests(unittest.TestCase):
         self.save_projection(active={self.identity:"one"},extra="step" * 3000000)
         body = {"message":"continue","requestId":"r","expectedTurnId":"one"}
         original = zlib.decompress
-        with patch("agent_coord.runtime_saved_views.zlib.decompress", wraps=original) as decoded:
+        with patch("historical_gateway.runtime_saved_views.zlib.decompress", wraps=original) as decoded:
             with ThreadPoolExecutor(max_workers=8) as workers:
                 accepted = list(workers.map(lambda _: self.views.authorize_composer(self.identity,body), range(32)))
             self.assertTrue(all(accepted))
@@ -354,7 +355,7 @@ class SavedViewTests(unittest.TestCase):
             self.assertEqual(audit.execute("PRAGMA data_version").fetchone()[0], before)
 
     def test_inventory_reuses_committed_batches_until_a_write_and_refreshes_the_visible_rows(self):
-        with patch("agent_coord.runtime_saved_views.ThreadInventory", wraps=ThreadInventory) as inventory:
+        with patch("historical_gateway.runtime_saved_views.ThreadInventory", wraps=ThreadInventory) as inventory:
             self.assertEqual([r["thread_id"] for r in self.views.get("threads")["data"]], [self.identity])
             self.views.get("threads")
             self.assertEqual(inventory.call_count, 1)

@@ -408,8 +408,12 @@ def read_delegation_output(
 
 def build_supervisor_command(store: CoordinationStore, delegation_id: str) -> list[str]:
     wrapper = Path(__file__).resolve().parents[1] / "agent-coord"
+    # Standalone bundles expose a shell launcher beside the Python entry point.
+    if wrapper.with_suffix(".py").is_file():
+        wrapper = wrapper.with_suffix(".py")
     return [
         sys.executable,
+        "-B",
         str(wrapper),
         "--db",
         str(store.database_path),

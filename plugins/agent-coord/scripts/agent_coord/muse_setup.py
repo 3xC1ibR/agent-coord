@@ -50,7 +50,7 @@ def hook_config(store, session_id):
     if not hook.is_file():
         raise CoordinationError("Ribbon Field's Muse hook is missing. Reinstall Ribbon Field.")
     command = shlex.join(["env", "AGENT_COORD_CLIENT=muse", f"AGENT_COORD_SESSION_ID={session_id}",
-                          f"AGENT_COORD_DB={store.database_path}", sys.executable, str(hook)])
+                          f"AGENT_COORD_DB={store.database_path}", sys.executable, "-B", str(hook)])
     for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
         if not isinstance(hooks.get(event, []), list):
             raise CoordinationError(f"Muse hook {event} must be a list.")

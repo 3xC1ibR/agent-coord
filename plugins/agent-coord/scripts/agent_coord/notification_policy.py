@@ -77,7 +77,10 @@ def automatic_context(store, thread_id):
         return {"origin": "coordination", "owner_thread_id": owner if owner != thread_id or is_owner else None}
 
 
-def available_owners(db, store, *, owner=None):
+def available_owners(db, store, *, thread_ids=None):
+    candidates = None if thread_ids is None else sorted({identity for identity in thread_ids if identity})
+    if candidates == []:
+        return set()
     # Filter in SQLite and return one row. Python's sqlite3 releases and
     # reacquires the GIL for every result row, which convoys behind other
     # request threads when thousands of rows are filtered here.
@@ -87,15 +90,17 @@ def available_owners(db, store, *, owner=None):
               if "browser_inbox_wake" in tables else "1")
     browser = ("EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)"
                if "browser_sessions" in tables else "0")
-    selected = "AND t.thread_id = ?" if owner is not None else ""
-    params = (store.clock() - store.stale_after_seconds,)
+    predicate = '' if candidates is None else ' AND t.thread_id IN (SELECT value FROM json_each(?))'
+    parameters = (store.clock() - store.stale_after_seconds,)
+    if candidates is not None:
+        parameters += (json.dumps(candidates),)
     owners = db.execute(f"""SELECT json_group_array(t.thread_id) FROM work_threads t
         JOIN sessions s ON s.session_id = t.thread_id
         LEFT JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
         WHERE t.attention IS NOT 'archived' AND {paused}
         AND (s.turn_active OR c.status IS NULL OR c.status NOT IN ('failed', 'interrupted'))
-        AND ({browser} OR s.ended_at IS NULL AND s.last_seen_at >= ?) {selected}""",
-        (*params, owner) if owner is not None else params).fetchone()[0]
+        AND ({browser} OR s.ended_at IS NULL AND s.last_seen_at >= ?){predicate}""",
+        parameters).fetchone()[0]
     return set(json.loads(owners))
 
 

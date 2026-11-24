@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from http.client import HTTPConnection, HTTPException
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
+import math
 import os
 from pathlib import Path
+import shlex
 import shutil
+import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -19,6 +24,7 @@ import unittest
 import test_desktop_runtime
 from agent_coord import runtime_edge, runtime_update
 from agent_coord import desktop_runtime as runtime
+from agent_coord.local_http import LocalHTTPServer
 
 
 FIRST = "a" * 32
@@ -34,10 +40,14 @@ def listener(test, server):
     return server
 
 
-def request(address, path, *, body=None, headers=None):
+def request(address, path, *, body=None, headers=None, timings=None):
     with closing(HTTPConnection(runtime_edge.authority(address), timeout=5)) as client:
         client.request("POST" if body is not None else "GET", path, body, headers or {})
         with client.getresponse() as response:
+            if timings is not None:
+                component = response.getheader("Server-Timing", "")
+                if component.startswith("submission;dur="):
+                    timings["coordinator_ms"] = float(component.removeprefix("submission;dur="))
             return response.status, response.read()
 
 
@@ -91,7 +101,7 @@ class EdgeProtocolTests(unittest.TestCase):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-        server = listener(self, ThreadingHTTPServer(("127.0.0.1", 0), Handler))
+        server = listener(self, LocalHTTPServer(("127.0.0.1", 0), Handler))
         return f"http://127.0.0.1:{server.server_port}/"
 
     def route(self, address, generation, ready=True):
@@ -132,6 +142,14 @@ class EdgeProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(health)["instance"], FIRST)
         self.assertEqual(self.received, [])
 
+    def test_readiness_observation_respects_the_coordinator_fence(self):
+        observer = {runtime_edge.OBSERVER_HEADER: self.edge.observer}
+        self.assertEqual(request(self.address, runtime_edge.READY)[0], 403)
+        self.assertEqual(request(self.address, runtime_edge.READY, headers=observer)[0], 200)
+        self.route(self.first, FIRST, ready=False)
+        self.assertEqual(request(self.address, runtime_edge.READY, headers=observer)[0], 503)
+        self.assertEqual(request(self.address, runtime_edge.HEALTH, headers=observer)[0], 200)
+
     def test_fenced_post_can_move_to_successor_but_a_lost_reply_is_never_replayed(self):
         self.refuse = True
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -166,69 +184,309 @@ class CoordinatorEdgeTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
 
-    def launch(self, resources, *arguments):
+    def launch(self, resources, *arguments, stable=True):
         fixture = self.fixture
-        child = subprocess.run([sys.executable, "-B", str(resources / "backend.py"),
-            "--runtime-bootstrap", "--runtime-stable-origin", "--resources", str(resources),
-            "--db", str(fixture.database), *arguments],
-            env={**fixture.env, "PYTHONPATH": str(resources / "backend")}, capture_output=True, text=True, timeout=25)
+        command = runtime.payload_command(resources)
+        try:
+            child = subprocess.run([command[0], "-B", *command[1:],
+                "--runtime-bootstrap", *(["--runtime-stable-origin"] if stable else []), "--resources", str(resources),
+                "--db", str(fixture.database), *arguments],
+                env={**fixture.env, "PYTHONPATH": str(resources / "backend"), "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True, text=True, timeout=90 if resources != fixture.resources and not stable else 25)
+        except subprocess.TimeoutExpired as error:
+            self.fail(str(error) + "\n" + fixture.log())
         self.assertEqual(child.returncode, 0, child.stderr + fixture.log())
         return json.loads(child.stdout)
 
+    def test_predecessor_adopts_the_stable_supervisor_without_restarting_provider(self):
+        from test_schema_compatibility import BUILD_98_SOURCE
+        fixture = self.fixture
+        actual = os.environ.get("RIBBON_BUILD_98_RESOURCES")
+        if actual:
+            previous = Path(actual)
+        else:
+            previous = fixture.root / "Build 98/Resources"
+            shutil.copytree(fixture.resources, previous)
+            relative = "plugins/agent-coord/scripts/agent_coord/desktop_runtime.py"
+            source = subprocess.run(["git", "show", f"{BUILD_98_SOURCE}:{relative}"],
+                                    cwd=test_desktop_runtime.ROOT, capture_output=True, timeout=10)
+            if source.returncode:
+                if os.environ.get("RIBBON_SCHEMA_REQUIRE_PREDECESSOR") == "1":
+                    self.fail(source.stderr.decode())
+                self.skipTest("Build 98 source requires repository history")
+            (previous / "backend/agent_coord/desktop_runtime.py").write_bytes(source.stdout)
+            metadata = runtime.read_json(previous / "backend.json")
+            (previous / "backend.json").write_text(json.dumps({**metadata, "runtime_version": "0.1.46+98"}))
+        first = self.launch(previous, stable=False)
+        thread = fixture.api(first["url"], "api/browser/sessions", {"cwd": str(fixture.root)})["session"]["thread_id"]
+        conversation = f"api/browser/sessions/{thread}"
+        fixture.api(first["url"], conversation + "/messages", {"message": "one", "requestId": "first-approval"})
+        approval = fixture.wait(lambda: fixture.api(first["url"], conversation)["requests"])[0]["key"]
+        directory = runtime.runtime_directory(fixture.database)
+        predecessor = runtime.read_json(directory / "supervisor.json")["pid"]
+        native_pid = int((fixture.root / "provider.pid").read_text())
+        staged = self.launch(fixture.resources, "--runtime-confirm-updates")
+        self.assertTrue(staged["pending_confirmation"])
+        self.assertEqual(fixture.api(staged["edge_url"], conversation)["requests"][0]["key"], approval)
+        token = fixture.api(staged["edge_url"], "api/browser/config")["token"]
+        record = runtime.discover(fixture.database)
+        adoption = runtime.adopt_predecessor(record, "adopt-build-98", staged["pending"])
+        self.assertEqual(adoption["update"]["id"], "adopt-build-98")
+        def new_supervisor():
+            supervisor = runtime.read_json(directory / "supervisor.json")
+            return supervisor if supervisor.get("stable_prewarm") == 1 else None
+        successor = fixture.wait(new_supervisor, timeout=20)
+        self.assertNotEqual(successor["pid"], predecessor)
+        stable = self.launch(fixture.resources)
+        self.assertEqual(stable["edge_url"], staged["edge_url"])
+        self.assertEqual(stable["update"]["id"], "adopt-build-98")
+        self.assertEqual(stable["update"]["phase"], "committed")
+        self.assertEqual(int((fixture.root / "provider.pid").read_text()), native_pid)
+        self.assertEqual(fixture.api(stable["edge_url"], conversation)["requests"][0]["key"], approval)
+        self.assertEqual(fixture.api(stable["edge_url"], "api/browser/config")["token"], token)
+
     def test_origin_and_pending_approval_survive_three_coordinator_changes(self):
+        self.exercise_mixed_origin(range(2, 5))
+
+    @contextmanager
+    def browser_traffic(self, address, threads, module):
+        fixture = self.fixture
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Browser qualification requires Node and Playwright")
+        script = Path(__file__).with_name("fixtures") / "runtime_edge_browser.mjs"
+        (fixture.root / "edge-browser-input.json").write_text(json.dumps({"address": address, "threads": list(threads)}))
+        errors = fixture.root / "edge-browser.log"
+        with errors.open("w") as log, subprocess.Popen([node, str(script), str(fixture.root), module],
+                stdout=log, stderr=log, cwd=fixture.root) as observer:
+            def ready():
+                if observer.poll() is not None:
+                    self.fail("Browser stopped during initialization: " + errors.read_text())
+                return (fixture.root / "edge-browser-ready").exists()
+
+            try:
+                fixture.wait(ready, timeout=15)
+                yield
+            finally:
+                (fixture.root / "edge-browser-stop").touch()
+                try:
+                    observer.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    observer.kill()
+                    observer.wait(timeout=5)
+            self.assertEqual(observer.returncode, 0, errors.read_text())
+
+    def exercise_mixed_origin(self, builds):
         fixture = self.fixture
         source = fixture.resources
+        executable = fixture.root / "bin/codex"
+        provider_fixture = test_desktop_runtime.ROOT / "tests/fixtures/runtime_live_provider.py"
+        executable.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(provider_fixture))} codex\n")
+
+        def wire():
+            return [json.loads(line) for line in (fixture.root / "provider.jsonl").read_text().splitlines()]
+
         first = self.launch(source)
         address = first["edge_url"]
         observer = {runtime_edge.OBSERVER_HEADER: first["edge_observer"]}
         token = fixture.api(address, "api/browser/config")["token"]
-        thread = fixture.api(address, "api/browser/sessions", {"cwd": str(fixture.root)})["session"]["thread_id"]
-        conversation = f"api/browser/sessions/{thread}"
-        fixture.api(address, conversation + "/messages", {"message": "one", "requestId": "one"})
+
+        def conversation_for(role):
+            thread = fixture.api(address, "api/browser/sessions", {"cwd": str(fixture.root)})["session"]["thread_id"]
+            path = f"api/browser/sessions/{thread}"
+            fixture.api(address, path + "/messages", {"message": role, "requestId": "start-" + role})
+            return thread, path
+
+        _, conversation = conversation_for("approval")
         approval = fixture.wait(lambda: fixture.api(address, conversation)["requests"])[0]["key"]
+        streams = dict(conversation_for("stream") for _ in range(5))
+        def streaming_turns():
+            records = {row["thread"]: (row["pid"], row["turn"]) for row in wire()
+                       if row["kind"] == "turn" and row["role"] == "stream"}
+            return records if len(records) == len(streams) else None
+        original = fixture.wait(streaming_turns)
+        self.assertEqual(original.keys(), streams.keys())
+        for thread, path in streams.items():
+            fixture.wait(lambda: fixture.api(address, path)["activeTurn"] == original[thread][1])
         initial_epoch = runtime.control(runtime.discover(fixture.database), "status")["transport"]["epoch"]
-        provider = int((fixture.root / "provider.pid").read_text())
         edge = runtime_edge.read_address(runtime.runtime_directory(fixture.database))
-        for build in range(2, 5):
+        rotation = tuple(streams.items())
+        resources_by_build = {}
+        for build in builds:
             resources = fixture.root / f"Build {build}/Resources"
             shutil.copytree(source, resources)
             metadata = runtime.read_json(resources / "backend.json")
             (resources / "backend.json").write_text(json.dumps({**metadata, "runtime_version": f"1+{build}"}))
-            staged = self.launch(resources, "--runtime-confirm-updates")
-            self.assertEqual(staged["edge_url"], address)
-            record = runtime.discover(fixture.database)
-            runtime.control(record, "activate-update", request_id=f"edge-{build}", payload=staged["pending"])
-            failures = []
-            def crossing():
-                try:
-                    code, response = request(address, "/" + conversation)
-                    if code != 200:
-                        failures.append((code, response.decode()))
-                except (OSError, HTTPException) as exc:
-                    failures.append(str(exc))
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                deadline = time.monotonic() + 10
-                samples = []
-                while time.monotonic() < deadline:
-                    samples.append(pool.submit(crossing))
-                    code, data = request(address, runtime_edge.HEALTH, headers=observer)
-                    health = json.loads(data)
-                    if code == 200 and health.get("status") == "serving" and health.get("payload") == staged["pending"]:
-                        break
-                    time.sleep(.07)
-                else:
-                    self.fail("Candidate never served through the stable edge: " + fixture.log())
-                for sample in samples:
-                    sample.result(timeout=5)
-            self.assertEqual(failures, [])
-            self.assertEqual(health["edge_instance"], edge["instance"])
-            self.assertEqual(health["update"]["phase"], "committed")
-            self.assertEqual(fixture.api(address, "api/browser/config")["token"], token)
-            current = runtime.control(runtime.discover(fixture.database), "status")
-            self.assertEqual(current["transport"]["epoch"], initial_epoch + build - 1)
-            self.assertEqual(provider, int((fixture.root / "provider.pid").read_text()))
-            self.assertEqual(fixture.api(address, conversation)["requests"][0]["key"], approval)
+            resources_by_build[build] = resources
+
+        stop = threading.Event()
+        started = threading.Event()
+
+        def transact(thread, path, message=None):
+            began = time.monotonic()
+            timings = {"started_at": began}
+            body = ({"message": message, "requestId": message, "expectedTurnId": original[thread][1]}
+                    if message else None)
+            code, response = request(address, "/" + path + ("/messages" if body else ""),
+                body=json.dumps(body).encode() if body else None,
+                headers={"Content-Type": "application/json", runtime_edge.TOKEN_HEADER: token} if body else None,
+                timings=timings)
+            timings["total_ms"] = (time.monotonic() - began) * 1000
+            return code, response, body, thread, path, timings
+
+        def schedule(pool):
+            samples = []
+            frequency = 10
+            origin = time.monotonic()
+            for sample in range(40 * frequency):
+                if stop.wait(max(0, origin + sample / frequency - time.monotonic())):
+                    return [sample.result(timeout=5) for sample in samples]
+                thread, path = rotation[sample % len(rotation)]
+                samples.append(pool.submit(transact, thread, path, f"steer-{sample}"))
+                if sample % 2 == 0:
+                    samples.append(pool.submit(transact, thread, path))
+                started.set()
+            self.fail("Coordinator switches exceeded the continuous workload time limit")
+
+        cutovers, components, switches = [], [], []
+        browser_module = os.environ.get("RIBBON_EDGE_PLAYWRIGHT")
+        browser_origin = time.time() - time.monotonic()
+        traffic_context = self.browser_traffic(address, streams, browser_module) if browser_module else nullcontext()
+        with traffic_context, ThreadPoolExecutor(max_workers=32) as pool:
+            traffic = None if browser_module else pool.submit(schedule, pool)
+            try:
+                if traffic:
+                    self.assertTrue(started.wait(2))
+                for build, resources in resources_by_build.items():
+                    began = time.monotonic()
+                    staged = self.launch(resources, "--runtime-confirm-updates")
+                    self.assertEqual(staged["edge_url"], address)
+                    record = runtime.discover(fixture.database)
+                    runtime.control(record, "activate-update", request_id=f"edge-{build}", payload=staged["pending"])
+
+                    def serving():
+                        code, data = request(address, runtime_edge.HEALTH, headers=observer)
+                        value = json.loads(data)
+                        if code == 200 and value.get("status") == "serving" and value.get("payload") == staged["pending"]:
+                            return value
+
+                    health = fixture.wait(serving, timeout=10)
+                    self.assertEqual(health["edge_instance"], edge["instance"])
+                    state = health["update"]
+                    self.assertEqual(state["phase"], "committed")
+                    cutover = health["edge_handover_ms"]
+                    cutovers.append(cutover)
+                    fence = state["edge_admission_closed_at"]
+                    switches.append((build, began, fence, fence + cutover / 1000))
+                    timestamps = [state[key] for key in ("edge_admission_closed_at", "edge_admission_drained_at",
+                        "edge_projection_saved_at", "edge_source_exited_at", "edge_snapshot_finished_at",
+                        "edge_candidate_ready_at")]
+                    intervals = [round((end - start) * 1000, 2) for start, end in zip(timestamps, timestamps[1:])]
+                    components.append(dict(zip(("drain_ms", "projection_ms", "source_exit_ms", "snapshot_ms",
+                                                "candidate_ready_ms"), intervals)))
+                    self.assertEqual(fixture.api(address, "api/browser/config")["token"], token)
+                    current = runtime.control(runtime.discover(fixture.database), "status")
+                    self.assertEqual(current["transport"]["epoch"], initial_epoch + len(switches))
+                    self.assertEqual(fixture.api(address, conversation)["requests"][0]["key"], approval)
+                    latest_output = [row for row in wire() if row["kind"] == "output" and fence <= row["time"]]
+                    for thread, (pid, turn) in original.items():
+                        output = [row for row in latest_output if row["thread"] == thread]
+                        self.assertTrue(output, f"Stream {thread} produced no output after fence {build}")
+                        self.assertEqual({(row["pid"], row["turn"]) for row in output}, {(pid, turn)})
+                time.sleep(.35)  # Include resumed traffic at the same offered rate.
+            finally:
+                stop.set()
+            if traffic:
+                samples = traffic.result(timeout=6)
+
+        browser_documents = None
+        if browser_module:
+            browser = json.loads((fixture.root / "edge-browser-result.json").read_text())
+            self.assertEqual(browser["errors"], [])
+            browser_documents = browser["documentCounts"]
+            self.assertEqual(browser_documents, {
+                **{f"composer-{index}": 1 for index in range(len(streams))}, "opening-0": 1, "opening-1": 1})
+            samples = []
+            for entry in browser["activity"]:
+                thread = entry["thread"]
+                turn = {"turnId": entry.get("activeTurn")}
+                value = {"acceptedMessage": turn} if entry["kind"] == "send" else {"activeTurn": entry["activeTurn"]}
+                timings = {"started_at": entry["began"] / 1000 - browser_origin, "total_ms": entry["elapsed"]}
+                if entry.get("coordinatorMs") is not None:
+                    timings["coordinator_ms"] = entry["coordinatorMs"]
+                samples.append((entry["status"], json.dumps(value).encode(), entry.get("body"), thread, streams[thread], timings))
+
+        failures = [(code, response.decode()) for code, response, *_ in samples if code != 200]
+        self.assertEqual(failures, [])
+        sent_messages, send_samples = {}, []
+        offered = Counter()
+        for _, response, body, thread, path, timings in samples:
+            start = timings["started_at"]
+            build, _, fence, routed = next((window for window in reversed(switches) if start >= window[1]), switches[0])
+            offered[build, "send" if body else "open"] += 1
+            value = json.loads(response)
+            if body:
+                self.assertEqual(value["acceptedMessage"]["turnId"], original[thread][1])
+                sent_messages[body["requestId"]] = (thread, path, body)
+                send_samples.append({**timings, "switch": build, "relative_to_fence_ms": (start - fence) * 1000,
+                    "crossed_fence": start <= routed and start + timings["total_ms"] / 1000 >= fence})
+            else:
+                self.assertEqual(value["activeTurn"], original[thread][1])
+        offered = [{kind: offered[build, kind] for kind in ("send", "open")} for build in resources_by_build]
+        self.assertTrue(all(row["send"] and row["open"] for row in offered))
+        self.assertEqual(sum(row["open"] for row in offered), math.ceil(len(send_samples) / 2))
+
+        # A retry of the first accepted send after all upgrades must resolve
+        # from the durable receipt without a second native request.
+        _, path, body = next(iter(sent_messages.values()))
+        self.assertEqual(fixture.api(address, path + "/messages", body)["acceptedMessage"]["message"], body["message"])
         fixture.api(address, conversation + "/requests/" + approval, {"decision": "accept"})
-        fixture.wait(lambda: any(call.get("id") == 900 and "result" in call for call in fixture.calls()))
-        self.assertEqual(sum(call.get("method") == "turn/start" for call in fixture.calls()), 1)
-        self.assertEqual(sum(call.get("id") == 900 and "result" in call for call in fixture.calls()), 1)
+        (fixture.root / "release").touch()
+        fixture.wait(lambda: sum(row["kind"] == "complete" for row in wire()) == 6)
+        self.assertEqual(sum(row["kind"] == "approval_answer" for row in wire()), 1)
+        deliveries = [(row["pid"], call["threadId"], call["expectedTurnId"], call["input"][0]["text"])
+                      for row in wire() if row["kind"] == "input" and row["message"].get("method") == "turn/steer"
+                      for call in (row["message"]["params"],)]
+        self.assertCountEqual(deliveries, [(original[thread][0], thread, original[thread][1], body["message"])
+                                          for thread, _, body in sent_messages.values()])
+        with closing(sqlite3.connect(fixture.database.as_uri() + "?mode=ro", uri=True)) as database:
+            rows = database.execute("SELECT request_id, thread_id, state FROM browser_submission_receipts "
+                                    "WHERE json_extract(payload_json, '$.body.message') LIKE 'steer-%'").fetchall()
+        self.assertCountEqual(rows, [(message, thread, "completed")
+                                     for message, (thread, _, _) in sent_messages.items()])
+        for cutover in cutovers:
+            self.assertGreater(cutover, 0)
+        send_samples.sort(key=lambda sample: sample["total_ms"])
+        send_p99 = send_samples[math.ceil(.99 * len(send_samples)) - 1]["total_ms"]
+        fence_sends = [sample["total_ms"] for sample in send_samples if sample["crossed_fence"]]
+        fence_send_p99 = fence_sends[math.ceil(.99 * len(fence_sends)) - 1] if fence_sends else 0
+        if report := os.environ.get("RIBBON_EDGE_REPORT"):
+            Path(report).write_text(json.dumps({"cutover_ms": cutovers, "accepted": len(sent_messages),
+                "provider_deliveries": len(deliveries), "http_failures": 0, "streams": len(streams),
+                "send_p99_ms": send_p99, "fence_send_p99_ms": fence_send_p99,
+                "fence_sends": len(fence_sends), "slowest_sends": send_samples[-5:],
+                "offered": offered, "phases": components, "browser_documents": browser_documents}, indent=2) + "\n")
+        if os.environ.get("RIBBON_REQUIRE_EDGE_BUDGET") == "1":
+            self.assertLess(max(cutovers), 250, f"Coordinator handover milliseconds: {cutovers}")
+            self.assertLess(max(send_p99, fence_send_p99), 150, "Send latency includes waiting for coordinator admission")
+
+    def test_supervisor_restores_a_lost_listener_at_its_original_origin(self):
+        fixture = self.fixture
+        first = self.launch(fixture.resources)
+        directory = runtime.runtime_directory(fixture.database)
+        edge = runtime_edge.read_address(directory)
+        token = fixture.api(edge["url"], "api/browser/config")["token"]
+        os.kill(edge["pid"], signal.SIGTERM)
+        def resumed():
+            record = runtime_edge.read_address(directory)
+            if record["instance"] != edge["instance"]:
+                try:
+                    observed = runtime_edge.probe(record)
+                except (OSError, HTTPException):
+                    return None
+                if observed and observed.get("status") == "serving":
+                    return record
+            return None
+        replacement = fixture.wait(resumed, timeout=10)
+        self.assertEqual(replacement["url"], first["edge_url"])
+        self.assertEqual(replacement["observer"], first["edge_observer"])
+        self.assertEqual(fixture.api(replacement["url"], "api/browser/config")["token"], token)

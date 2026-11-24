@@ -688,7 +688,10 @@ class Owner:
             # macOS returns EPERM for a group containing only zombies. Keep
             # the leader waitable while checking membership; a live member or
             # failed inspection leaves shutdown explicitly incomplete.
-            if exited is None or Owner._group_has_live_members(group):
+            # Delivery can terminate the leader between the earlier waitid
+            # and killpg's result. Reobserve without reaping before deciding
+            # whether this is a permission failure or a completed shutdown.
+            if observe_child_exit(process.pid) is None or Owner._group_has_live_members(group):
                 raise
 
     @staticmethod

@@ -184,7 +184,7 @@ def command_environment(environment: dict[str, str] | None = None) -> dict[str, 
 
 
 def build_supervisor_command(store: CoordinationStore, job_id: str, token: str, *, stage: str = "supervise") -> list[str]:
-    return [sys.executable, "-m", "agent_coord.jobs", stage, "--db", str(store.database_path.resolve()),
+    return [sys.executable, "-B", "-m", "agent_coord.jobs", stage, "--db", str(store.database_path.resolve()),
             "--job-id", job_id, "--token", token]
 
 
