@@ -432,8 +432,23 @@ async function mobileLayout(page, fixture) {
     };
     const input = document.getElementById("message");
     const send = document.getElementById("send");
+    const actions = document.querySelector(".session-actions");
+    const previous = actions?.parentElement;
+    const next = actions?.nextSibling;
+    const wasCompact = document.body.classList.contains("mobile-chat");
+    let secondaryWithClassDelayed = "absent";
+    if (actions) {
+      // Reproduce the short interval before the mobile controller moves the
+      // action group. The screen assertions below use the original live DOM.
+      document.querySelector(".conversation-controls").append(actions);
+      document.body.classList.remove("mobile-chat");
+      secondaryWithClassDelayed = getComputedStyle(actions).display;
+      previous.insertBefore(actions, next);
+      document.body.classList.toggle("mobile-chat", wasCompact);
+    }
     return {title: rect("#title-heading"), options: rect("#mobile-chat-actions"),
       secondary: rect(".conversation-head .session-actions"), dock: rect("#dispatcher-dock"),
+      secondaryWithClassDelayed,
       input: rect("#message"), send: rect("#send"), attach: rect("#attach-image"),
       placeholder: input.placeholder, font: getComputedStyle(input).fontSize,
       titleOverflow: getComputedStyle(document.getElementById("title-heading")).textOverflow,
@@ -443,6 +458,7 @@ async function mobileLayout(page, fixture) {
   assert(view.title.width >= 72 && view.title.x + view.title.width <= view.options.x + 1, JSON.stringify(view));
   assert([view.titleOverflow, view.titleButtonOverflow].includes("ellipsis"), JSON.stringify(view));
   assert(["none", "absent"].includes(view.secondary.display), JSON.stringify(view));
+  assert(["none", "absent"].includes(view.secondaryWithClassDelayed), JSON.stringify(view));
   assert(view.dock.height === 0 && view.sendVisible && view.horizontalOverflow <= 0, JSON.stringify(view));
   assert.equal(view.font, "16px", JSON.stringify(view));
   assert.match(view.placeholder, /^Message agent[.…]*$/, JSON.stringify(view));
@@ -581,11 +597,15 @@ async function drafts(page, fixture) {
   const attachment = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9h8AAAAASUVORK5CYII=", "base64");
   await openConversation(page, fixture, first);
   await page.locator("#message").fill("Preserve the unsent calibration draft.");
-  const chooser = page.waitForEvent("filechooser");
-  void chooser.catch(() => {});
-  await page.locator("#attach-image").click();
-  await (await chooser).setFiles({name: "calibration-sample.png", mimeType: "image/png", buffer: attachment});
-  await shown(page, "#image-attachments .image-attachment");
+  const dataTransfer = await page.evaluateHandle(bytes => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array(bytes)], "calibration-sample.png", {type: "image/png"}));
+    return transfer;
+  }, Array.from(attachment));
+  await page.locator("#composer").dispatchEvent("drop", {dataTransfer});
+  await dataTransfer.dispose();
+  const preview = '#image-attachments img[alt="calibration-sample.png"]';
+  await shown(page, preview);
   await openFromList(page, fixture, second, {expand: [fixture.threads.supervisor]});
   assert.equal(await page.locator("#message").inputValue(), "");
   await page.locator("#message").fill("Independent draft for the lead.");
@@ -594,7 +614,7 @@ async function drafts(page, fixture) {
   await page.reload({waitUntil: "domcontentloaded"});
   await readyConversation(page, first);
   await page.waitForFunction(() => document.querySelector("#message").value === "Preserve the unsent calibration draft.");
-  await shown(page, "#image-attachments .image-attachment");
+  await shown(page, preview);
   await openFromList(page, fixture, second, {expand: [fixture.threads.supervisor]});
   await page.waitForFunction(() => document.querySelector("#message").value === "Independent draft for the lead.");
   assert.equal(await page.locator("#image-attachments .image-attachment").count(), 0);
