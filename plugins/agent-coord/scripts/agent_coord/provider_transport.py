@@ -19,6 +19,7 @@ from pathlib import Path
 import secrets
 import select
 import signal
+import errno
 import sqlite3
 import subprocess
 import sys
@@ -121,6 +122,8 @@ def encode(value):
 
 def storage_exhausted(error):
     """Whether SQLite failed because the volume ran out of space."""
+    if isinstance(error, OSError):
+        return error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO}
     name = getattr(error, "sqlite_errorname", None)  # Python 3.11+
     if name is not None:
         return name == "SQLITE_FULL" or name.startswith("SQLITE_IOERR")
@@ -209,7 +212,7 @@ def retire_dead_owner(directory, record, before_retire):
 class Journal:
     """Single-owner WAL; command intent precedes every irreversible pipe write."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, *, file_events=False):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.directory, 0o700)
@@ -257,15 +260,26 @@ class Journal:
             self.db.execute("UPDATE channels SET state='lost' WHERE state IN ('opening','running','write-uncertain')")
         self.event_bytes = self.db.execute("SELECT COALESCE(SUM(size),0) FROM events").fetchone()[0]
         self.receipt_count = self.db.execute("SELECT count(*) FROM commands").fetchone()[0]
+        from .stream_journal import StreamJournal
+        self.spool = StreamJournal(self.directory / "events") if file_events else None
+        if self.spool is not None:
+            if self.event_bytes:
+                raise TransportError("File event spool requires a new transport generation.")
+            self.event_bytes = self.spool.event_bytes
 
     def sequence(self):
         with self.lock:
+            if self.spool is not None:
+                return self.spool.sequence
             row = self.db.execute("SELECT seq FROM sqlite_sequence WHERE name='events'").fetchone()
             return row[0] if row else 0
 
     def bounds(self):
         with self.lock:
-            return {**dict(self.db.execute("SELECT acknowledged,retained_after FROM journal_bounds").fetchone()),
+            bounds = ({"acknowledged": self.spool.acknowledged, "retained_after": self.spool.retained_after}
+                      if self.spool is not None else
+                      dict(self.db.execute("SELECT acknowledged,retained_after FROM journal_bounds").fetchone()))
+            return {**bounds,
                     "event_bytes": self.event_bytes, "event_limit_bytes": MAX_JOURNAL_BYTES,
                     "receipt_count": self.receipt_count, "receipt_limit": MAX_RECEIPTS}
 
@@ -304,11 +318,14 @@ class Journal:
                 if self.stopping:
                     return None
                 try:
+                    if self.spool is not None:
+                        sequence = self.spool.append(channel, stream, data, size)
+                        break
                     with self.db:
                         cursor = self.db.execute("INSERT INTO events(channel,stream,data,size) VALUES (?,?,?,?)",
                                                  (channel, stream, data, size))
                     break
-                except sqlite3.OperationalError as error:
+                except (sqlite3.OperationalError, OSError) as error:
                     # A full disk must stall this reader like journal capacity.
                     # Ending it delivers end-of-output, which retires a live provider.
                     if not storage_exhausted(error):
@@ -320,7 +337,7 @@ class Journal:
                     self.changed.wait(1)
             self.event_bytes += size
             self.changed.notify_all()
-            return cursor.lastrowid
+            return sequence if self.spool is not None else cursor.lastrowid
 
     def acknowledge_events(self, cursor, retain_after=0):
         """Advance only a caller-proven durable recovery floor.
@@ -336,6 +353,11 @@ class Journal:
                 raise TransportError("Transport acknowledgement is outside the available sequence.")
             if retain_after < current["retained_after"]:
                 raise TransportError("The requested recovery floor has already been retired.")
+            if self.spool is not None:
+                self.spool.acknowledge(cursor, retain_after)
+                self.event_bytes = self.spool.event_bytes
+                self.changed.notify_all()
+                return self.bounds()
             # Bounded maintenance avoids monopolizing the owner behind a large
             # checkpoint. Repeating the same acknowledgement finishes pruning.
             rows = self.db.execute("SELECT sequence,size FROM events WHERE sequence<=? ORDER BY sequence LIMIT 256",
@@ -361,6 +383,8 @@ class Journal:
         with self.lock:
             if after < self.bounds()["retained_after"]:
                 raise TransportError("Requested transport cursor is no longer retained; recovery must stop.")
+            if self.spool is not None:
+                return self.spool.events(after, min(limit, 256), MAX_BATCH_BYTES)
             result, size = [], 0
             for row in self.db.execute("SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT ?",
                                        (after, min(limit, 256))):
@@ -374,6 +398,8 @@ class Journal:
     def close(self):
         self.stop_waits()
         with self.lock:
+            if self.spool is not None:
+                self.spool.close()
             self.db.close()
 
 
@@ -386,7 +412,7 @@ class Owner:
         self.boot_id = boot_identity()
         # Each pipe owner has a fresh sequence space. Retired raw events and
         # uncertain command receipts remain available under the old generation.
-        self.journal = Journal(self.directory / "generations" / str(uuid.UUID(self.instance)))
+        self.journal = Journal(self.directory / "generations" / str(uuid.UUID(self.instance)), file_events=True)
         self.processes = {}
         self.channel_locks = {}
         self.readers = []
