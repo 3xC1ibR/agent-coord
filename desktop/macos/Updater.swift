@@ -7,6 +7,7 @@ enum RibbonUpdatePrompt {
     /// How the running backend treats active work during its own replacement.
     enum Continuity {
         case restartsWork
+        case retainsProviderSessions
         case waitsForOtherProviders
         case pausesOtherProviders
 
@@ -14,12 +15,20 @@ enum RibbonUpdatePrompt {
             switch self {
             case .restartsWork:
                 return "Installing restarts running agents and tools. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
+            case .retainsProviderSessions:
+                return "Retained Codex, Claude, Kimi, Muse and Antigravity sessions keep running. The update waits for work still owned by the current backend to finish. Approvals and uncertain actions wait for your review."
             case .waitsForOtherProviders:
                 return "Codex and Claude work keeps running. The update waits for running Kimi, Muse and Antigravity turns to finish. Approvals and uncertain actions wait for your review."
             case .pausesOtherProviders:
                 return "Codex and Claude work keeps running. Running Kimi, Muse and Antigravity turns pause for the update and continue automatically. Approvals and uncertain actions wait for your review."
             }
         }
+    }
+
+    static func continuity(retainedProviders: Bool, continuingInterruptedProviders: Bool, uninterruptedUpdates: Bool) -> Continuity {
+        if retainedProviders { return .retainsProviderSessions }
+        if continuingInterruptedProviders { return .pausesOtherProviders }
+        return uninterruptedUpdates ? .waitsForOtherProviders : .restartsWork
     }
 
     static func alert(version: String?, restartingAgents: Bool, continuity: Continuity = .restartsWork) -> NSAlert {

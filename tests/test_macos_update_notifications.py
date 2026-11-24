@@ -41,6 +41,14 @@ updater.backendUpdateAvailable = { identifier != nil }
 updater.backendUpdateRequiresConfirmation = { supported }
 updater.backendUpdateInProgress = { inProgress }
 updater.applyBackendUpdate = { reply in installs += 1; inProgress = true; reply(nil) }
+precondition(RibbonUpdatePrompt.continuity(retainedProviders: true, continuingInterruptedProviders: true, uninterruptedUpdates: true) == .retainsProviderSessions)
+precondition(RibbonUpdatePrompt.continuity(retainedProviders: false, continuingInterruptedProviders: true, uninterruptedUpdates: true) == .pausesOtherProviders)
+precondition(RibbonUpdatePrompt.continuity(retainedProviders: false, continuingInterruptedProviders: false, uninterruptedUpdates: true) == .waitsForOtherProviders)
+precondition(RibbonUpdatePrompt.continuity(retainedProviders: false, continuingInterruptedProviders: false, uninterruptedUpdates: false) == .restartsWork)
+let retention = RibbonUpdatePrompt.alert(version: "0.1.35+101", restartingAgents: true, continuity: .retainsProviderSessions)
+precondition(retention.informativeText.contains("Codex, Claude, Kimi, Muse and Antigravity"))
+precondition(retention.informativeText.contains("current backend"))
+precondition(!retention.informativeText.contains("waits for running Kimi"))
 updater.start()
 updater.notifyBackendUpdate()
 precondition(alerts == 1 && installs == 0)

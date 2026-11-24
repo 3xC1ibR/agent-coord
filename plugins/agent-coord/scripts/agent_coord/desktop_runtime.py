@@ -2338,7 +2338,7 @@ def main(argv=None):
         if (args.runtime_command == "status" and args.runtime_stable_origin and record.get("stable_origin") == 1
                 and args.resources):
             result = control(record, "status")
-            previous = gateway.status(args.db, {}) if args.runtime_interaction_continuity else {}
+            previous = gateway.status(args.db, {})
             if not previous.get("interaction_url") or previous.get("interaction_settled"):
                 from . import runtime_edge
                 runtime_edge.ensure(args.db, Path(result["payload"]))

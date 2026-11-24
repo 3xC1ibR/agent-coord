@@ -224,8 +224,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             updater.backendUpdateRequiresConfirmation = { [weak self] in self?.backend.pendingUpdateRequiresConfirmation == true }
             updater.backendUpdateContinuity = { [weak self] in
                 guard let backend = self?.backend else { return .restartsWork }
-                return backend.continuesInterruptedProviders ? .pausesOtherProviders
-                    : backend.supportsUninterruptedUpdates ? .waitsForOtherProviders : .restartsWork
+                return RibbonUpdatePrompt.continuity(retainedProviders: backend.retainsProviderSessions,
+                    continuingInterruptedProviders: backend.continuesInterruptedProviders,
+                    uninterruptedUpdates: backend.supportsUninterruptedUpdates)
             }
             updater.applyBackendUpdate = { [weak self] completion in
                 guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }

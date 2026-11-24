@@ -42,7 +42,7 @@ func update(_ id: String, _ phase: String) -> [String: Any] {
 var predecessor = status("old", previous)
 predecessor["interrupted_provider_continuation"] = 1
 try backend.accept(predecessor)
-precondition(backend.continuesInterruptedProviders)
+precondition(backend.continuesInterruptedProviders && !backend.retainsProviderSessions)
 var accepted = status("old", previous)
 accepted["update"] = update("first", "accepted")
 try backend.accept(accepted)
@@ -83,7 +83,7 @@ edgeStatus["edge_observer"] = String(repeating: "a", count: 43)
 edgeStatus["unbrokered_provider_wait"] = 1
 edgeStatus["interrupted_provider_continuation"] = 1
 try stable.accept(edgeStatus)
-precondition(!stable.continuesInterruptedProviders)
+precondition(!stable.continuesInterruptedProviders && stable.retainsProviderSessions)
 for generation in 1...3 {
     let key = "upgrade-\(generation)"
     var active = status("before-\(generation)", previous)
@@ -103,6 +103,10 @@ for generation in 1...3 {
 var changedEdge = status("after", target)
 changedEdge["edge_url"] = "http://127.0.0.1:42345/"
 do { try stable.accept(changedEdge); fatalError("A generation changed the native origin") } catch {}
+precondition(addresses.count == 1)
+var historicalGateway = status("after", target)
+historicalGateway["interaction_url"] = "http://127.0.0.1:52345/"
+do { try stable.accept(historicalGateway); fatalError("A stable origin returned to a predecessor gateway") } catch {}
 precondition(addresses.count == 1)
 ''')
             binary = root / "runtime-update-test"

@@ -1,5 +1,7 @@
 """Legacy intake is predecessor-owned; ordinary updates use the stable edge."""
 from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
 import hashlib
 import json
 import os
@@ -106,3 +108,22 @@ class GatewayRetirementTests(unittest.TestCase):
         with patch.object(retirement.os, 'execve', side_effect=AssertionError('Created new intake')):
             with self.assertRaisesRegex(RuntimeError, 'cannot be created'):
                 retirement.serve_existing(self.database, None, None)
+
+    def test_normal_product_does_not_ship_predecessor_engines(self):
+        package = Path(runtime.__file__).parent
+        for name in ('runtime_gateway_lifecycle', 'runtime_interaction_gateway', 'runtime_saved_views', 'runtime_message_intake'):
+            self.assertFalse((package / (name + '.py')).exists(), name)
+
+    def test_stable_only_status_cannot_bypass_unsettled_predecessor_intake(self):
+        from agent_coord import runtime_edge
+        record = {'database': self.database, 'instance':'serving-owner', 'payload':str(self.root), 'stable_origin':1}
+        existing = {'interaction_url':'http://127.0.0.1:23456/', 'interaction_settled':False}
+        output = StringIO()
+        with patch.object(runtime, 'discover', return_value=record), \
+                patch.object(runtime, 'control', return_value={'status':'serving'}), \
+                patch.object(retirement, 'status', return_value=existing), \
+                patch.object(runtime_edge, 'ensure', side_effect=AssertionError('Bypassed accepted predecessor input')), \
+                redirect_stdout(output):
+            self.assertEqual(runtime.main(['--db', self.database, '--resources', str(self.root),
+                                          '--runtime-command', 'status', '--runtime-stable-origin']), 0)
+        self.assertEqual(json.loads(output.getvalue())['interaction_url'], existing['interaction_url'])
