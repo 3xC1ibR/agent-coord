@@ -14,6 +14,8 @@ from pathlib import Path
 import ssl
 import sys
 import tempfile
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
@@ -54,45 +56,65 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ribbon-ios-smoke-") as directory:
         store = CoordinationStore(Path(directory) / "state.sqlite3")
-        remote = RemoteAccess(store.database_path, tailscale=LocalRoute())
-        server = make_ui_server(store, port=args.port, cwd=directory, remote_access=remote)
-        parent = server.RequestHandlerClass
+        thread = "ios-companion-draft"
+        title = "Companion draft"
+        route = LocalRoute()
+        port = args.port
+        first_start = True
+        while True:
+            remote = RemoteAccess(store.database_path, tailscale=route)
+            server = make_ui_server(store, port=port, cwd=directory, remote_access=remote)
+            port = server.server_port
+            restarted = threading.Event()
 
-        class FixtureHandler(parent):
-            def parse_request(self):
-                valid = super().parse_request()
-                if valid:
-                    # Exercise remote authorization rather than localhost admin access.
-                    self.headers["X-Forwarded-Proto"] = "https"
-                return valid
+            class FixtureHandler(server.RequestHandlerClass):
+                def parse_request(self):
+                    valid = super().parse_request()
+                    if valid:
+                        # Exercise remote authorization rather than localhost admin access.
+                        self.headers["X-Forwarded-Proto"] = "https"
+                    return valid
 
-            def do_GET(self):
-                if self.path == "/__smoke__/invitation":
-                    if not self._valid_host():
-                        self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid host."})
+                def do_GET(self):
+                    if self.path in {"/__smoke__/invitation", "/__smoke__/restart"}:
+                        if not self._valid_host():
+                            self._json(HTTPStatus.FORBIDDEN, {"error": "Invalid host."})
+                            return
+                        if self.path == "/__smoke__/invitation":
+                            self._json(HTTPStatus.OK, remote.pairing())
+                        else:
+                            self._json(HTTPStatus.OK, {"restarting": True})
+                            restarted.set()
+                            threading.Thread(target=self.server.shutdown, daemon=True).start()
                         return
-                    self._json(HTTPStatus.OK, remote.pairing())
-                    return
-                super().do_GET()
+                    super().do_GET()
 
-            def do_POST(self):
-                # Boot restores its selected folder through this read-only probe;
-                # the backend confines it to our temporary workspace.
-                if self.path not in {"/api/remote/pair", "/api/browser/workspaces/open"}:
-                    self._json(HTTPStatus.FORBIDDEN, {"error": "The iOS smoke fixture cannot submit agent work."})
-                    return
-                super().do_POST()
+                def do_POST(self):
+                    # Boot restores its selected folder through this read-only probe.
+                    if self.path not in {"/api/remote/pair", "/api/browser/workspaces/open"}:
+                        self._json(HTTPStatus.FORBIDDEN, {"error": "The iOS smoke fixture cannot submit agent work."})
+                        return
+                    super().do_POST()
 
-        server.RequestHandlerClass = FixtureHandler
-        try:
-            remote.enable(server.server_port)
-            server.socket = context.wrap_socket(server.socket, server_side=True)
-            print(f"iOS smoke fixture: https://localhost:{server.server_port}", flush=True)
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
+            server.RequestHandlerClass = FixtureHandler
+            try:
+                if first_start:
+                    remote.enable(port)
+                    store.register(session_id=thread, client="claude", cwd=directory, name=title)
+                    with store._connection() as db:
+                        db.execute("""INSERT INTO browser_sessions(thread_id,cwd,name,client,created_at,updated_at)
+                                      VALUES (?,?,?,?,?,?)""", (thread, directory, title, "claude", time.time(), time.time()))
+                    server.browser_sessions.history_persistence.save(thread, {"id": thread, "turns": []})
+                server.socket = context.wrap_socket(server.socket, server_side=True)
+                print(f"iOS smoke fixture {'ready' if first_start else 'restarted'}: https://localhost:{port}", flush=True)
+                server.serve_forever()
+            except KeyboardInterrupt:
+                break
+            finally:
+                server.server_close()
+            if not restarted.is_set():
+                break
+            first_start = False
 
 
 if __name__ == "__main__":

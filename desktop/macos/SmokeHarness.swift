@@ -2022,7 +2022,12 @@ extension AppDelegate {
                 smoke.results["restore_focus_unverified_inactive_app"] = expected[2]["id"] as? String ?? ""
             }
             if stage == "verify", let first = windows.first(where: { $0.id == expected[0]["id"] as? String }) {
-                _ = try await smokeJS("document.querySelector('#message').value = 'alpha final keystroke'; return true;", in: first.webView)
+                _ = try await smokeJS("""
+                    const field = document.querySelector('#message');
+                    field.value = 'alpha final keystroke';
+                    field.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText'}));
+                    return true;
+                    """, in: first.webView)
                 var changed = expected
                 changed[0]["draft"] = "alpha final keystroke"
                 preferences.set(changed, forKey: "restoreSmokeExpected")

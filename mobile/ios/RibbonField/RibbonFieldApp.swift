@@ -10,10 +10,14 @@ struct RibbonFieldApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
-                .task { await model.start() }
+                .task {
+                    await model.start()
+                    if scenePhase == .active { await model.foreground() }
+                }
                 .onOpenURL { model.receive($0) }
                 .onChange(of: scenePhase) { phase in
                     if phase == .active { Task { await model.foreground() } }
+                    else { model.background() }
                 }
         }
     }
@@ -28,7 +32,6 @@ private struct WebContent: UIViewRepresentable {
 struct ContentView: View {
     @ObservedObject var model: ConnectionModel
     @Environment(\.openURL) private var openURL
-    @State private var confirmReload = false
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -43,13 +46,8 @@ struct ContentView: View {
             if let message = model.message, !model.showingConnection {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(message).font(.callout).accessibilityIdentifier("connection.error")
-                    if model.needsReload {
-                        Button("Reload page") { confirmReload = true }
-                            .accessibilityIdentifier("connection.reload")
-                    } else {
-                        Button("Try again") { Task { await model.retry() } }
-                            .accessibilityIdentifier("connection.retry")
-                    }
+                    Button("Try again") { Task { await model.retry() } }
+                        .accessibilityIdentifier("connection.retry")
                 }.frame(maxWidth: .infinity, alignment: .leading).padding().background(.thinMaterial)
             }
             if let webView = model.webView {
@@ -69,10 +67,6 @@ struct ContentView: View {
         .sheet(isPresented: $model.showingConnection, onDismiss: { model.incomingInvitation = nil }) {
             ConnectionSheet(model: model)
         }
-        .alert("Reload this page?", isPresented: $confirmReload) {
-            Button("Reload", role: .destructive) { model.reloadPage() }
-            Button("Keep page", role: .cancel) {}
-        } message: { Text("Copy any unsent text first. Reloading keeps your current thread, but clears unsent text and attachments.") }
         .confirmationDialog("Open this link in your browser?", isPresented: Binding(
             get: { model.externalURL != nil }, set: { if !$0 { model.externalURL = nil } }
         ), titleVisibility: .visible) {
