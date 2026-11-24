@@ -46,15 +46,17 @@
   if (typeof module !== "undefined" && module.exports) { module.exports = helpers; return; }
   const doc = root.document, $ = id => doc.getElementById(id);
   if ($("open-activity")) {
-    const dialog = $("activity-dialog"), frame = $("activity-frame");
+    const dialog = $("activity-dialog");
+    let frame = $("activity-frame");
     $("open-activity").onclick = event => {
       event.preventDefault();
       const backdrop = $("sidebar-backdrop"); if (backdrop && !backdrop.hidden) backdrop.click();
       root.agentCoordActivity?.end(); root.agentCoordActivity?.flush();
+      frame ||= workspaceDialogFrame(root.document, "activity-frame");
       frame.src = "/activity?embedded=1"; dialog.showModal();
     };
     root.addEventListener("message", event => {
-      if (event.origin !== root.location.origin || event.source !== frame.contentWindow) return;
+      if (event.origin !== root.location.origin || !frame || event.source !== frame.contentWindow) return;
       if (event.data?.type === "ribbon-field-close-activity") dialog.close();
       if (event.data?.type === "ribbon-field-activity-thread" && typeof event.data.thread_id === "string") {
         dialog.close();

@@ -16,11 +16,13 @@
     return "other";
   }
   class VisitRecorder {
-    constructor({windowId, send, now = () => Date.now() / 1000, uuid = () => root.crypto.randomUUID(), limit = 80}) {
-      Object.assign(this, {windowId, send, now, uuid, limit});
+    constructor({windowId, send, now = () => Date.now() / 1000, retryClock = () => performance.now(),
+      uuid = () => root.crypto.randomUUID(), limit = 80}) {
+      Object.assign(this, {windowId, send, now, retryClock, uuid, limit});
       this.enabled = false; this.foreground = false; this.thread = null;
       this.current = null; this.queue = []; this.pending = null; this.intent = 0;
       this.intentSurface = null; this.navigationSurface = null;
+      this.retryAfter = 0;
     }
     markIntent(surface = null) { this.intent = this.now() + 1; this.intentSurface = surface; }
     source() {
@@ -76,15 +78,20 @@
         window_id: this.windowId};
       return body;
     }
-    clear() { this.queue = []; this.current = null; this.intentSurface = this.navigationSurface = null; }
+    clear() { this.queue = []; this.current = null; this.intentSurface = this.navigationSurface = null; this.retryAfter = 0; }
     async flush({keepalive = false} = {}) {
-      if (!this.queue.length || this.pending && !keepalive) return this.pending;
+      if (!this.queue.length || !keepalive && (this.pending || this.retryClock() < this.retryAfter)) return this.pending;
       const send = async batch => {
         try {
           await this.send(batch, {keepalive});
           const confirmed = new Set(batch.map(event => event.event_id));
           this.queue = this.queue.filter(event => !confirmed.has(event.event_id));
-        } catch { /* Retry unconfirmed observations on the next flush with their original event IDs. */ }
+          this.retryAfter = 0;
+        } catch (error) {
+          // An invalid timestamp or expired credential can outlive many flush
+          // ticks. Preserve the batch and identities while the condition clears.
+          if (error?.status >= 400 && error.status < 500) this.retryAfter = this.retryClock() + 60000;
+        }
       };
       if (keepalive) {
         // A normal fetch or an outstanding Web Lock can be cancelled at page
@@ -106,7 +113,7 @@
     const webkit = /AppleWebKit/.test(agent) && (!/Chrome|Chromium|Edg\//.test(agent) || /iP(?:ad|hone|od)/.test(agent));
     const prefix = "ribbon-field.pending-visits:" + (state.config?.conversationCacheScope || "local") + ":";
     let storage;
-    try { if (webkit) storage = view.localStorage; } catch { /* Restricted profiles use the normal transport. */ }
+    try { storage = view.localStorage; } catch { /* Restricted profiles use the normal transport. */ }
     const backup = storage && prefix + state.sourceWindowId + ":" + root.crypto.randomUUID();
     const recorder = new VisitRecorder({windowId: state.sourceWindowId,
       send: (events, options) => api("activity/events", {events}, options)});
@@ -185,7 +192,7 @@
       recorder.end(); stopped = true;
       let saved = false;
       try {
-        if (storage && recorder.queue.length) {
+        if (storage && recorder.queue.length && (webkit || recorder.retryAfter)) {
           storage.setItem(backup, JSON.stringify(recorder.queue)); recorder.queue = []; saved = true;
         }
       } catch { /* A full or restricted store falls back to keepalive. */ }

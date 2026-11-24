@@ -21,3 +21,14 @@
     },
   });
 })();
+
+// An unopened dialog has no child browsing context. Move its frame out of the
+// inert template on first use, preserving the native iframe for later visits.
+function workspaceDialogFrame(doc, id) {
+  const existing = doc.getElementById(id);
+  if (existing) return existing;
+  const template = doc.getElementById(id + "-template");
+  const frame = template?.content?.firstElementChild;
+  if (frame) template.replaceWith(frame);
+  return frame;
+}

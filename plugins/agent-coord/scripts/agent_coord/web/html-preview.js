@@ -12,13 +12,14 @@
     return "/html-preview?" + new URLSearchParams({thread, path: decoded, ...(search ? {search} : {})}) + (hashAt < 0 ? "" : raw.slice(hashAt));
   }
   function bind(doc, selected) {
-    const dialog = doc.getElementById("html-preview-dialog"), frame = doc.getElementById("html-preview-window");
-    if (dialog && frame) {
+    const dialog = doc.getElementById("html-preview-dialog");
+    let frame = doc.getElementById("html-preview-window");
+    if (dialog) {
       doc.defaultView.addEventListener("message", event => {
-        if (event.origin === doc.defaultView.location.origin && event.source === frame.contentWindow
+        if (event.origin === doc.defaultView.location.origin && frame && event.source === frame.contentWindow
             && event.data?.type === "ribbon-field-close-html-preview") dialog.close();
       });
-      dialog.addEventListener("close", () => frame.removeAttribute("src"));
+      dialog.addEventListener("close", () => frame?.removeAttribute("src"));
     }
     doc.addEventListener("click", event => {
       if (event.defaultPrevented || event.button !== 0) return;
@@ -31,6 +32,7 @@
       link.href = url;
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
+      if (dialog && !frame && typeof workspaceDialogFrame === "function") frame = workspaceDialogFrame(doc, "html-preview-window");
       if (dialog && frame) {
         const embedded = new URL(url, doc.defaultView.location.origin);
         embedded.searchParams.set("embedded", "1");

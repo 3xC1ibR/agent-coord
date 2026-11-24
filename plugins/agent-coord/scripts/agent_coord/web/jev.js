@@ -153,7 +153,13 @@
     card.querySelector("[data-jev-skip]").onclick = () => dismiss(false);
   }
   window.agentCoordJev = {mountSettings: controls, mountStatus, onboard, start(config) {
-    mountStatus(config);
-    onboard(config).catch(() => {});
+    const send = client(config);
+    let reading;
+    const request = body => {
+      if (body !== undefined) return send(body);
+      return reading ||= send().finally(() => { reading = null; });
+    };
+    mountStatus(config, request);
+    onboard(config, request).catch(() => {});
   }};
 })();

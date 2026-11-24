@@ -18,6 +18,10 @@
     (() => {
       const status = document.documentElement.dataset;
       status.startup = "loading";
+      // Read the authenticated bootstrap alongside the program and stylesheet.
+      // The API client consumes this response once and handles its normal errors.
+      if (typeof fetch === "function")
+        globalThis.agentCoordInitialConfig = fetch("/api/browser/config", {cache: "no-store", priority: "high"}).catch(() => null);
       let attempts = 0;
       document.addEventListener("load", event => {
         if (event.target.id === "workspace-program") status.startup = "loaded";
@@ -253,9 +257,9 @@
       <footer class="session-statusbar" aria-label="Session information"><div class="status-location"><span id="workspace" class="status-cwd"></span><button id="status-group" class="quiet status-group" type="button" hidden></button></div><div id="session-settings" class="session-settings" hidden><button id="edit-permissions" type="button" aria-haspopup="menu" aria-expanded="false" class="quiet">Permissions</button></div><details id="thread-usage" class="thread-usage" hidden></details></footer>
     </section>
   </main>
-  <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><iframe id="settings-frame" title="Settings"></iframe></dialog>
-  <dialog id="usage-dialog" aria-label="Usage"><iframe id="usage-frame" title="Provider usage and limits"></iframe></dialog>
-  <dialog id="activity-dialog" aria-label="Activity"><iframe id="activity-frame" title="Activity history"></iframe></dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings"><template id="settings-frame-template"><iframe id="settings-frame" title="Settings"></iframe></template></dialog>
+  <dialog id="usage-dialog" aria-label="Usage"><template id="usage-frame-template"><iframe id="usage-frame" title="Provider usage and limits"></iframe></template></dialog>
+  <dialog id="activity-dialog" aria-label="Activity"><template id="activity-frame-template"><iframe id="activity-frame" title="Activity history"></iframe></template></dialog>
   <dialog id="asks-dialog" class="asks-view" aria-labelledby="asks-title">
     <header class="asks-header"><div><h2 id="asks-title"></h2><p id="asks-summary"></p></div><button id="close-asks" class="quiet" type="button">Close</button></header>
     <div class="asks-content">
@@ -365,7 +369,7 @@
     </div>
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
-  <dialog id="html-preview-dialog" class="html-preview-dialog" aria-label="HTML output"><iframe id="html-preview-window" title="HTML output" referrerpolicy="no-referrer"></iframe></dialog>
+  <dialog id="html-preview-dialog" class="html-preview-dialog" aria-label="HTML output"><template id="html-preview-window-template"><iframe id="html-preview-window" title="HTML output" referrerpolicy="no-referrer"></iframe></template></dialog>
 
 </body>
 </html>

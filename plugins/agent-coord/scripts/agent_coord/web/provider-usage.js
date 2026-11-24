@@ -21,16 +21,18 @@
   root.agentCoordProviderUsage = api;
   const $ = id => document.getElementById(id);
   if ($("open-usage")) {
-    const dialog = $("usage-dialog"), frame = $("usage-frame");
+    const dialog = $("usage-dialog");
+    let frame = $("usage-frame");
     $("open-usage").onclick = event => {
       event.preventDefault();
       const backdrop = $("sidebar-backdrop");
       if (backdrop && !backdrop.hidden) backdrop.click();
+      frame ||= workspaceDialogFrame(root.document, "usage-frame");
       frame.src = "/usage?embedded=1";
       dialog.showModal();
     };
     root.addEventListener("message", event => {
-      if (event.origin === location.origin && event.source === frame.contentWindow && event.data?.type === "ribbon-field-close-usage") dialog.close();
+      if (event.origin === location.origin && frame && event.source === frame.contentWindow && event.data?.type === "ribbon-field-close-usage") dialog.close();
     });
     dialog.addEventListener("close", () => {
       frame.removeAttribute("src");

@@ -10,6 +10,38 @@ const source = fs.readFileSync(path.join(__dirname,
   "../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 const connect = source.slice(source.indexOf("\nfunction connect()"), source.indexOf("\n// Per-item provider events"));
 
+test("the opaque response realm provides the vendor's primitives before its script evaluates", () => {
+  const web = path.join(__dirname, "../plugins/agent-coord/scripts/agent_coord/web");
+  const html = fs.readFileSync(path.join(web, "openui-frame.html"), "utf8");
+  const scripts = [...html.matchAll(/<script src="([^"]+)" defer>/g)].map(match => match[1]);
+  assert.deepEqual(scripts, ["/openui-frame.js", "/vendor/openui/openui-bundle.min.js"]);
+  const child = vm.createContext({module: {exports: {}}});
+  vm.runInContext("Object.hasOwn = undefined; Array.prototype.at = undefined", child);
+  vm.runInContext(fs.readFileSync(path.join(web, "openui-frame.js"), "utf8"), child);
+  assert.equal(vm.runInContext("Object.hasOwn({value: 1}, 'value') && [1, 2].at(-1) === 2", child), true);
+});
+
+test("a rejected activity batch retains its event IDs and backs off before trying again", async () => {
+  const {VisitRecorder} = require("../plugins/agent-coord/scripts/agent_coord/web/activity-collector.js");
+  let clock = 100, sequence = 0;
+  const batches = [];
+  const recorder = new VisitRecorder({windowId: "activity", now: () => clock, retryClock: () => clock * 1000, uuid: () => "event-" + ++sequence,
+    send: async events => {
+      batches.push(events.map(event => event.event_id));
+      if (batches.length === 1) throw Object.assign(new Error("Clock offset"), {status: 400});
+    }});
+  recorder.setEnabled(true); recorder.setForeground(true); recorder.select("one", "navigation");
+  await recorder.flush();
+  recorder.select("two", "navigation");
+  const observed = recorder.queue.map(event => event.event_id);
+  for (clock = 102; clock < 160; clock += 2) await recorder.flush();
+  assert.equal(batches.length, 1);
+  assert.deepEqual(recorder.queue.map(event => event.event_id), observed);
+  await recorder.flush();
+  assert.deepEqual(batches, [[observed[0]], observed]);
+  assert.deepEqual(recorder.queue, []);
+});
+
 test("a cached conversation reconnects with its generation and durable completion cursor", () => {
   const streams = [];
   const window = new EventTarget();

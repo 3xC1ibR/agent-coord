@@ -1,6 +1,15 @@
 /* Runs only in an opaque-origin sandbox. No RF APIs, storage, or tool provider. */
 (() => {
   "use strict";
+  // This opaque document has its own built-ins. The vendor uses these before
+  // mounting its first component on the earliest supported macOS WebKit.
+  if (!Object.hasOwn) Object.defineProperty(Object, "hasOwn", {configurable: true, writable: true,
+    value: (object, key) => Object.prototype.hasOwnProperty.call(object, key)});
+  if (!Array.prototype.at) Object.defineProperty(Array.prototype, "at", {configurable: true, writable: true,
+    value(index) {
+      const offset = Math.trunc(Number(index)) || 0, position = offset < 0 ? this.length + offset : offset;
+      return position < 0 || position >= this.length ? undefined : this[position];
+    }});
   // Some saved responses use layout-library containers and a shorthand
   // for tabs. Adapt those calls to the chat catalog without evaluating source
   // or changing strings, comments, component references, or other signatures.

@@ -62,6 +62,10 @@ async function api(path, body, requestOptions = {}) {
       // On page exit a keepalive fetch must be registered before the page dies.
       if (path === "activity/events" && state.config?.interactionContinuity && !options.keepalive && globalThis.navigator?.locks) {
         response = await navigator.locks.request("ribbon-field-activity-write", () => fetch(address, options));
+      } else if (path === "config" && read && globalThis.agentCoordInitialConfig) {
+        const initial = globalThis.agentCoordInitialConfig;
+        delete globalThis.agentCoordInitialConfig;
+        response = await initial || await fetch(address, options);
       } else response = await fetch(address, options);
       if (response.status === 401 && location.protocol === "https:") window.dispatchEvent(new Event("agent-coord-pairing-required"));
       if (response.status === 304 && entity?.value) return entity.value;
@@ -116,7 +120,7 @@ async function openMentionFile(ref) {
   dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
-async function refreshList({background = false, afterMutation = false, priority = background ? "low" : "auto"} = {}) {
+async function refreshList({background = false, afterMutation = false, priority = background ? "low" : "auto", initialDefinitions} = {}) {
   if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background, afterMutation}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
@@ -128,7 +132,7 @@ async function refreshList({background = false, afterMutation = false, priority 
   refreshDecisionsIfDue(background);
   const refresh = {view, request: ++listRequest};
   state.listRefresh = refresh;
-  refresh.promise = loadThreadList(view, refresh.request, {background, priority});
+  refresh.promise = loadThreadList(view, refresh.request, {background, priority, initialDefinitions});
   try { return await refresh.promise; }
   finally { if (state.listRefresh === refresh) state.listRefresh = null; }
 }
@@ -144,7 +148,7 @@ function refreshDecisionsAndSchedules(background = false) {
   state.schedules?.refresh({background}).catch(showError);
   state.asks?.refresh({background}).catch(showError);
 }
-async function loadThreadList(view, request, {background = false, priority = "auto"} = {}) {
+async function loadThreadList(view, request, {background = false, priority = "auto", initialDefinitions} = {}) {
   const entities = state.inventoryEntities ||= {open: {}, closed: {}};
   // Groups, repositories and saved views change by explicit action; a
   // background refresh reads them at most once a minute.
@@ -152,7 +156,8 @@ async function loadThreadList(view, request, {background = false, priority = "au
   // Open threads feed every tab's badges, including while browsing a Closed view.
   const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open, priority}),
     view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed, priority}) : null,
-    companions ? api("organization", undefined, {priority}) : null, companions ? api("views", undefined, {priority}) : null]);
+    companions ? initialDefinitions?.organization || api("organization", undefined, {priority}) : null,
+    companions ? initialDefinitions?.views || api("views", undefined, {priority}) : null]);
   if (request !== listRequest || view !== $("view").value) return;
   if (companions) state.organizationReadAt = Date.now();
   // An unchanged list (304) needs no reprocessing or redraw; relative times
@@ -163,8 +168,8 @@ async function loadThreadList(view, request, {background = false, priority = "au
   }
   state.inventoryRevision = (state.inventoryRevision || 0) + 1;
   state.inventoryOpen = open; state.inventoryClosed = closed;
-  state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
+  state.sessions = closed ? closed.data.map(overlayPendingAttention) : state.viewThreads;
   state.agentTreeController?.inventory(state.viewThreads, closed?.data);
   state.threadTabs?.update([...(state.conversationWindow ? state.sessions : state.viewThreads), ...(closed?.data || [])]);
   state.dispatchWorkspace?.update(state.viewThreads, state.detail);
@@ -178,8 +183,10 @@ async function loadThreadList(view, request, {background = false, priority = "au
     select.dataset.signature = signature;
     select.replaceChildren(new Option(field === "repository" ? "All repositories" : "All groups", ""),
       new Option(field === "repository" ? "No repository" : "No group", threadOrganization.NONE));
+    const nameCounts = new Map();
+    for (const item of choices) nameCounts.set(item.name, (nameCounts.get(item.name) || 0) + 1);
     for (const item of choices) {
-      const duplicates = choices.filter(other => other.name === item.name).length > 1;
+      const duplicates = nameCounts.get(item.name) > 1;
       const option = new Option(item.name + (duplicates && item.root ? " · " + item.root : ""), item.id);
       option.title = item.root || item.name; select.append(option);
     }
@@ -685,7 +692,10 @@ function renderList() {
   if (state.paneMode) { renderStatus(); return; }
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
-  savedViews?.render(threadsInProject(state.viewThreads || state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)));
+  const workspaceThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id));
+  const openThreads = state.viewThreads && state.viewThreads !== state.sessions ?
+    threadsInProject(state.viewThreads).filter(t => !state.pendingCloses?.has(t.thread_id)) : workspaceThreads;
+  savedViews?.render(openThreads);
   if (conversationSearch?.update()) {
     if ($("atlas-overview")) $("atlas-overview").hidden = true;
     if ($("working-set-overview")) $("working-set-overview").hidden = true;
@@ -693,11 +703,12 @@ function renderList() {
     renderStatus(); return;
   }
   const query = $("search").value.trim().toLocaleLowerCase();
-  const workspaceThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id));
-  const projectThreads = workspaceThreads.filter(t => threadOrganization.matches(t, "", $("project").value));
+  const project = $("project").value;
+  const projectThreads = workspaceThreads.filter(t => threadOrganization.matches(t, "", project));
   const workingSet = state.overviewLayout?.mode === "working-set";
-  const matchesView = t => threadViews.matches(workingSet && t.attention === "later" && ["active", "completed"].includes($("view").value) ? {...t, attention: "now"} : t,
-    {show: $("view").value, phase: $("phase-filter").value, search: query});
+  const filters = {show: $("view").value, phase: $("phase-filter").value, search: query};
+  const includeLater = workingSet && ["active", "completed"].includes(filters.show);
+  const matchesView = t => threadViews.matches(includeLater && t.attention === "later" ? {...t, attention: "now"} : t, filters);
   const threads = projectThreads.filter(matchesView);
   // The map keeps neighboring groups available while the tabs own selection.
   const groupPages = workingSet || state.overviewLayout?.mode === "list";
@@ -722,7 +733,7 @@ function renderList() {
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
     (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
-  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads); renderStatus(); state.dispatchDock?.flush(); return; }
+  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads); if (state.selected || state.statusThread) renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
   const focused = document.activeElement?.dataset.thread;
   const focusAction = document.activeElement?.dataset.action;
@@ -730,7 +741,7 @@ function renderList() {
   const focusArea = document.activeElement?.closest("#sessions") ? $("sessions") : $("welcome");
   // Rebuilding the board can clamp the scrollers while their content is empty.
   // Capture the current position on every render, including background updates.
-  const scrollPositions = [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft}));
+  const scrollPositions = state.sidebarCards ? [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft})) : [];
   $("sessions").replaceChildren(); $("overview").replaceChildren();
   const agentTree = agentThreadTree(threads);
   const priorSidebar = state.sidebarCards || new Map();
@@ -780,7 +791,7 @@ function renderList() {
     const target = candidates.find(el => el.closest("[data-group]")?.dataset.group === focusGroup) || candidates[0];
     target?.focus({preventScroll: true});
   }
-  renderStatus();
+  if (state.selected || state.statusThread) renderStatus();
   if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads);
   globalThis.threadHover?.refresh();
 }
@@ -1066,6 +1077,7 @@ async function bridgeHistoryWindow(id, thread, target, options) {
   return thread;
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
+  state.initializeConversationView?.();
   const activitySource = state.paneMode || globalThis.agentCoordPanes?.active ? "programmatic" : state.activity?.source();
   const previousTab = state.threadTabs?.selected;
   state.projectScratchpad?.hideTab();
@@ -1123,9 +1135,11 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   $("conversation").hidden = false;
   state.agentTreeController?.bind({preservePanel: !!tabId && tabId === previousTab, dock});
   if (typeof layoutContext === "function") layoutContext();
-  $("requests").replaceChildren();
-  $("thread-context").hidden = true;
-  if (!cached.detail) renderTitle();
+  if (!cached.detail) {
+    $("requests").replaceChildren();
+    $("thread-context").hidden = true;
+    renderTitle();
+  }
   $("page-location").textContent = dock ? "Dispatcher" : "Thread";
   delete $("requests").dataset.signature;
   if (cached.detail) {
@@ -1607,6 +1621,7 @@ async function saveSessionPermissions(mode, {id = state.selected, client = state
   if (!localDraft) await refreshList();
 }
 function renderStatus() {
+  state.statusThread = state.selected;
   globalThis.OpenUIThread?.availability(state.selected, !state.detail?.work_thread?.browser_session ||
     state.detail.work_thread.attention === "archived" || state.closing?.has(state.selected));
   if (!state.config?.conversationOpen || !state.detail?.work_thread || state.detail.legacyDetailRequired && !state.detail.sidecars)
@@ -3513,6 +3528,7 @@ async function changeSessionModel() {
 $("model-picker").onchange = () => action(changeSessionModel);
 $("model-picker").onfocus = () => loadSessionModels({refresh: true});
 async function newSession() {
+  state.initializeConversationView?.();
   state.mobileChat?.close();
   if (!state.config || state.choosingSessionFolder) return;
   let body = state.newSessionDraft?.session;
@@ -3817,11 +3833,12 @@ $("open-settings").onclick = event => {
   event.preventDefault();
   if (window.agentCoordDesktop?.openSettings) { window.agentCoordDesktop.openSettings().catch(showError); return; }
   setNavigation(false);
-  if (!$("settings-frame").getAttribute("src")) $("settings-frame").src = "/settings?embedded=1";
+  const frame = workspaceDialogFrame(document, "settings-frame");
+  if (!frame.getAttribute("src")) frame.src = "/settings?embedded=1";
   $("settings-dialog").showModal();
 };
 window.addEventListener("message", event => {
-  if (event.origin === location.origin && event.source === $("settings-frame").contentWindow && event.data?.type === "ribbon-field-close-settings") $("settings-dialog").close();
+  if (event.origin === location.origin && event.source && event.source === $("settings-frame")?.contentWindow && event.data?.type === "ribbon-field-close-settings") $("settings-dialog").close();
 });
 $("settings-dialog").addEventListener("close", () => {
   $("settings-frame").removeAttribute("src");
@@ -4806,12 +4823,15 @@ async function boot() {
   window.addEventListener("languagechange", refreshTimeFormats);
   window.addEventListener("focus", refreshTimeFormats);
   const historyNavigation = new agentCoordNavigation.HistoryNavigation(window);
-  state.permissionMenu = new PermissionMenu({document, view: window});
-  state.resizeComposer = setupComposerSizing($("message"));
-  state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
-  state.responseActions = new ResponseActions({timeline: $("timeline"), input: $("message"), composer: $("composer"),
-    canDiscuss: () => !!state.selected && !$("conversation").hidden && !$("composer").hidden && !$("message").disabled,
-    onHold: () => state.timelineScroll.hold(), onError: showError});
+  state.initializeConversationView = () => {
+    state.permissionMenu = new PermissionMenu({document, view: window});
+    state.resizeComposer = setupComposerSizing($("message"));
+    state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
+    state.responseActions = new ResponseActions({timeline: $("timeline"), input: $("message"), composer: $("composer"),
+      canDiscuss: () => !!state.selected && !$("conversation").hidden && !$("composer").hidden && !$("message").disabled,
+      onHold: () => state.timelineScroll.hold(), onError: showError});
+    state.initializeConversationView = null;
+  };
   if (!state.paneMode) {
     let storage; try { storage = localStorage; } catch { /* Optional preference. */ }
     state.dispatchDock = new DispatchUI.Dock({document, view: window, storage,
@@ -4888,7 +4908,10 @@ async function boot() {
   state.activity = globalThis.ActivityCollector?.bind({window, document, state, api});
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
     supportsRecurrence: state.config.recurringSchedules === true,
-    onChange: () => renderList(),
+    onChange: () => {
+      if ($("view").value === "later" && state.inventoryOpen) renderList();
+      else if (state.selected) state.schedules.renderThread($("thread-schedules"), state.selected);
+    },
     getThread: id => state.sessions.find(thread => thread.thread_id === id) ||
       (state.detail?.work_thread?.thread_id === id ? state.detail.work_thread : null),
     getDraft: () => {
@@ -5002,7 +5025,7 @@ async function boot() {
   if (projectQuery.get("new_project") === "1") state.folders.reset();
   else await state.folders.restore(state.config.workspaceRoot).catch(showError);
   const initialDirectory = projectQuery.get("directory");
-  if (initialDirectory) await state.folders.open(initialDirectory).catch(showError);
+  if (initialDirectory && state.folders.selected?.cwd !== initialDirectory) await state.folders.open(initialDirectory).catch(showError);
   if (state.config.remote) {
     const shared = await api("desktop-projects").catch(error => { showError(error); return null; });
     if (shared?.projects?.length) await state.folders.replace(shared.projects, shared.active).catch(showError);
@@ -5017,7 +5040,17 @@ async function boot() {
   state.folderPicker = new FolderPicker({document, folders: state.folders, api, desktop, remote: state.config.remote,
     onError: showError, onOpened: switchProject});
   state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError});
-  savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
+  // Restoring the selected view needs its definitions before inventory can choose
+  // the right history filter. Reuse those exact reads for the first inventory.
+  let initialDefinitions = {};
+  const definitionRevision = listRequest;
+  const viewApi = (path, body, options) => {
+    const result = api(path, body, options);
+    if (initialDefinitions && body === undefined && (path === "views" || path === "organization"))
+      initialDefinitions[path] = result;
+    return result;
+  };
+  savedViews = new SavedViews({document, api: viewApi, storage: windowStorage, preferences,
     getLayout: () => state.overviewLayout.mode,
     onRefresh: refreshList,
     notify: (...args) => state.threadActions.notify(...args),
@@ -5044,7 +5077,6 @@ async function boot() {
       return {get value() { return state.drafts.get(id) || ""; }, set value(text) { state.drafts.set(id, text); },
         focus() { action(() => select(id)); }};
     }});
-  state.asks.refresh().catch(showError);
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";
   sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;
@@ -5108,9 +5140,11 @@ async function boot() {
     }
   });
   const inventoryProject = state.projectCwd;
-  const inventoryReady = refreshList({priority: initialThread ? "low" : "auto"}).then(() => {
+  const inventoryReady = refreshList({priority: initialThread ? "low" : "auto",
+    initialDefinitions: listRequest === definitionRevision ? initialDefinitions : null}).then(() => {
     if (state.projectCwd === inventoryProject) savedViews.restoreScroll();
   });
+  initialDefinitions = null;
   // A direct conversation has its own detail and history routes.
   if (initialThread && initialThread !== "new-session" && !initialNavigation && !initialDispatcher) {
     inventoryReady.catch(showError);
