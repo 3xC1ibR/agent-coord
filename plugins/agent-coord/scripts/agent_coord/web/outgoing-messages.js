@@ -3,21 +3,39 @@
 // POST in submission order within a conversation. Different conversations
 // can make independent progress, including while the originating tab is closed.
 class ConversationSubmissionQueue {
-  constructor() { this.tails = new Map(); this.active = new Map(); }
+  constructor() { this.lanes = new Map(); }
+
+  reserve(id, requestId) {
+    let lane = this.lanes.get(id);
+    if (!lane) this.lanes.set(id, lane = {entries: new Map(), tail: Promise.resolve()});
+    let entry = lane.entries.get(requestId);
+    if (entry) return entry;
+    entry = {before: lane.tail};
+    const resolved = new Promise(resolve => { entry.resolve = resolve; });
+    lane.tail = entry.before.then(() => resolved);
+    lane.entries.set(requestId, entry);
+    return entry;
+  }
+
+  confirm(id, requestId) {
+    const lane = this.lanes.get(id), entry = lane?.entries.get(requestId);
+    if (!entry) return false;
+    lane.entries.delete(requestId);
+    entry.resolve();
+    if (!lane.entries.size) this.lanes.delete(id);
+    return true;
+  }
 
   submit(id, requestId, deliver) {
-    const pending = this.active.get(requestId);
-    if (pending) return pending;
-    const previous = this.tails.get(id) || Promise.resolve();
-    const delivery = previous.catch(() => {}).then(deliver);
-    this.active.set(requestId, delivery);
-    this.tails.set(id, delivery);
-    const release = () => {
-      this.active.delete(requestId);
-      if (this.tails.get(id) === delivery) this.tails.delete(id);
-    };
-    delivery.then(release, release);
-    return delivery;
+    const entry = this.reserve(id, requestId);
+    if (entry.attempt) return entry.attempt;
+    const attempt = entry.before.then(deliver);
+    entry.attempt = attempt;
+    attempt.then(() => this.confirm(id, requestId), error => {
+      entry.attempt = null;
+      if (!error?.submissionUnconfirmed) this.confirm(id, requestId);
+    });
+    return attempt;
   }
 }
 
@@ -34,14 +52,23 @@ function hydrateConversationControls(id, detail) {
 }
 
 // Preserve local edit order even when a large attachment waits for the first paint.
-function writeComposerRecord(id, write) {
+function writeComposerRecord(id, write, field = "draft") {
   const writes = state.composerWrites ||= new Map();
   const previous = writes.get(id) || Promise.resolve();
   const current = previous.catch(() => {}).then(write);
   writes.set(id, current);
   const release = () => { if (writes.get(id) === current) writes.delete(id); };
-  current.then(release, release);
+  const failures = state.composerWriteFailures ||= new Map();
+  const key = JSON.stringify([id, field]);
+  current.then(() => { failures.delete(key); release(); }, error => { failures.set(key, error); release(); });
   return current;
+}
+
+async function drainComposerWrites() {
+  while (state.composerWrites?.size) await Promise.all(state.composerWrites.values());
+  const failed = state.composerWriteFailures?.values().next().value;
+  if (failed) throw failed;
+  return true;
 }
 
 function afterComposerPaint() {
@@ -57,7 +84,7 @@ function persistComposer(id = composerDraftId(), fields = "text") {
   versions.set(id, (versions.get(id) || 0) + 1);
   const patch = fields === "images" ? {images: state.attachments.snapshot(id)} :
     {text: $("message").value, mentions: state.mentions?.snapshot(id, $("message").value) || []};
-  writeComposerRecord(id, () => state.durableDrafts.write(id, patch)).catch(showError);
+  writeComposerRecord(id, () => state.durableDrafts.write(id, patch), fields).catch(showError);
 }
 
 function updateOutgoing(id) {
@@ -70,29 +97,53 @@ function updateOutgoing(id) {
   if (pane?.timeline) state.outgoing.update(document, pane.timeline, id, detail);
 }
 
+function discoverComposerSubmissions(id) {
+  if (!state.durableDrafts) return Promise.resolve();
+  const discoveries = state.outboxDiscoveries ||= new Map();
+  if (discoveries.has(id)) return discoveries.get(id);
+  const discovery = state.durableDrafts.pending(id).then(pending => {
+    for (const row of pending) {
+      const existing = state.outgoing.list(id).find(echo => echo.submissionId === row.requestId);
+      if (existing) {
+        if (existing.acceptance || existing.transferReceipt) state.durableDrafts.acknowledge(id, row.requestId).catch(showError);
+        continue;
+      }
+      const echo = state.outgoing.add(id, {text: row.text, images: row.images.length, submissionId: row.requestId});
+      echo.status = "uncertain";
+      state.submissionQueue.reserve(id, row.requestId);
+      if (state.config.ordinarySubmissionReceipts === 1) {
+        echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
+        echo.retry();
+      }
+    }
+    updateOutgoing(id);
+  }).catch(error => { discoveries.delete(id); throw error; });
+  discoveries.set(id, discovery);
+  return discovery;
+}
+
 async function restoreLocalDraft(id) {
   if (!state.durableDrafts) return;
   const version = state.draftVersions?.get(id);
+  const discovery = discoverComposerSubmissions(id);
   await state.composerWrites?.get(id);
-  const [draft, pending] = await Promise.all([state.durableDrafts.read(id), state.durableDrafts.pending(id)]);
-  if (draft && id === composerDraftId() && state.draftVersions?.get(id) === version) {
+  const [draft] = await Promise.all([state.durableDrafts.read(id), discovery]);
+  if (draft && id === composerDraftId() && !state.transferLocks?.has(id) && state.draftVersions?.get(id) === version) {
     $("message").value = draft.text;
     state.drafts.set(state.selected, draft.text);
     state.attachments.drafts.set(id, draft.images);
+    (state.attachmentSnapshots ||= new Map()).set(id, draft.images);
     state.mentions?.restore(id, draft.text, draft.mentions);
     renderStatus();
   }
-  for (const row of pending) {
-    if (state.outgoing.list(id).some(echo => echo.submissionId === row.requestId)) continue;
-    const echo = state.outgoing.add(id, {text: row.text, images: row.images.length, submissionId: row.requestId});
-    echo.status = "uncertain";
-    if (state.config.ordinarySubmissionReceipts === 1) {
-      echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
-      echo.retry();
-    }
-  }
-  updateOutgoing(id);
   return id === composerDraftId();
+}
+
+function submissionOutcomeUnknown(error) {
+  return !error.status || error.status >= 500 || error.code === "coordinator_offline" ||
+    error.code === "submission_outcome_unknown" || error.status === 400 &&
+    (error.message.startsWith("Your submission may have been received, but its receipt could not be saved.") ||
+     error.message.startsWith("This submission has an unconfirmed outcome."));
 }
 
 async function deliverComposerSubmission(id, row, echo, staged) {
@@ -100,6 +151,10 @@ async function deliverComposerSubmission(id, row, echo, staged) {
     let posted = false, accepted = false;
     try {
       await staged;
+      if (echo.acceptance || echo.transferReceipt) {
+        await state.durableDrafts?.acknowledge(id, row.requestId);
+        return {acceptedMessage: echo.acceptance, transferSubmission: echo.transferReceipt};
+      }
       posted = true;
       const result = await api(row.path, row.body);
       const transfer = result.transferSubmission;
@@ -120,7 +175,8 @@ async function deliverComposerSubmission(id, row, echo, staged) {
         return {acceptedMessage: echo.acceptance, transferSubmission: echo.transferReceipt};
       }
       if (accepted) throw error;
-      if (posted && (!error.status || error.status >= 500 || error.code === "coordinator_offline")) {
+      if (posted && submissionOutcomeUnknown(error)) {
+        error.submissionUnconfirmed = true;
         echo.status = "uncertain";
         if (state.config?.ordinarySubmissionReceipts === 1)
           echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
@@ -145,6 +201,7 @@ async function deliverComposerSubmission(id, row, echo, staged) {
 }
 
 function submitComposerMessage({id, requestId = crypto.randomUUID(), text, images, mentions, body, path, detail, clear, onStage}) {
+  const discovery = discoverComposerSubmissions(id);
   const versions = state.draftVersions ||= new Map();
   versions.set(id, (versions.get(id) || 0) + 1);
   body.requestId = requestId;
@@ -157,11 +214,17 @@ function submitComposerMessage({id, requestId = crypto.randomUUID(), text, image
   const staged = writeComposerRecord(id, async () => {
     if (large) await firstPaint;
     return state.durableDrafts?.stage(id, requestId, row);
-  });
+  }, requestId);
   onStage?.(staged);
   staged?.catch(() => {}); // The queue observes the failure when this write reaches its turn.
   state.clearingSubmission = id;
   try { clear(); } finally { state.clearingSubmission = null; }
   updateOutgoing(id);
-  return deliverComposerSubmission(id, row, echo, staged);
+  const deliver = () => discoverComposerSubmissions(id).then(() => deliverComposerSubmission(id, row, echo, staged));
+  return discovery.then(() => deliverComposerSubmission(id, row, echo, staged), error => {
+    echo.status = "uncertain";
+    echo.retry = () => deliver().catch(showError);
+    updateOutgoing(id);
+    throw error;
+  });
 }

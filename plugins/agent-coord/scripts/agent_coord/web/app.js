@@ -998,6 +998,7 @@ function conversationEntry(id) {
     retired.viewport?.dispose();
     globalThis.OpenUIThread?.release?.(key);
     cache.delete(key);
+    if (!state.submissionQueue?.lanes.has(key)) state.outboxDiscoveries?.delete(key);
     state.outgoing?.release?.(key);
   }
   return entry;
@@ -1998,6 +1999,7 @@ class OutgoingMessages {
       seen.add(record.requestId);
       const entry = this.list(id).find(row => row.submissionId === record.requestId) ||
         this.add(id, {text: record.message, images: record.imageCount, submissionId: record.requestId, preserveFailures: true});
+      this.onReceipt?.(id, record.requestId);
       entry.acceptance = record;
       entry.needsHistoryBaseline = false;
       entry.status = "sent";
@@ -2027,6 +2029,7 @@ class OutgoingMessages {
         else this.pendingTransferCounts.delete(id);
       }
       states.set(record.requestId, record.state);
+      this.onReceipt?.(id, record.requestId);
       let entry = this.list(id).find(row => row.submissionId === record.requestId);
       // A new or reconnected window uses ordinary history for past deliveries.
       if (!entry && record.state === "committed") continue;
@@ -4129,6 +4132,9 @@ layoutContext();
 if (typeof AgentTree !== "undefined") setupAgentTree();
 state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api, compactStatus: true});
 state.outgoing = new OutgoingMessages({itemText});
+state.outgoing.onReceipt = (id, requestId) => {
+  if (state.submissionQueue?.confirm(id, requestId)) state.durableDrafts?.acknowledge(id, requestId).catch(showError);
+};
 if (!state.paneMode) {
   state.projectScratchpad = new ProjectScratchpad({document, view: window, api});
   window.agentCoordProjectScratchpad = state.projectScratchpad;
@@ -4869,6 +4875,7 @@ async function boot() {
     state.durableDrafts = window.agentCoordComposerDrafts = ComposerDrafts.create({
       scope: window.agentCoordDesktop?.windowId || "paired-browser"});
   }
+  window.agentCoordDrainComposerWrites = drainComposerWrites;
   window.agentCoordStreamConnected = () => state.streamHealthy;
   window.agentCoordReconnect = async config => {
     const fresh = config || await api("config");

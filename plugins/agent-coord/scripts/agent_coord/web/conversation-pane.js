@@ -50,6 +50,7 @@ class ConversationPane {
     host.addEventListener("pointerdown", () => { if (shell.selected !== this.id) shell.focus(this.id, false); });
     const draft = record.initialDraft || shell.getDraft(this.id);
     this.restoreDraft(draft);
+    discoverComposerSubmissions(this.id).catch(showError);
     if (workspace.durableDrafts && !draft?.text && !draft?.images?.length) {
       const revision = this.draftRevision || 0;
       workspace.durableDrafts.read(this.id).then(stored => {
@@ -74,7 +75,7 @@ class ConversationPane {
         this.draftRevision = (this.draftRevision || 0) + 1;
         const images = this.images.snapshot();
         if (this.workspace.durableDrafts && !this.images.pending() && state.clearingSubmission !== this.id)
-          writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {images})).catch(showError);
+          writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {images}), "images").catch(showError);
         if (!this.disposed) { this.showImages(); this.shell.onDraft?.(this.id, this.exportDraft()); }
       }});
     this.images.drafts = this.workspace.attachments.drafts;
@@ -178,7 +179,7 @@ class ConversationPane {
     const draft = this.exportDraft();
     this.shell.onDraft?.(this.id, draft);
     if (this.workspace.durableDrafts && state.clearingSubmission !== this.id)
-      writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {text: draft.text, mentions: draft.mentions})).catch(showError);
+      writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {text: draft.text, mentions: draft.mentions}), "text").catch(showError);
   }
   exportDraft() {
     return {text: this.input.value, images: this.workspace.attachments.items(this.id),
