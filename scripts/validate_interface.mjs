@@ -33,11 +33,14 @@ const {values: options} = parseArgs({options: {
   sends: {type: "string", default: "20"},
   "idle-seconds": {type: "string", default: "60"},
   "boot-trace": {type: "boolean"},
+  "startup-profile": {type: "boolean"},
   check: {type: "boolean"},
 }});
 assert(options.output && ["all", "capture", "interactions", "performance"].includes(options.mode),
   "Specify --output and a valid --mode (all, capture, interactions, performance).");
 assert(!options.check || !options.checks, "The acceptance gate requires all scenarios for its selected mode.");
+assert(!options["startup-profile"] || options.engine === "chromium" && options.mode === "performance" &&
+  options["boot-trace"] && !options.check, "Startup sampling requires a separate Chromium performance run with --boot-trace.");
 const output = resolve(options.output);
 const configuration = JSON.parse(await readFile(join(root, "tests/interface_capture.json"), "utf8"));
 const require = createRequire(join(root, "demo/package.json"));
@@ -1236,12 +1239,20 @@ async function traceBoot(page, fixture, thread = null) {
   const browser = page.context().browser();
   const cdp = await browser.newBrowserCDPSession();
   const data = [];
+  const samplingIntervalUs = 400;
+  let sampler, profile;
   cdp.on("Tracing.dataCollected", event => data.push(...event.value));
   await cdp.send("Tracing.start", {
     categories: "devtools.timeline,blink.user_timing,toplevel,v8,disabled-by-default-devtools.timeline",
     transferMode: "ReportEvents",
   });
   try {
+    if (options["startup-profile"]) {
+      sampler = await page.context().newCDPSession(page);
+      await sampler.send("Profiler.enable");
+      await sampler.send("Profiler.setSamplingInterval", {interval: samplingIntervalUs});
+      await sampler.send("Profiler.start");
+    }
     await page.addInitScript(({diagnostic, title, latest}) => {
       const observer = new MutationObserver(() => {
         if (title) {
@@ -1274,11 +1285,15 @@ async function traceBoot(page, fixture, thread = null) {
     await browserOpen(page, fixture, fixture.workspace, thread ? {thread} : undefined);
     const mark = options["boot-trace"] ? "ribbon-field-fixture-rendered" : "ribbon-field-fixture-ready";
     await page.waitForFunction(mark => performance.getEntriesByName(mark).length === 1, mark);
+    if (sampler) ({profile} = await sampler.send("Profiler.stop"));
   } finally {
-    const complete = new Promise(resolve => cdp.once("Tracing.tracingComplete", resolve));
-    await cdp.send("Tracing.end");
-    await complete;
-    await cdp.detach();
+    try { await sampler?.detach(); }
+    finally {
+      const complete = new Promise(resolve => cdp.once("Tracing.tracingComplete", resolve));
+      await cdp.send("Tracing.end");
+      await complete;
+      await cdp.detach();
+    }
   }
   const ready = data.find(event => event.name === "ribbon-field-fixture-ready");
   assert(ready, "Chromium did not record the DOM readiness mark.");
@@ -1313,8 +1328,12 @@ async function traceBoot(page, fixture, thread = null) {
   };
   if (!options["boot-trace"]) return timings;
 
-  const traceFile = `boot-${thread ? "conversation" : "inventory"}.json.gz`;
-  await writeFile(join(output, traceFile), gzipSync(JSON.stringify({traceEvents: data})));
+  const name = thread ? "conversation" : "inventory";
+  const traceFile = `boot-${name}.json.gz`;
+  const evidenceWrites = [writeFile(join(output, traceFile), gzipSync(JSON.stringify({traceEvents: data})))];
+  const samplingFile = profile ? `boot-${name}.cpuprofile` : null;
+  if (samplingFile) evidenceWrites.push(writeFile(join(output, samplingFile), JSON.stringify(profile)));
+  await Promise.all(evidenceWrites);
   const rendered = events.find(event => event.name === "ribbon-field-fixture-rendered");
   const deadline = rendered?.ts || stop;
   const frames = data.flatMap(event => {
@@ -1335,6 +1354,9 @@ async function traceBoot(page, fixture, thread = null) {
   const layout = work(/^(Layout|UpdateLayoutTree|LocalFrameView::performLayout|RecalculateStyles)$/);
   timings.diagnostic = {
     traceFile,
+    samplingFile,
+    samplingIntervalUs: profile ? samplingIntervalUs : null,
+    traceClockUs: {firstScript: start, ready: stop, renderingOpportunity: deadline},
     rendererWorkToRenderingOpportunityMs: duration(tasks, deadline),
     rendererCpuToRenderingOpportunityMs: cpuDuration(tasks, rendered),
     wallToRenderingOpportunityMs: (deadline - start) / 1000,
