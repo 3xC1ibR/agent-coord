@@ -40,10 +40,14 @@ def listener(test, server):
     return server
 
 
-def request(address, path, *, body=None, headers=None):
+def request(address, path, *, body=None, headers=None, timings=None):
     with closing(HTTPConnection(runtime_edge.authority(address), timeout=5)) as client:
         client.request("POST" if body is not None else "GET", path, body, headers or {})
         with client.getresponse() as response:
+            if timings is not None:
+                component = response.getheader("Server-Timing", "")
+                if component.startswith("submission;dur="):
+                    timings["coordinator_ms"] = float(component.removeprefix("submission;dur="))
             return response.status, response.read()
 
 
@@ -280,7 +284,7 @@ class CoordinatorEdgeTests(unittest.TestCase):
         edge = runtime_edge.read_address(runtime.runtime_directory(fixture.database))
         cutovers = []
         components = []
-        sent_messages, send_latency, offered = {}, [], []
+        sent_messages, send_samples, offered = {}, [], []
         rotation = tuple(streams.items())
         for build in builds:
             resources = fixture.root / f"Build {build}/Resources"
@@ -295,12 +299,14 @@ class CoordinatorEdgeTests(unittest.TestCase):
 
             def crossing(thread, path, message=None):
                 began = time.monotonic()
+                timings = {"started_at": began}
                 body = ({"message": message, "requestId": message, "expectedTurnId": original[thread][1]}
                         if message else None)
                 code, response = request(address, "/" + path + ("/messages" if body else ""),
                     body=json.dumps(body).encode() if body else None,
-                    headers={"Content-Type": "application/json", runtime_edge.TOKEN_HEADER: token} if body else None)
-                return code, response, body, thread, path, (time.monotonic() - began) * 1000
+                    headers={"Content-Type": "application/json", runtime_edge.TOKEN_HEADER: token} if body else None,
+                    timings=timings)
+                return code, response, body, thread, path, {**timings, "total_ms": (time.monotonic() - began) * 1000}
 
             def schedule(pool):
                 samples = []
@@ -337,18 +343,19 @@ class CoordinatorEdgeTests(unittest.TestCase):
             self.assertGreaterEqual(offers["send"], 5)
             self.assertEqual(offers["open"], math.ceil(offers["send"] / 2))
             offered.append(dict(offers))
-            for _, response, body, thread, path, milliseconds in samples:
+            state = health["update"]
+            for _, response, body, thread, path, timings in samples:
                 value = json.loads(response)
                 if body:
                     self.assertEqual(value["acceptedMessage"]["turnId"], original[thread][1])
                     sent_messages[body["requestId"]] = (thread, path, body)
-                    send_latency.append(milliseconds)
+                    send_samples.append({**timings, "switch": build,
+                        "relative_to_fence_ms": (timings["started_at"] - state["edge_admission_closed_at"]) * 1000})
                 else:
                     self.assertEqual(value["activeTurn"], original[thread][1])
             self.assertEqual(health["edge_instance"], edge["instance"])
             self.assertEqual(health["update"]["phase"], "committed")
             cutovers.append(health["edge_handover_ms"])
-            state = health["update"]
             timestamps = [state[key] for key in ("edge_admission_closed_at", "edge_admission_drained_at",
                 "edge_projection_saved_at", "edge_source_exited_at", "edge_snapshot_finished_at",
                 "edge_candidate_ready_at")]
@@ -386,12 +393,13 @@ class CoordinatorEdgeTests(unittest.TestCase):
                                      for message, (thread, _, _) in sent_messages.items()])
         for cutover in cutovers:
             self.assertGreater(cutover, 0)
-        send_latency.sort()
-        send_p99 = send_latency[math.ceil(.99 * len(send_latency)) - 1]
+        send_samples.sort(key=lambda sample: sample["total_ms"])
+        send_p99 = send_samples[math.ceil(.99 * len(send_samples)) - 1]["total_ms"]
         if report := os.environ.get("RIBBON_EDGE_REPORT"):
             Path(report).write_text(json.dumps({"cutover_ms": cutovers, "accepted": len(sent_messages),
                 "provider_deliveries": len(deliveries), "http_failures": 0, "streams": len(streams),
-                "send_p99_ms": send_p99, "offered": offered, "phases": components}, indent=2) + "\n")
+                "send_p99_ms": send_p99, "slowest_sends": send_samples[-5:],
+                "offered": offered, "phases": components}, indent=2) + "\n")
         if os.environ.get("RIBBON_REQUIRE_EDGE_BUDGET") == "1":
             self.assertLess(max(cutovers), 250, f"Coordinator handover milliseconds: {cutovers}")
             self.assertLess(send_p99, 150, "Send latency includes waiting for coordinator admission")
