@@ -112,6 +112,8 @@ jobs:
         run: |
           python3 scripts/build_web.py
           python3 scripts/check_design_tokens.py
+      - name: Verify durable composer drafts
+        run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
       - name: Verify interface states and interaction latency
         run: |
           node scripts/validate_interface.mjs --source "$PWD" \
@@ -179,6 +181,8 @@ jobs:
         run: |
           npm ci --prefix demo --ignore-scripts --omit=dev
           demo/node_modules/.bin/playwright install chromium
+      - name: Verify durable composer drafts
+        run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
       - name: Measure packaged conversations under streaming load
         run: |
           python3 scripts/measure_packaged_conversation_workload.py \
