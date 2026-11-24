@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
 from .conversation_open import open_route_thread
-from .history_response import read_snapshot_json
+from .history_response import OpeningAdmissionError, read_snapshot_json
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
@@ -579,6 +579,8 @@ def _handler(
                             self._browser_get(parsed)
                     else:
                         self._browser_get(parsed)
+                except OpeningAdmissionError as exc:
+                    self._admission_unavailable(str(exc))
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 except sqlite3.OperationalError as exc:
@@ -649,6 +651,17 @@ def _handler(
 
         def _json(self, status: HTTPStatus, payload: Any) -> None:
             self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode())
+
+        def _admission_unavailable(self, message):
+            generation = getattr(self.server, "edge_fenced_generation", None)
+            if generation:
+                # The edge retries only when this generation rejected admission.
+                from .runtime_edge import FENCED_HEADER
+                body = json.dumps({"error": "Coordinator admission is switching."}).encode()
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json; charset=utf-8", body,
+                           extra_headers={FENCED_HEADER: generation})
+            else:
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": message})
 
         def _database_busy(self, error: sqlite3.OperationalError) -> None:
             if "locked" not in str(error).lower() and "busy" not in str(error).lower():
@@ -1003,17 +1016,8 @@ def _handler(
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
-                    generation = getattr(self.server, "edge_fenced_generation", None)
-                    if generation:
-                        # The stable edge may retry only this response, which
-                        # proves the request never entered mutation admission.
-                        from .runtime_edge import FENCED_HEADER
-                        data = json.dumps({"error": "Coordinator admission is switching."}).encode()
-                        self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json; charset=utf-8",
-                                   data, extra_headers={FENCED_HEADER: generation})
-                    else:
-                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
-                            "Runtime maintenance is pausing new work. Try again shortly.")})
+                    self._admission_unavailable(browser_sessions.admission.message(
+                        "Runtime maintenance is pausing new work. Try again shortly."))
                     return
                 try:
                     self._admitted_POST()

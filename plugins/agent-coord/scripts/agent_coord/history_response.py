@@ -1,13 +1,28 @@
 """Serialize saved opening responses without decoding immutable item bodies."""
+from contextlib import contextmanager
+
+from .codex_app_server import BrowserBusyError
 from .transcript_store import TranscriptStore, encode
 
 
-def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
-    """Run serialized opening under the same admission gate as normal reads."""
+class OpeningAdmissionError(BrowserBusyError):
+    """Runtime admission rejected the opening before any work began."""
+
+
+@contextmanager
+def opening_admission(sessions):
+    """Keep every opening projection inside runtime admission."""
     with sessions.admission.enter() as allowed:
         if not allowed:
-            from .codex_app_server import BrowserBusyError
-            raise BrowserBusyError(sessions.admission.message("Runtime maintenance is pausing new work. Try again shortly."))
+            raise OpeningAdmissionError(sessions.admission.message(
+                "Runtime maintenance is pausing new work. Try again shortly."))
+        yield
+
+
+def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
+    """Read a serialized opening with the same scope as indexed pagination."""
+    with opening_admission(sessions):
+        sessions._authorize_history(thread_id)
         return _read_snapshot_json(sessions, thread_id, recent=recent, controls=controls)
 
 

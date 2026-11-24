@@ -8,6 +8,7 @@ import uuid
 from collections import OrderedDict
 
 from .app_control import AppControl
+from .history_response import opening_admission
 from .history_window import RECENT_TURNS, recent_view
 from .message_timeline import message_timeline
 from .store import CoordinationError
@@ -118,8 +119,12 @@ class ConversationOpen:
     def read(self, thread_id, *, detail_only=False):
         # Serialize observations for the same conversation so an older HTTP
         # request cannot assign a newer revision after a racing observation.
-        with self.lanes[hash(thread_id) % len(self.lanes)], self.store.database_operation(
-                "conversation.open", priority="foreground"), self.store.reading():
+        with (
+            opening_admission(self.sessions),
+            self.lanes[hash(thread_id) % len(self.lanes)],
+            self.store.database_operation("conversation.open", priority="foreground"),
+            self.store.reading(),
+        ):
             return self._read(thread_id, detail_only=detail_only)
 
     def _read(self, thread_id, *, detail_only, synchronized=False):
