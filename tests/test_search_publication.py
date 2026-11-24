@@ -2,11 +2,12 @@
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord.search_publication import SearchPublicationWorker, install_change_capture
+from agent_coord.search_publication import SearchPublicationWorker, install_change_capture, prepare_search_publication
 from agent_coord.search_store import SearchStore
 from agent_coord.store import CoordinationStore
 from agent_coord.transcript_store import TranscriptStore, ensure_schema
@@ -70,3 +71,42 @@ class SearchPublicationTests(unittest.TestCase):
         self.worker.process_batch()
         with self.index.connection() as db:
             self.assertEqual(db.execute("SELECT title FROM search_threads").fetchone()[0], "revision 3")
+
+
+    def test_activation_replays_changes_made_after_verified_baseline(self):
+        stopped = threading.Event()
+        with patch.object(self.index, "matches_record", wraps=self.index.matches_record) as verify:
+            self.assertTrue(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: True))
+            self.assertEqual(verify.call_count, 1)
+        self.assertTrue(self.index.active)
+        self.store.threads.update("example", title="After activation")
+        self.worker.process_batch()
+        with self.index.connection() as db:
+            self.assertEqual(db.execute("SELECT title FROM search_threads").fetchone()[0], "after activation")
+
+    def test_interrupted_baseline_reuses_verified_threads_and_rechecks_changed_versions(self):
+        self.store.register(session_id="second", client="codex", cwd="/", name="Second")
+        stopped = threading.Event()
+        check = self.index.matches_record
+        def stop_after_one(db, record):
+            stopped.set()
+            return check(db, record)
+        with patch.object(self.index, "matches_record", side_effect=stop_after_one):
+            self.assertFalse(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: True))
+        self.assertFalse(self.index.active)
+        with self.index.connection() as db:
+            done = db.execute("SELECT thread_id FROM search_baseline_receipts").fetchone()[0]
+        stopped.clear()
+        self.assertFalse(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: False))
+        def change_during_verify(db, record):
+            self.assertNotEqual(record["thread_id"], done)
+            self.store.threads.update(record["thread_id"], title="Changed during verification")
+            return check(db, record)
+        with patch.object(self.index, "matches_record", side_effect=change_during_verify):
+            self.assertFalse(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: True))
+        self.assertFalse(self.index.active)
+        with patch.object(self.index, "matches_record", wraps=check) as verify:
+            self.assertTrue(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: True))
+            self.assertEqual(verify.call_count, 1)
+        with self.index.connection() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM search_threads WHERE title='changed during verification'").fetchone()[0], 1)
