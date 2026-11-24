@@ -1,74 +1,58 @@
-// Keep classic declarations visible to the native host while compiling the
-// complete workspace program and its stylesheet with esbuild.
-import {build, context} from "esbuild";
+// Compile the classic browser modules independently, then publish one ordered
+// program. In watch mode an edit recompiles only entries that use that file.
+import {build} from "esbuild";
 import {createHash} from "node:crypto";
-import {mkdir, readFile, rename, stat, writeFile} from "node:fs/promises";
+import {watch} from "node:fs";
+import {mkdir, readFile, rename, writeFile} from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
 const [web, output, ...options] = process.argv.slice(2);
 const development = options.includes("--development");
-const watch = options.includes("--watch");
-const manifest = path.join(web, "web-entry.js");
-const template = path.join(web, "index.html");
-const files = new Map();
-const emitted = new Map();
-let previousProgram;
+const manifest = "web-entry.js";
+const stylesheet = "web-entry.css";
+const template = "index.html";
+const inputs = new Map();
+const published = new Map();
+let order = [];
 let previousIndex;
 
-const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-function vlq(value) {
-  let remaining = (Math.abs(value) << 1) + Number(value < 0);
-  let encoded = "";
-  do {
-    const digit = remaining & 31;
-    remaining >>>= 5;
-    encoded += alphabet[digit | (remaining ? 32 : 0)];
-  } while (remaining);
-  return encoded;
+async function compile(name) {
+  const javascript = name.endsWith(".js");
+  // ESM input eliminates Node-only test exports while preserving classic global
+  // declarations. Identifiers are shared across entries and must keep their names.
+  const entry = javascript ? {stdin: {
+    contents: await readFile(path.join(web, name), "utf8") + "\nexport {};\n",
+    sourcefile: name, resolveDir: web, loader: "js",
+  }} : {entryPoints: [name]};
+  const result = await build({...entry, absWorkingDir: web, outfile: path.join(web, javascript ? "workspace.js" : "workspace.css"),
+    bundle: true, write: false, platform: "browser", format: "esm", treeShaking: false, metafile: true,
+    define: {module: "undefined", require: "undefined"}, target: ["safari15", "chrome105"],
+    minifySyntax: !development, minifyWhitespace: !development, sourcemap: development ? "external" : false,
+    logLevel: "warning"});
+  const code = result.outputFiles.find(file => !file.path.endsWith(".map")).text;
+  const map = development ? result.outputFiles.find(file => file.path.endsWith(".map")).text : null;
+  let lines = 0;
+  if (development && javascript) for (let i = code.indexOf("\n"); i !== -1; i = code.indexOf("\n", i + 1)) lines++;
+  return {code, map, lines, dependencies: new Set(Object.keys(result.metafile.inputs))};
 }
 
-async function sourceRecord(name) {
-  const filename = path.join(web, name);
-  const attributes = await stat(filename, {bigint: true});
-  const cached = files.get(name);
-  if (cached && cached.modified === attributes.mtimeNs && cached.size === attributes.size) return cached;
-  const contents = (await readFile(filename, "utf8")).trimEnd();
-  const record = {filename, modified: attributes.mtimeNs, size: attributes.size, contents,
-    lines: development ? contents.split("\n").length : 0};
-  files.set(name, record);
-  return record;
-}
-
-async function loadProgram() {
-  const entry = await readFile(manifest, "utf8");
-  const names = [...entry.matchAll(/^import "\.\/([\w-]+\.js)";$/gm)].map(match => match[1]);
-  const records = await Promise.all(names.map(sourceRecord));
-  if (previousProgram?.manifest === entry && records.every((record, i) => record === previousProgram.records[i]))
-    return previousProgram.input;
-  // Explicit ESM input removes Node-only test exports. Identifiers remain
-  // unmangled because the native shell calls individual classic declarations.
-  const parts = ['export {};\nimport "./web-entry.css";\n'];
-  const mappings = [";;"];
-  let lastLine = 0;
-  for (const [index, record] of records.entries()) {
-    parts.push(record.contents, "\n;\n");
+function program() {
+  const parts = [], sections = [];
+  let line = 0;
+  for (const name of order) {
+    const input = inputs.get(name);
+    parts.push(input.code, ";\n");
     if (development) {
-      // Each source line starts at column zero and maps to the next original
-      // line. Only the first line has a non-unit source delta.
-      mappings.push("A", vlq(Number(index > 0)), vlq(-lastLine), "A;", "AACA;".repeat(record.lines - 1), ";");
-      lastLine = record.lines - 1;
+      sections.push('{"offset":{"line":' + line + ',"column":0},"map":' + input.map + "}");
+      line += input.lines + 1;
     }
   }
   if (development) {
-    const map = {version: 3, sources: names, sourcesContent: records.map(row => row.contents),
-      names: [], mappings: mappings.join("")};
-    parts.push("//# sourceMappingURL=data:application/json;base64,", Buffer.from(JSON.stringify(map)).toString("base64"));
+    const map = '{"version":3,"sections":[' + sections.join(",") + "]}";
+    parts.push("//# sourceMappingURL=data:application/json;base64,", Buffer.from(map).toString("base64"), "\n");
   }
-  const input = {contents: parts.join(""), resolveDir: web, loader: "js",
-    watchFiles: [template, manifest, ...records.map(row => row.filename)]};
-  previousProgram = {manifest: entry, records, input};
-  return input;
+  return parts.join("");
 }
 
 async function replaceFile(name, contents) {
@@ -77,47 +61,80 @@ async function replaceFile(name, contents) {
   await rename(temporary, path.join(output, name));
 }
 
-async function publishAssets(result) {
-  if (result.errors.length) return;
-  await mkdir(output, {recursive: true});
-  let index = await readFile(template, "utf8");
-  for (const file of result.outputFiles) {
-    const extension = path.extname(file.path);
-    let asset = emitted.get(extension);
-    if (!asset || asset.hash !== file.hash) {
-      const digest = createHash("sha256").update(file.contents).digest("hex").slice(0, 20);
-      asset = {name: "app-" + digest + extension, hash: file.hash};
-      await replaceFile(asset.name, file.contents);
-      emitted.set(extension, asset);
-    }
-    index = index.replaceAll("/dist/app" + extension, "/dist/" + asset.name);
-  }
-  if (index !== previousIndex) {
-    // Readers can still finish loading the previous document during a rebuild.
-    await replaceFile("index.html", index);
-    previousIndex = index;
+async function publish(extension, contents) {
+  const digest = createHash("sha256").update(contents).digest("hex").slice(0, 20);
+  const asset = "app-" + digest + "." + extension;
+  if (published.get(extension) !== asset) {
+    await replaceFile(asset, contents);
+    published.set(extension, asset);
   }
 }
 
-const workspace = {
-  name: "workspace",
-  setup(builder) {
-    let started;
-    builder.onStart(() => { started = performance.now(); });
-    builder.onResolve({filter: /^workspace$/}, () => ({path: "workspace", namespace: "workspace"}));
-    builder.onLoad({filter: /.*/, namespace: "workspace"}, loadProgram);
-    builder.onEnd(async result => {
-      await publishAssets(result);
-      if (process.env.RIBBON_BUILD_TIMING)
-        process.stdout.write(JSON.stringify({buildMilliseconds: performance.now() - started}) + "\n");
+async function rebuild(changed) {
+  const started = performance.now();
+  const readManifest = !order.length || changed.has(manifest);
+  if (readManifest) {
+    const declarations = await readFile(path.join(web, manifest), "utf8");
+    const imports = [...declarations.matchAll(/^import "\.\/([\w-]+\.js)";$/gm)].map(match => match[1]);
+    if (!imports.length || new Set(imports).size !== imports.length) throw Error("Invalid workspace script manifest.");
+    order = imports;
+  }
+  const entries = [...order, stylesheet];
+  const affected = entries.filter(name => !inputs.has(name) || changed.has(name) ||
+    [...changed].some(file => inputs.get(name).dependencies.has(file)));
+  const compiled = await Promise.all(affected.map(async name => [name, await compile(name)]));
+  for (const [name, result] of compiled) inputs.set(name, result);
+  for (const name of inputs.keys()) if (!entries.includes(name)) inputs.delete(name);
+  const assets = [];
+  if (readManifest || affected.some(name => name !== stylesheet)) assets.push(publish("js", program()));
+  if (affected.includes(stylesheet)) {
+    const css = inputs.get(stylesheet);
+    const sourceMap = development ? "\n/*# sourceMappingURL=data:application/json;base64," +
+      Buffer.from(css.map).toString("base64") + " */\n" : "";
+    assets.push(publish("css", css.code + sourceMap));
+  }
+  await Promise.all(assets);
+  if (assets.length || changed.has(template)) {
+    const index = (await readFile(path.join(web, template), "utf8"))
+      .replaceAll("/dist/app.js", "/dist/" + published.get("js")).replaceAll("/dist/app.css", "/dist/" + published.get("css"));
+    if (index !== previousIndex) { await replaceFile("index.html", index); previousIndex = index; }
+  }
+  if (process.env.RIBBON_BUILD_TIMING) process.stdout.write(JSON.stringify({buildMilliseconds: performance.now() - started}) + "\n");
+}
+
+await mkdir(output, {recursive: true});
+if (!options.includes("--watch")) await rebuild(new Set());
+else {
+  let running, timer, closed = false;
+  const changes = new Set([manifest, template]);
+  const failedInputs = new Set();
+  const outputDirectory = path.relative(web, output);
+  const drain = async () => {
+    while (changes.size && !closed) {
+      const batch = new Set([...failedInputs, ...changes]);
+      changes.clear();
+      try { await rebuild(batch); failedInputs.clear(); }
+      catch (error) {
+        for (const file of batch) failedInputs.add(file);
+        process.stderr.write(String(error) + "\n");
+      }
+    }
+  };
+  const schedule = () => {
+    if (!running && !closed) running = drain().finally(() => {
+      running = null;
+      if (changes.size && !closed) schedule();
     });
-  },
-};
-const configuration = {absWorkingDir: web, entryPoints: {app: "workspace"}, outdir: output, bundle: true,
-  platform: "browser", format: "esm", treeShaking: false, define: {module: "undefined", require: "undefined"},
-  minifySyntax: !development, minifyWhitespace: !development, target: ["safari15", "chrome105"],
-  sourcemap: development ? "inline" : false, write: false, plugins: [workspace], logLevel: "warning"};
-if (watch) {
-  const builder = await context(configuration);
-  await builder.watch();
-} else await build(configuration);
+  };
+  // The inputs and their imported style sheets share this source directory;
+  // packaged output lives under dist and never invalidates the compiler.
+  const watcher = watch(web, {recursive: true}, (_event, filename) => {
+    if (!filename || filename.startsWith(outputDirectory + path.sep) || filename.startsWith(".")) return;
+    if (filename !== template && filename !== manifest && !/\.(?:js|css)$/.test(filename)) return;
+    changes.add(filename);
+    clearTimeout(timer); timer = setTimeout(schedule, 4);
+  });
+  schedule();
+  await new Promise(resolve => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
+  closed = true; watcher.close(); clearTimeout(timer); await running;
+}
