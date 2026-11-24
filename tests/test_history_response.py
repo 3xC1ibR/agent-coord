@@ -130,6 +130,26 @@ class HistoryResponseTests(unittest.TestCase):
             self.serialized()
         self.sessions.admission.resume()
 
+    def test_cached_timeline_keeps_runtime_fields_current_and_access_checked(self):
+        from agent_coord.snapshot_cache import prepare_snapshot_cache
+        from agent_coord.message_timeline import message_timeline
+        self.store.register(session_id="peer", client="codex", cwd=str(self.root), name="Peer")
+        self.store.send_message(sender_session_id="peer", recipient_session_id=self.identity, body="Coordination body")
+        prepare_snapshot_cache(self.store)
+        self.assertEqual(self.serialized(), self.normal())
+        self.sessions.active[self.identity] = "new-live-turn"
+        expected = self.normal()
+        with patch("agent_coord.message_timeline.message_timeline", wraps=message_timeline) as projected:
+            actual = self.serialized()
+            projected.assert_not_called()
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["activeTurn"], "new-live-turn")
+        self.store.send_message(sender_session_id="peer", recipient_session_id=self.identity, body="New coordination body")
+        self.assertEqual(len(self.serialized()["coordinationMessages"]), 2)
+        self.sessions.cwd = str(self.root / "outside")
+        with self.assertRaises(CoordinationError):
+            self.serialized()
+
     def test_reply_lookup_does_not_scan_other_exchanges(self):
         from agent_coord.message_timeline import _TIMELINE_ROWS
         with self.store._connection() as db:

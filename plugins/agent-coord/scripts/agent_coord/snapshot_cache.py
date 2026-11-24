@@ -47,6 +47,12 @@ def _install(db):
             UNION SELECT recipient_session_id FROM messages WHERE thread_id IN ({exchanges})"""
         trigger("message_threads", event, "timeline", _increment("timeline", participants),
                 "OLD.closed_at IS NOT NEW.closed_at" if event == "UPDATE" else None)
+        if event == "UPDATE":
+            # Additive capture also upgrades already-initialized caches. An
+            # exchange identity change can remove one closure and expose it to
+            # another set of participants without changing closed_at itself.
+            trigger("message_threads", event, "timeline_identity", _increment("timeline", participants),
+                    "OLD.thread_id IS NOT NEW.thread_id")
         creators = " UNION ".join(f"SELECT {r}.sender_session_id AS identity" for r in records)
         trigger("app_control_requests", event, "timeline", _increment("timeline", creators),
                 " OR ".join(f"{r}.operation='create'" for r in records))

@@ -100,6 +100,19 @@ class SnapshotCacheTests(unittest.TestCase):
         with self.assertRaises(CoordinationError):
             self.timeline(cwd=str(self.root))
 
+    def test_exchange_rename_invalidates_losing_and_gaining_participants(self):
+        other = self.send("other", "fourth")
+        with self.store._connection() as db:
+            db.execute("UPDATE message_threads SET closed_at=1 WHERE thread_id=?", (self.message["thread_id"],))
+            db.execute("DELETE FROM message_threads WHERE thread_id=?", (other["thread_id"],))
+        self.assertEqual(self.timeline()[0]["status"], "Exchange closed")
+        self.assertNotEqual(self.timeline("other")[0]["status"], "Exchange closed")
+        with self.store._connection() as db:
+            db.execute("UPDATE message_threads SET thread_id=? WHERE thread_id=?",
+                       (other["thread_id"], self.message["thread_id"]))
+        self.assertIsNone(self.timeline()[0]["closed_at"])
+        self.assertEqual(self.timeline("other")[0]["closed_at"], 1)
+
     def test_usage_changes_invalidate_both_old_and_new_thread(self):
         with self.store._connection() as db:
             db.execute("INSERT INTO thread_usage_notes VALUES ('sender','codex','native','First note',1)")
