@@ -80,7 +80,7 @@ class CallerIdentityTests(unittest.TestCase):
 
     def test_real_cli_routes_fork_replies_back_to_child_and_leaves_parent_alone(self):
         environment = {"PATH": os.defpath, "CODEX_THREAD_ID": "child"}
-        command = [sys.executable, str(SCRIPTS / "agent-coord"), "--db", str(self.store.database_path)]
+        command = [sys.executable, "-B", str(SCRIPTS / "agent-coord"), "--db", str(self.store.database_path)]
         bad = subprocess.run([*command, "send", "--from-session", "parent", "--session", "peer",
                               "--reply-required", "Wrong actor"], env=environment, capture_output=True, text=True, timeout=10)
         self.assertEqual(bad.returncode, 2, bad.stderr)
