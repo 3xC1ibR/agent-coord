@@ -760,7 +760,9 @@ class Runtime:
                 "busy": readiness(self.server.browser_sessions),
                 "update": update,
                 "transport": transport,
-                "database_metrics": performance_snapshot(self.server.browser_sessions)}
+                # Native status polls every two seconds. Keep the last coverage
+                # observation; diagnostics and backfill own archive scans.
+                "database_metrics": performance_snapshot(self.server.browser_sessions, refresh_coverage=False)}
 
     def request_update(self, request_id, payload):
         from . import runtime_update

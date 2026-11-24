@@ -569,6 +569,21 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertIn("p95_ms", metrics["writer_hold"])
         self.assertNotIn(private_message, json.dumps(metrics))
 
+    def test_authorized_performance_request_refreshes_index_coverage(self):
+        from agent_coord import conversation_substrings as substrings
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        substrings._status(self.store, remaining_sources=123, coverage_observed_monotonic=0)
+        with patch.object(substrings, "_coverage", wraps=substrings._coverage) as scan:
+            self.assertEqual(self.request("/api/browser/performance", headers={"Host": "untrusted.invalid"})[0], 403)
+            scan.assert_not_called()
+            status, result = self.request("/api/browser/performance", headers={"X-Agent-Coord-Token": self.token})
+            self.assertEqual(status, 200)
+            scan.assert_called_once_with(self.store)
+        coverage = result["search"]["substring_index"]
+        self.assertEqual(coverage["remaining_sources"], 0)
+        self.assertGreater(coverage["coverage_observed_monotonic"], 0)
+
     def test_database_contention_closes_event_stream_without_second_http_response(self):
         with patch.object(self.sessions, "snooze_notifications", side_effect=sqlite3.OperationalError("database is locked")):
             with urllib.request.urlopen(self.url + "/api/browser/events", timeout=3) as response:

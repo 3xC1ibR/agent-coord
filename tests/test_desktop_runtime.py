@@ -1073,6 +1073,43 @@ def uninterrupted_readiness(sessions):
         self.assertEqual(json.loads(decision.stdout)["status"], "serving")
 
 
+class RuntimeStatusMetricsTests(unittest.TestCase):
+    def test_status_polling_preserves_cached_coverage_without_scanning_archive(self):
+        from agent_coord import conversation_substrings as substrings
+        from agent_coord import database_writer
+
+        store = Mock()
+        store.database_metrics.side_effect = [{"foreground_observation": index} for index in range(3)]
+        substrings._status(store, supported=True, state="complete", remaining_sources=0,
+                           coverage_observed_monotonic=1.0, legacy_sources=12, legacy_indexed=12)
+        observed = dict(substrings._STATUS[store])
+        sessions = SimpleNamespace(store=store, admission=SimpleNamespace(paused=False),
+            history_persistence=SimpleNamespace(status=lambda: {"published_bytes": 10}),
+            persistence=SimpleNamespace(status=lambda: {"pending": 2, "failures": {}}),
+            database_checkpoint=SimpleNamespace(snapshot=lambda: {"backlog_frames": 4}))
+        with tempfile.TemporaryDirectory() as directory:
+            owner = runtime.Runtime(Path(directory) / "state.sqlite3", Path(directory) / "payload", -1)
+            owner.server = SimpleNamespace(browser_sessions=sessions, server_port=12345)
+            owner.update_status = Mock(return_value={"phase": "committed"})
+            with patch.object(substrings, "_coverage", side_effect=AssertionError("Archive scan during ordinary status")) as scan, \
+                    patch.object(substrings.time, "monotonic", return_value=1000), \
+                    patch.object(runtime, "readiness", return_value={"active_turns": 1}), \
+                    patch.object(database_writer, "system_performance_snapshot", return_value={"process": {"cpu_seconds": 5}}):
+                for index in range(3):
+                    status = owner.status()
+                    metrics = status["database_metrics"]
+                    self.assertEqual(metrics["search"]["substring_index"], observed)
+                    self.assertEqual(metrics["foreground_observation"], index)
+                    self.assertEqual(metrics["history"], {"published_bytes": 10})
+                    self.assertEqual(metrics["checkpoint"], {"backlog_frames": 4})
+                    self.assertEqual(metrics["persistence"], {"pending": 2, "failure_count": 0})
+                    self.assertEqual(metrics["process"], {"cpu_seconds": 5})
+                    self.assertEqual(status["status"], "serving")
+                    self.assertEqual(status["busy"], {"active_turns": 1})
+                    self.assertEqual(status["update"], {"phase": "committed"})
+                scan.assert_not_called()
+
+
 class AdmissionTests(unittest.TestCase):
     def test_provider_becoming_unsupported_during_drain_reopens_admission(self):
         with tempfile.TemporaryDirectory() as temporary:

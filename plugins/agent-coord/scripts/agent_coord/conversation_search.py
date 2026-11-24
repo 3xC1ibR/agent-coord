@@ -302,7 +302,7 @@ def _measure(store, operation):
                 entry[key] = max(entry.get(key, 0), value) if key.startswith("max_") else entry.get(key, 0) + value
 
 
-def search_metrics(store):
+def search_metrics(store, *, refresh_coverage=True):
     """Process-local counters and bounded latency samples; never write SQLite."""
     with _METRICS_LOCK:
         result = {}
@@ -312,7 +312,7 @@ def search_metrics(store):
             result[operation]["p50_ms"] = samples[(len(samples) - 1) // 2]
             result[operation]["p95_ms"] = samples[min(len(samples) - 1, int(len(samples) * .95))]
     from .conversation_substrings import metrics as substring_metrics
-    result["substring_index"] = substring_metrics(store)
+    result["substring_index"] = substring_metrics(store, refresh_coverage=refresh_coverage)
     return result
 
 

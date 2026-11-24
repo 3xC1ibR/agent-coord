@@ -306,12 +306,12 @@ class DatabaseWriter:
                                            for _, _, record in sorted(self.slow_writer_scopes, reverse=True)]}
 
 
-def performance_snapshot(sessions):
+def performance_snapshot(sessions, *, refresh_coverage=True):
     from .conversation_search import search_metrics
     persistence = sessions.persistence.status()
     failures = persistence.pop("failures", {})
     checkpoint = getattr(sessions, "database_checkpoint", None)
     return {**sessions.store.database_metrics(), **system_performance_snapshot(), "history": sessions.history_persistence.status(),
-            "search": search_metrics(sessions.store),
+            "search": search_metrics(sessions.store, refresh_coverage=refresh_coverage),
             "checkpoint": checkpoint.snapshot() if checkpoint is not None else None,
             "persistence": {**persistence, "failure_count": len(failures)}}

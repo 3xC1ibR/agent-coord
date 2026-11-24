@@ -50,12 +50,12 @@ def _status(store, **values):
         state.update(values)
 
 
-def metrics(store):
+def metrics(store, *, refresh_coverage=True):
     with _LOCK:
         state = dict(_STATUS.get(store, {"supported": None, "state": "uninitialized", "failures": 0,
                                          "backfill_running": False, "remaining_sources": None}))
         observed = time.monotonic()
-        refresh = (state.get("supported") and not state.get("coverage_refresh_running")
+        refresh = (refresh_coverage and state.get("supported") and not state.get("coverage_refresh_running")
                    and observed - state.get("coverage_observed_monotonic", 0) >= 1)
         if refresh:
             # Reserve this observation before leaving the lock. Concurrent
