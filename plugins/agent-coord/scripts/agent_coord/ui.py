@@ -4,6 +4,7 @@ import errno
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import queue
 import re
@@ -1466,6 +1467,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
         self._migration_index = None
         self._idle_workers = []
         self._workers_closing = False
+        self._startup_cancelled = threading.Event()
+        self._startup_worker = None
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
@@ -1524,6 +1527,24 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                         sessions.start_search_index()
         start_runtime_migration(sessions, owner_guard=owner_guard, search_handshake=prepare_search)
 
+    def start_services(self, operations, *, background=False):
+        if not background:
+            for operation in operations:
+                operation()
+            return
+
+        def start_pending():
+            for operation in operations:
+                if self._startup_cancelled.is_set():
+                    return
+                try:
+                    operation()
+                except Exception:
+                    logging.getLogger(__name__).exception("Coordinator background service failed to start")
+
+        self._startup_worker = threading.Thread(target=start_pending, name="runtime-services", daemon=True)
+        self._startup_worker.start()
+
     def server_close(self) -> None:
         self._storage_stopped.set()
         migration = getattr(self.browser_sessions, "transcript_migration", None)
@@ -1534,6 +1555,9 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
             for mailbox in self._idle_workers:
                 mailbox.put(None)
             self._idle_workers.clear()
+        self._startup_cancelled.set()
+        if self._startup_worker is not None:
+            self._startup_worker.join()
         try:
             if self.notification_broadcast is not None:
                 self.notification_broadcast.close()
@@ -1588,6 +1612,8 @@ def make_ui_server(
     remote_access: RemoteAccess | None = None,
     admission_paused: bool = False,
     csrf_token: str | None = None,
+    native_transport=None,
+    defer_services: bool = False,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
@@ -1603,7 +1629,7 @@ def make_ui_server(
         sessions.admission.pause()
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
-    native = NativePush(store, sessions, remote)
+    native = NativePush(store, sessions, remote, transport=native_transport)
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
@@ -1629,26 +1655,27 @@ def make_ui_server(
     server.runtime_admission_ready = True
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
-    remote.restore(f"http://{target_host}:{bound_port}")
-    try:
-        sessions.start_database_checkpoint()
-        push.start()
-        native.start()
-        server.thread_control.start()
-        server.app_control.start()
-        sessions.schedules.start()
-        sessions.inbox_wake.start()
-        sessions.event_subscriptions.start()
-        sessions.sidecars.start()
-        sessions.reviews.start()
-        sessions.watchdog.start()
-        sessions.start_residency()
-        sessions.dispatch.wake()
+    def start_stoic():
         # Standalone distributions can omit application-specific connectors.
         from importlib.util import find_spec
         if find_spec(".stoic_integration", __package__) is not None:
             from .stoic_integration import start_connector
             server.stoic_integration = start_connector(server.external_work)
+
+    automatic_services = (
+        server.thread_control.start, server.app_control.start, sessions.schedules.start,
+        sessions.inbox_wake.start, sessions.event_subscriptions.start, sessions.sidecars.start,
+        sessions.reviews.start, sessions.watchdog.start, sessions.start_residency,
+        sessions.dispatch.wake,
+    )
+    maintenance = (sessions.start_database_checkpoint,)
+    notifications = (push.start, native.start)
+    try:
+        remote.restore(f"http://{target_host}:{bound_port}")
+        if defer_services:
+            server.runtime_services = (*automatic_services, *notifications, *maintenance, start_stoic)
+        else:
+            server.start_services((*maintenance, *notifications, *automatic_services, start_stoic))
     except BaseException:
         server.server_close()
         raise

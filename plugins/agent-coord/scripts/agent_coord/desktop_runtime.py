@@ -939,8 +939,10 @@ class Runtime:
                 self.update_drain_started = None
                 self.pending = None
             elif not blocked:
-                self.update_requested = runtime_update.write(self.directory, self.update_requested,
-                    blocked=[], admission_drain_seconds=elapsed)
+                # The stopping record below saves the completed drain along
+                # with its projection boundary in one durable transaction.
+                self.update_requested = {**self.update_requested,
+                    "blocked": [], "admission_drain_seconds": elapsed}
                 self.update_drain_started = None
         if blocked:
             if not self.update_requested:
@@ -1294,16 +1296,19 @@ class Runtime:
                 self.edge_route()
             return self.status()
 
-    def serve(self):
+    def serve(self, *, prewarmed_native_transport=None):
         from .store import CoordinationStore
         from .ui import make_ui_server
         from . import launch_metrics
+        from .runtime_cutover import RuntimeListeners
         store = CoordinationStore(self.database)
         from .runtime_coordinator_transport import CoordinatorTransport
         store.provider_transport = CoordinatorTransport.connect(self.directory / "provider-transport", self.instance)
         # Finish ownership adoption before any automatic worker can claim work.
+        defer_services = prewarmed_native_transport is not None
         self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True,
-                                     csrf_token=self.edge_browser_token)
+            csrf_token=self.edge_browser_token, native_transport=prewarmed_native_transport,
+            defer_services=defer_services)
         # Only the authenticated local update service may hand an already
         # accepted ordinary message to this particular coordinator/database.
         self.server.transfer_receiver = (self.instance, str(self.payload), self.token)
@@ -1319,7 +1324,11 @@ class Runtime:
             with store._connection() as db:
                 db.execute("UPDATE browser_message_queue SET owner=? WHERE owner=? AND state='queued'", (sessions.queue.owner, owner))
             sessions.queue.wake()
-        launch_metrics.start(store, self.stopping, self.payload)
+        def start_metrics():
+            launch_metrics.start(store, self.stopping, self.payload)
+
+        if not defer_services:
+            start_metrics()
         runtime = self
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -1352,17 +1361,15 @@ class Runtime:
         atomic_json(self.directory / "discovery.json", record)
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: self.stopping.set())
-        control_thread = threading.Thread(target=controller.serve_forever, args=(.02,), daemon=True)
-        ui_thread = threading.Thread(target=self.server.serve_forever, args=(.02,), daemon=True)
-        control_thread.start()
-        ui_thread.start()
+        listeners = RuntimeListeners(controller, self.server)
+        listeners.start()
         if self.commit_fd is not None:
             from . import runtime_update
             os.write(self.ready_fd, b"prepared\n")
             os.close(self.ready_fd)
             self.ready_fd = None
             try:
-                command = os.read(self.commit_fd, 16)
+                os.read(self.commit_fd, 16)
             finally:
                 os.close(self.commit_fd)
                 self.commit_fd = None
@@ -1372,10 +1379,7 @@ class Runtime:
             except RuntimeError:
                 sessions.transport_handover = True
                 sessions.runtime_handover = True
-                controller.shutdown()
-                self.server.shutdown()
-                control_thread.join()
-                ui_thread.join()
+                listeners.close()
                 controller.server_close()
                 self.server.server_close()
                 record_path = self.directory / "discovery.json"
@@ -1416,6 +1420,10 @@ class Runtime:
         candidate = None
         recovery = None
         try:
+            if defer_services and not self.stopping.is_set():
+                # Ready requests use the committed store, admission controller
+                # and restored provider projection. Service polling follows.
+                self.server.start_services((*self.server.runtime_services, start_metrics), background=True)
             while not self.stopping.wait(.005 if self.update_drain_started is not None else
                                          .05 if self.warm_requested else .2):
                 with self.mutex:
@@ -1534,12 +1542,7 @@ class Runtime:
                 break
         finally:
             self.fence_edge()
-            stop_control = threading.Thread(target=controller.shutdown, daemon=True)
-            stop_control.start()
-            self.server.shutdown()
-            stop_control.join()
-            control_thread.join()
-            ui_thread.join()
+            listeners.close()
             controller.server_close()
             sessions.runtime_handover = not self.explicit_stop
             if hasattr(sessions, "projection") and not self.explicit_stop:
@@ -2334,19 +2337,23 @@ def main(argv=None):
         print(json.dumps(result), flush=True)
         return 0
     if args.runtime_serve or args.runtime_coordinate_update or args.runtime_supervise:
+        prewarmed_native_transport = None
         if args.warm_until_fd is not None:
             if not args.runtime_serve or args.ready_fd is None or args.commit_fd is None:
                 parser.error("Candidate preloading requires a supervised coordinator trial")
-            # Import application code only. No store, broker claim, scheduler,
-            # search publisher or application server exists before ownership.
+            # Load code and read local configuration only. No store, broker
+            # claim, scheduler, search publisher or server exists yet.
             from . import (
                 coordinator_projection, dispatch_runtime, event_subscriptions, execution_state,
                 external_work, launch_metrics, reviews, runtime_coordinator_transport,
                 session_control, sidecars, submission_receipts, turn_watchdog, ui,
             )
+            from .native_push import APNsTransport
             try:
                 schema_fingerprint()
                 database = Path(args.db).expanduser().resolve()
+                config = os.environ.get("AGENT_COORD_APNS_CONFIG") or str(database) + ".apns.json"
+                prewarmed_native_transport = APNsTransport(config)
                 # Verify and populate the page cache under read-only SQLite.
                 # Close the observation before fencing, so it cannot pin WAL.
                 with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=.2)) as probe:
@@ -2376,7 +2383,8 @@ def main(argv=None):
             if args.runtime_coordinate_update:
                 return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd).coordinate_update(args.exit_fd, args.source_pid)
             return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd, args.ready_fd,
-                           start_paused=args.runtime_start_paused, commit_fd=args.commit_fd).serve()
+                start_paused=args.runtime_start_paused, commit_fd=args.commit_fd).serve(
+                    prewarmed_native_transport=prewarmed_native_transport)
         finally:
             os.close(fd)
     parser.error("Choose a runtime operation")
