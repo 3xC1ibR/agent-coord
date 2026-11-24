@@ -51,6 +51,51 @@ function hydrateConversationControls(id, detail) {
   if (Array.isArray(detail.models)) (state.modelCatalogs ||= new Map()).set(detail.session?.client, detail.models);
 }
 
+// A browser can copy sessionStorage into an opened or duplicated tab. Hold a
+// document lease on the stored ID and allocate a new one if its owner is live.
+async function composerWindowScope(view) {
+  if (view.agentCoordDesktop?.windowId) return view.agentCoordDesktop.windowId;
+  const storageKey = "ribbon-field-composer-window";
+  const allocate = () => "browser-" + view.crypto.randomUUID();
+  let previous;
+  try { previous = view.sessionStorage.getItem(storageKey); } catch { /* Restricted storage. */ }
+  let id = previous || allocate();
+  if (view.navigator.locks) {
+    const occupy = scope => new Promise((resolve, reject) => {
+      view.navigator.locks.request(storageKey + ":" + scope, {ifAvailable: true}, lock => {
+        resolve(!!lock);
+        if (lock) return new Promise(release => view.addEventListener("pagehide", release, {once: true}));
+      }).catch(reject);
+    });
+    while (!await occupy(id)) id = allocate();
+  } else {
+    // Storage events also work on WebKit versions without Web Locks. Probe
+    // only a previously stored ID; a fresh window never waits for a timeout.
+    const probe = allocate(), key = storageKey + "-probe";
+    let occupied = false;
+    const receive = event => {
+      if (event.key !== key || !event.newValue) return;
+      const [operation, scope, sender] = event.newValue.split("|");
+      if (scope !== id) return;
+      if (operation === "held" && sender === probe) occupied = true;
+      if (operation === "probe" && sender !== probe)
+        view.localStorage.setItem(key, ["held", id, sender].join("|"));
+    };
+    view.addEventListener("storage", receive);
+    if (previous) {
+      try {
+        view.localStorage.setItem(key, ["probe", id, probe].join("|"));
+        await new Promise(resolve => view.setTimeout(resolve, 40));
+        if (occupied) id = allocate();
+      } catch {
+        if (view.performance.getEntriesByType("navigation")[0]?.type !== "reload") id = allocate();
+      }
+    }
+  }
+  try { view.sessionStorage.setItem(storageKey, id); } catch { /* Document-scoped storage. */ }
+  return id;
+}
+
 // Preserve local edit order even when a large attachment waits for the first paint.
 function writeComposerRecord(id, write, field = "draft") {
   const writes = state.composerWrites ||= new Map();
@@ -87,6 +132,20 @@ function persistComposer(id = composerDraftId(), fields = "text") {
   writeComposerRecord(id, () => state.durableDrafts.write(id, patch), fields).catch(showError);
 }
 
+function persistAttachmentChanges() {
+  const snapshots = state.attachmentSnapshots ||= new Map();
+  for (const [id, images] of state.attachments.drafts) {
+    if (!state.attachments.pending(id) && snapshots.get(id) !== images) {
+      snapshots.set(id, images);
+      persistComposer(id, "images");
+    }
+  }
+  for (const id of snapshots.keys()) if (!state.attachments.drafts.has(id)) {
+    snapshots.delete(id);
+    persistComposer(id, "images");
+  }
+}
+
 function updateOutgoing(id) {
   const entry = state.conversations?.get(id);
   if (entry && state.selected !== id) entry.nodes = null;
@@ -103,15 +162,18 @@ function discoverComposerSubmissions(id) {
   if (discoveries.has(id)) return discoveries.get(id);
   const discovery = state.durableDrafts.pending(id).then(pending => {
     for (const row of pending) {
-      const existing = state.outgoing.list(id).find(echo => echo.submissionId === row.requestId);
-      if (existing) {
-        if (existing.acceptance || existing.transferReceipt) state.durableDrafts.acknowledge(id, row.requestId).catch(showError);
+      const echo = state.outgoing.list(id).find(item => item.submissionId === row.requestId) ||
+        state.outgoing.add(id, {text: row.text, images: row.images.length, submissionId: row.requestId});
+      if (echo.acceptance || echo.transferReceipt) {
+        state.durableDrafts.acknowledge(id, row.requestId).catch(showError);
         continue;
       }
-      const echo = state.outgoing.add(id, {text: row.text, images: row.images.length, submissionId: row.requestId});
-      echo.status = "uncertain";
+      // An echo can precede discovery when a storage read fails. Reserve every
+      // journaled request in insertion order, including those already visible.
       state.submissionQueue.reserve(id, row.requestId);
-      if (state.config.ordinarySubmissionReceipts === 1) {
+      if (echo.awaitingDiscovery) continue;
+      echo.status = "uncertain";
+      if (state.config.ordinarySubmissionReceipts === 1 || echo.discoveryFailed) {
         echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
         echo.retry();
       }
@@ -148,6 +210,7 @@ function submissionOutcomeUnknown(error) {
 
 async function deliverComposerSubmission(id, row, echo, staged) {
   return state.submissionQueue.submit(id, row.requestId, async () => {
+    if (echo.deliveryResult) return echo.deliveryResult;
     let posted = false, accepted = false;
     try {
       await staged;
@@ -161,6 +224,7 @@ async function deliverComposerSubmission(id, row, echo, staged) {
       if (transfer && (transfer.threadId !== id || transfer.requestId !== row.requestId))
         throw new Error("Message receipt could not be confirmed.");
       accepted = true;
+      echo.deliveryResult = result;
       if (transfer) state.outgoing.transfers(id, [transfer], state.conversations?.get(id)?.detail);
       else {
         if (result.acceptedMessage) state.outgoing.confirm(id, [result.acceptedMessage]);
@@ -209,6 +273,7 @@ function submitComposerMessage({id, requestId = crypto.randomUUID(), text, image
   state.activity?.submission(id, body);
   const row = {requestId, text, images, mentions, body, path};
   const echo = state.outgoing.add(id, {text, images: images.length, submissionId: requestId, detail});
+  echo.awaitingDiscovery = true;
   const large = images.some(image => image.url?.length > 256 * 1024);
   const firstPaint = large ? afterComposerPaint() : undefined;
   const staged = writeComposerRecord(id, async () => {
@@ -221,7 +286,11 @@ function submitComposerMessage({id, requestId = crypto.randomUUID(), text, image
   try { clear(); } finally { state.clearingSubmission = null; }
   updateOutgoing(id);
   const deliver = () => discoverComposerSubmissions(id).then(() => deliverComposerSubmission(id, row, echo, staged));
-  return discovery.then(() => deliverComposerSubmission(id, row, echo, staged), error => {
+  return discovery.then(() => {
+    echo.awaitingDiscovery = false;
+    return deliverComposerSubmission(id, row, echo, staged);
+  }, error => {
+    echo.awaitingDiscovery = false; echo.discoveryFailed = true;
     echo.status = "uncertain";
     echo.retry = () => deliver().catch(showError);
     updateOutgoing(id);

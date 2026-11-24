@@ -1114,11 +1114,17 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   $("message").value = state.drafts.get(id) || "";
   const cached = conversationEntry(id);
   cached.refreshFailures = 0;
+  if (cached.detail?.revisionEpoch && cached.detail.revisionEpoch !== state.config?.conversationRevisionEpoch) {
+    cached.detail = cached.nodes = null;
+    cached.viewport?.dispose(); delete cached.viewport;
+    globalThis.OpenUIThread?.release?.(id);
+  }
   if (state.durableDrafts && !cached.draftLoad) {
     cached.draftLoad = restoreLocalDraft(id).then(restored => { if (!restored) cached.draftLoad = null; }, error => {
       cached.draftLoad = null; showError(error);
     });
   }
+  const opening = cached.opening = {};
   cached.refreshError = null;
   const current = state.streamHealthy && cached.detail?.revisionEpoch === state.config?.conversationRevisionEpoch &&
     ["history_revision", "stream_seq", "metadata_revision"].every(key => Number.isSafeInteger(cached.detail?.[key])) && cached.validatedRevision === cached.revision &&
@@ -1180,11 +1186,23 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
     $("back-home").setAttribute("aria-current", "false");
   } else if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(renderList, 0));
   else renderList();
-  if (!cached.detail && state.snapshotCache) {
+  if (!cached.detail && !cached.accessDenied && state.snapshotCache) {
     state.snapshotCache.read(id).then(snapshot => {
-      if (!snapshot || state.selected !== id || cached.detail || state.conversations.get(id) !== cached) return;
-      cached.detail = state.detail = snapshot;
-      renderThread(); renderTimeline(); renderQueuedMessages(); renderStatus();
+      if (!snapshot || state.selected !== id || cached.opening !== opening || cached.detail || state.conversations.get(id) !== cached) return;
+      // Disk may belong to a previous coordinator epoch or workspace. Paint
+      // inert transcript rows without installing provider or action metadata.
+      const content = node("div");
+      content.dataset.provisionalThread = id;
+      const items = (snapshot.thread?.turns || []).slice(-12).flatMap(turn => turn.items || [])
+        .filter(item => item.type === "userMessage" || item.type === "agentMessage").slice(-12);
+      for (const item of items) {
+        const row = node("article", null, item.type === "userMessage" ? "message user" : "message agent");
+        row.append(node("div", itemText(item).slice(0, 8192), "text"));
+        content.append(row);
+      }
+      if (!items.length) for (const message of (snapshot.coordinationMessages || []).slice(-12))
+        content.append(node("article", (message.body || "").slice(0, 8192), "message"));
+      if (content.childElementCount) replaceTimelineContent(content);
     }).catch(() => {});
   }
   const fresh = current || await refreshDetail({markSeen: false});
@@ -1295,6 +1313,21 @@ async function refreshDetail({markSeen = true, background = false, threadId = st
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
       entry.refreshError = error.message || String(error);
+      if (error.status === 403 || error.status === 404 || error.code === "workspace_access_denied" ||
+          error.status === 400 && error.message === "Work thread not found in this workspace.") {
+        entry.opening = null; entry.accessDenied = true;
+        entry.detail = entry.nodes = null;
+        entry.viewport?.dispose(); delete entry.viewport;
+        state.snapshotCache?.remove?.(id).catch(() => {});
+        globalThis.agentCoordPanes?.records.get(id)?.api?.render();
+        if (state.selected === id) {
+          state.detail = null; state.detailRefreshing = false; state.timelineThread = null;
+          replaceTimelineContent(node("p", entry.refreshError, "empty"));
+          $("requests").replaceChildren();
+          renderStatus();
+        }
+        throw error;
+      }
       entry.refreshFailures = (entry.refreshFailures || 0) + 1;
       const delay = [1000, 2000, 4000][entry.refreshFailures - 1];
       if (delay && id === state.selected && state.conversations.get(id) === entry) {
@@ -1340,7 +1373,7 @@ async function refreshDetail({markSeen = true, background = false, threadId = st
     if (entry.streamedUsage && entry.detail?.work_thread) detail.work_thread.usage = entry.detail.work_thread.usage;
     if (!entry.historyLoaded && !entry.expandedOutput?.size)
       state.snapshotCache?.write(id, detail).catch(() => {});
-    entry.retainedBytes = (detail.snapshotBytes || 0) + (entry.pageBytes || 0) + (entry.expandedBytes || 0);
+    entry.retainedBytes = (typeof ConversationSnapshotCache !== "undefined" ? ConversationSnapshotCache.retainedBytes(detail) : detail.snapshotBytes || 0) + (entry.pageBytes || 0) + (entry.expandedBytes || 0);
     if (paged) detail.thread = mergeHistoryWindow(entry, detail.thread);
     const recovering = !!entry.refreshError;
     const same = sameConversation(entry.detail, detail);
@@ -1348,6 +1381,7 @@ async function refreshDetail({markSeen = true, background = false, threadId = st
     entry.refreshFailures = 0;
     entry.requestsRefreshing = false;
     entry.validatedRevision = revision;
+    entry.accessDenied = false;
     entry.detail = detail;
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
@@ -1995,11 +2029,12 @@ class OutgoingMessages {
       if (record?.threadId !== id || typeof record.requestId !== "string" || !record.requestId ||
           typeof record.turnId !== "string" || !record.turnId || typeof record.message !== "string" ||
           !Number.isInteger(record.imageCount) || record.imageCount < 0 ||
-          (record.afterItemId !== null && typeof record.afterItemId !== "string") || seen.has(record.requestId)) continue;
+          (record.afterItemId !== null && typeof record.afterItemId !== "string")) continue;
+      this.onReceipt?.(id, record.requestId);
+      if (seen.has(record.requestId)) continue;
       seen.add(record.requestId);
       const entry = this.list(id).find(row => row.submissionId === record.requestId) ||
         this.add(id, {text: record.message, images: record.imageCount, submissionId: record.requestId, preserveFailures: true});
-      this.onReceipt?.(id, record.requestId);
       entry.acceptance = record;
       entry.needsHistoryBaseline = false;
       entry.status = "sent";
@@ -2079,7 +2114,7 @@ class OutgoingMessages {
         entry.needsHistoryBaseline = false;
       }
       if (entry.status === "failed" || (entry.transfer && (entry.status !== "sent" || detail.transferReadSource === "saved")) ||
-          (entry.submissionId && entry.status === "sending")) return true;
+          (entry.submissionId && ["sending", "uncertain"].includes(entry.status) && !entry.acceptance)) return true;
       if (entry.queueId && detail.queuedMessages?.some(row => row.id === entry.queueId)) return false;
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
       const match = messages.find(item => {
@@ -3679,19 +3714,24 @@ async function sendSessionDraft(text, images, mentions = [], quiet = false) {
   const saved = state.projectDrafts?.get(cwd);
   const remaining = current ? (isSessionDraft() ? $("message").value : state.drafts.get("new-session"))
     : saved?.detail === draft ? saved.text : "";
-  if (remaining && (ordinary || remaining !== text)) state.drafts.set(draft.createdId, remaining);
+  const nextText = ordinary || remaining !== text ? remaining || "" : "";
+  if (nextText) state.drafts.set(draft.createdId, nextText);
+  const next = {text: nextText, images: state.attachments?.snapshot(draft.createdId) || [],
+    mentions: state.mentions?.snapshot(draft.createdId, nextText) || []};
+  let migration;
+  if (state.durableDrafts) {
+    // Reserve both composer keys in this task. Earlier writes complete before
+    // the atomic move, and later edits on either key follow that transaction.
+    const prior = state.composerWrites?.get(draftId);
+    migration = writeComposerRecord(draft.createdId, async () => {
+      await prior; await stage;
+      await state.durableDrafts.move(draftId, draft.createdId, next);
+    });
+    writeComposerRecord(draftId, () => migration).catch(showError);
+  }
   if (saved?.detail === draft) state.projectDrafts.delete(cwd);
   if (current) {
     state.drafts.delete("new-session");
-    if (state.durableDrafts) {
-      const next = {text: remaining || "", images: state.attachments?.snapshot(draft.createdId) || [],
-        mentions: state.mentions?.snapshot(draft.createdId, remaining || "") || []};
-      writeComposerRecord(draft.createdId, async () => {
-        await stage;
-        if (next.text || next.images.length) await state.durableDrafts.write(draft.createdId, next);
-        await state.durableDrafts.write(draftId, {text: "", images: [], mentions: []});
-      }).catch(showError);
-    }
     state.newSessionDraft = null;
   }
   state.sending?.delete(draft);
@@ -3705,6 +3745,7 @@ async function sendSessionDraft(text, images, mentions = [], quiet = false) {
     focusRevision = state.navigationRevision;
     await selecting.catch(error => showError(new Error("Your message was received, but the view could not refresh. " + error.message)));
   }
+  await migration;
   if (delivery) {
     await delivery;
     if (state.selected === draft.createdId) refreshDetail({background: true}).catch(showError);
@@ -4302,6 +4343,12 @@ async function sendMessage(mode = "send", quiet = false) {
       if ($("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       else state.drafts.set(id, $("message").value);
     } else if (state.drafts.get(id) === text) state.drafts.delete(id);
+    if (state.durableDrafts) {
+      const remaining = id === state.selected ? $("message").value : state.drafts.get(id) || "";
+      const draft = {text: remaining, mentions: state.mentions?.snapshot(id, remaining) || [],
+        images: state.attachments?.snapshot(id) || []};
+      await writeComposerRecord(id, () => state.durableDrafts.write(id, draft));
+    }
     if (result.transferSubmission && result.transferSubmission.state !== "committed") return;
     // Acceptance releases the composer. Neither transcript reconciliation nor
     // an unrelated inventory read is part of sending the user's message.
@@ -4649,7 +4696,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
         || [...state.threadTabs.projects.values()].flat().find(item => item.thread_id === id)
         || (state.drafts.has(id) || state.attachments.drafts.has(id) || state.mentions?.drafts.has(id) ? {thread_id: id} : null);
       if (!tab || id === "new-session") return null;
-      if (validate && (state.transferLocks?.has(id) || record?.api?.canTransfer?.() === false || state.settingsMutations?.has(id) || state.sending?.has(id) || state.attachments.pending(id) ||
+      if (validate && (state.transferLocks?.has(id) || state.submissionQueue?.lanes?.has(id) || record?.api?.canTransfer?.() === false || state.settingsMutations?.has(id) || state.sending?.has(id) || state.attachments.pending(id) ||
           document.querySelector("dialog[open]") || record?.frame?.contentDocument?.querySelector("dialog[open]"))) return null;
       const thread = {...tab, ...state.conversations?.get(id)?.detail?.work_thread, ...record?.thread};
       const input = field(id), position = state.conversationPositions?.get(id) || state.conversations?.get(id);
@@ -4678,30 +4725,61 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       if (state.settingsMutations?.has(payload.thread.thread_id) || state.sending?.has(payload.thread.thread_id) || document.querySelector("dialog[open]"))
         throw new Error("Finish the current action in the destination window before moving a tab there.");
       const id = payload.thread.thread_id;
-      staged.set(transferId, {id, before: this.capture(id, {validate: false}), selected: state.selected,
+      staged.set(transferId, {id, incoming: payload.draft, before: this.capture(id, {validate: false}), selected: state.selected,
         wasOpen: [...state.threadTabs.projects.values()].some(items => items.some(item => item.thread_id === id)),
         paneView: panes()?.active ? panes().viewId : null});
       this.lock(id, true);
       try {
+        if (state.durableDrafts) {
+          await state.composerWrites?.get(id);
+          const stored = await state.durableDrafts.read(id);
+          const target = staged.get(transferId);
+          target.stored = stored;
+          if (stored && (stored.text || stored.images.length || stored.mentions.length) &&
+              !this.sameDraft(stored, payload.draft))
+            throw new Error("This window already has a different draft for this conversation.");
+        }
+        staged.get(transferId).restoring = true;
         await this.restore(payload);
         return true;
       } catch (error) {
-        await this.finish(transferId, false);
+        if (staged.get(transferId)?.restoring) await this.finish(transferId, false);
+        else { staged.delete(transferId); this.lock(id, false); }
         throw error;
       }
+    },
+    sameDraft(first, second) {
+      const a = first.images || [], b = second.images || [];
+      return first.text === second.text && a.length === b.length &&
+        a.every((image, index) => image.name === b[index].name && image.url === b[index].url) &&
+        JSON.stringify(first.mentions || []) === JSON.stringify(second.mentions || []);
+    },
+    async prepareCommit(transferId) {
+      const snapshot = staged.get(transferId);
+      if (!snapshot) return false;
+      if (!snapshot.prepared && state.durableDrafts) {
+        const {id, incoming} = snapshot;
+        await writeComposerRecord(id, () => state.durableDrafts.write(id,
+          {text: incoming.text, images: incoming.images || [], mentions: incoming.mentions || []}));
+      }
+      snapshot.prepared = true;
+      return true;
     },
     async finish(transferId, committed) {
       const snapshot = staged.get(transferId);
       if (!snapshot) return !committed;
-      staged.delete(transferId);
       const {id, before, wasOpen, selected, paneView} = snapshot;
+      if (committed && !snapshot.prepared) await this.prepareCommit(transferId);
+      if (!committed && snapshot.prepared && state.durableDrafts)
+        await writeComposerRecord(id, () => snapshot.stored ? state.durableDrafts.write(id, snapshot.stored) : state.durableDrafts.remove(id));
+      staged.delete(transferId);
       this.lock(id, false);
       if (!committed) {
         if (before) {
           await this.restore(before, {rollback: true});
           if (!wasOpen) await this.release(id, state.threadTabs.cwd, undefined, {retainDraft: true});
         }
-        else await this.release(id);
+        else await this.release(id, undefined, undefined, {preserveStorage: true});
         if (selected && selected !== id) await select(selected, {focus: false});
         else if (!selected) goHome({restoreDispatcher: false});
         if (paneView != null) panes()?.restoreView?.();
@@ -4714,12 +4792,12 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
         throw new Error("The detached conversation state is invalid.");
       const existing = this.capture(id, {validate: false});
       if (!rollback && existing && (existing.draft.text || existing.draft.images?.length) &&
-          JSON.stringify([existing.draft.text, existing.draft.images, existing.draft.mentions]) !==
-          JSON.stringify([draft.text, draft.images, draft.mentions]))
+          !this.sameDraft(existing.draft, draft))
         throw new Error("This window already has a different draft for this conversation.");
       if (panes()?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
       state.drafts.set(id, draft.text);
       state.attachments.drafts.set(id, draft.images || []);
+      (state.attachmentSnapshots ||= new Map()).set(id, state.attachments.drafts.get(id));
       state.mentions?.restore(id, draft.text, draft.mentions || []);
       const disclosures = Array.isArray(draft.disclosures) ? draft.disclosures : [];
       try { sessionStorage.setItem("timeline-disclosures:" + id, JSON.stringify(disclosures)); }
@@ -4744,16 +4822,17 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       $("message").focus({preventScroll: true});
       return true;
     },
-    discard(id) {
+    async discard(id, {preserveStorage = false} = {}) {
+      if (!preserveStorage && state.durableDrafts) await writeComposerRecord(id, () => state.durableDrafts.remove(id));
+      state.attachmentSnapshots?.delete(id);
       state.drafts.delete(id); state.attachments.drafts.delete(id); state.mentions?.drafts.delete(id);
     },
-    async release(id, cwd = state.projectCwd, expected, {retainDraft = false} = {}) {
+    async release(id, cwd = state.projectCwd, expected, {retainDraft = false, preserveStorage = false} = {}) {
       if (expected) {
         // Unrelated sends/dialogs may start in another tab while the target
         // loads. Only an actual draft change can invalidate this commit.
         const current = this.capture(id, {validate: false});
-        const content = draft => JSON.stringify([draft?.text, draft?.images || [], draft?.mentions || []]);
-        if (!current || content(current.draft) !== content(expected.draft))
+        if (!current || !this.sameDraft(current.draft, expected.draft))
           throw new Error("Your draft changed while the window was opening. The original tab has been kept.");
       }
       if (retainDraft) {
@@ -4789,7 +4868,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       const record = shell?.records.get(id);
       record?.frame?.remove(); shell?.records.delete(id);
       // Prevent navigation history from restoring the moved draft in this window.
-      if (!retainDraft) this.discard(id);
+      if (!retainDraft) await this.discard(id, {preserveStorage});
     },
   };
 }
@@ -4873,7 +4952,7 @@ async function boot() {
   state.submissionQueue = new ConversationSubmissionQueue();
   if (globalThis.ComposerDrafts && globalThis.indexedDB) {
     state.durableDrafts = window.agentCoordComposerDrafts = ComposerDrafts.create({
-      scope: window.agentCoordDesktop?.windowId || "paired-browser"});
+      scope: await composerWindowScope(window)});
   }
   window.agentCoordDrainComposerWrites = drainComposerWrites;
   window.agentCoordStreamConnected = () => state.streamHealthy;
@@ -4973,14 +5052,7 @@ async function boot() {
   state.attachments = new ChatImageAttachments({document, getThread: () => composerDraftId(),
     canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected) && !state.transferLocks?.has(state.selected),
     onChange: () => {
-      for (const [id, images] of state.attachments.drafts) {
-        if (!state.attachments.pending(id) && state.attachmentSnapshots?.get(id) !== images) {
-          (state.attachmentSnapshots ||= new Map()).set(id, images); persistComposer(id, "images");
-        }
-      }
-      for (const id of state.attachmentSnapshots?.keys() || []) if (!state.attachments.drafts.has(id)) {
-        state.attachmentSnapshots.delete(id); persistComposer(id, "images");
-      }
+      persistAttachmentChanges();
       renderStatus();
     }, onError: showError});
   state.attachments.bind();

@@ -73,9 +73,7 @@ class ConversationPane {
       canAttach: () => !this.disposed && !this.composer.hidden && !this.input.disabled,
       onError: showError, onChange: () => {
         this.draftRevision = (this.draftRevision || 0) + 1;
-        const images = this.images.snapshot();
-        if (this.workspace.durableDrafts && !this.images.pending() && state.clearingSubmission !== this.id)
-          writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {images}), "images").catch(showError);
+        persistAttachmentChanges();
         if (!this.disposed) { this.showImages(); this.shell.onDraft?.(this.id, this.exportDraft()); }
       }});
     this.images.drafts = this.workspace.attachments.drafts;
@@ -190,6 +188,7 @@ class ConversationPane {
     if (!draft) return;
     this.input.value = draft.text || "";
     this.workspace.attachments.drafts.set(this.id, draft.images || []);
+    (this.workspace.attachmentSnapshots ||= new Map()).set(this.id, this.workspace.attachments.drafts.get(this.id));
     this.workspace.mentions?.restore(this.id, this.input.value, draft.mentions || []);
     this.workspace.drafts.set(this.id, this.input.value);
     this.showImages();
