@@ -647,6 +647,17 @@ class HistoryPersistence:
     def save_steps(self, thread_id, history):
         started = time.monotonic()
         try:
+            # A compact generation is writable by this same dual-reader build.
+            # Rollback keeps the current DB and accepted work, rather than
+            # selecting an obsolete time-of-copy database.
+            with self.store.reading(), self.store._connection() as db:
+                control = db.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_storage_control'").fetchone()
+                indexed = control and db.execute("SELECT 1 FROM transcript_storage_control WHERE mode='indexed'").fetchone()
+            if indexed:
+                from .transcript_store import TranscriptStore
+                TranscriptStore(self.store).save(thread_id, history, activate=True)
+                self._record({"snapshots": 1})
+                return {"snapshots": 1, "elapsed_seconds": time.monotonic() - started}
             with self.lock:
                 previous = self.prepared.get(thread_id)
             with self.store._writer.measure_request("history.prepare"):

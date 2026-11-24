@@ -141,6 +141,9 @@ class TranscriptStoreTests(unittest.TestCase):
         compacted = Path(compact(self.store.database_path))
         compact_store = CoordinationStore(compacted)
         self.assertEqual(read_history(compact_store, "thread"), self.history)
+        updated = {**self.history, "turns": self.history["turns"] + [{"id": "after-cutover", "items": []}]}
+        HistoryPersistence(compact_store).save("thread", updated)
+        self.assertEqual(read_history(compact_store, "thread"), updated)
         self.assertEqual(read_history(self.store, "thread"), self.history)
         unrelated = self.store.database_path.parent / "unrelated.sqlite3"
         unrelated.write_bytes(b"unrelated")

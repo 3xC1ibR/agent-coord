@@ -43,7 +43,10 @@ def owned_copy(source, destination):
 
 
 def compact(destination):
-    """Produce a separate compact candidate; retain original for rollback.
+    """Produce a separate compact candidate; retain the offline validation source.
+
+    After accepting new work, runtime rollback must keep the current database
+    and use a compatible dual-reader binary, never this older offline source.
 
     Only legacy transcript tables are removed here. Search/projection retention
     and their verification are owned by their respective migrations.
@@ -62,6 +65,8 @@ def compact(destination):
                 g.source_root != 'legacy:' || COALESCE((SELECT revision FROM transcript_legacy_revisions r WHERE r.thread_id=h.thread_id),0)""").fetchone()[0]
             if missing:
                 raise ValueError("Compaction requires activated, unchanged, verified legacy roots")
+            candidate.execute("CREATE TABLE IF NOT EXISTS transcript_storage_control (mode TEXT PRIMARY KEY)")
+            candidate.execute("INSERT OR IGNORE INTO transcript_storage_control VALUES ('indexed')")
             candidate.execute("UPDATE transcript_generations SET source_root=NULL")
             candidate.execute("DROP TABLE browser_history")
             candidate.execute("DROP TABLE browser_history_chunks")
