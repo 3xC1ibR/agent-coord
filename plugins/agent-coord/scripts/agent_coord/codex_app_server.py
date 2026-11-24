@@ -3211,14 +3211,20 @@ class BrowserSessions:
         self.sidecars.close()
         self.inbox_wake.close()
         self.external_work.close()
-        self.rpc.close()
-        self.claude.close()
-        self.antigravity.close()
-        self.kimi.close()
-        self.muse.close()
+        provider_errors = []
+        for name, provider in (("codex", self.rpc), ("claude", self.claude),
+                               ("antigravity", self.antigravity), ("kimi", self.kimi), ("muse", self.muse)):
+            try:
+                provider.close()
+            except Exception as error:
+                # One uncertain native close must not leave other owned
+                # providers or their pending persistence running unattended.
+                provider_errors.append((name, error))
         self.schedules.close()
+        unconfirmed_providers = {name for name, _error in provider_errors}
         for thread_id in list(self.loaded):
-            if self.loaded_clients.get(thread_id) != "codex" and not getattr(self, "transport_handover", False):
+            if (self.loaded_clients.get(thread_id) not in {"codex", *unconfirmed_providers}
+                    and not getattr(self, "transport_handover", False)):
                 self._event({"method": "thread/closed", "params": {"threadId": thread_id}})
         self.queue.close()
         with self.history_lock:
@@ -3230,3 +3236,6 @@ class BrowserSessions:
         if getattr(self.store, "conversation_barrier", None) is self.conversation_barrier:
             del self.store.conversation_barrier
         self.execution.close()
+        if provider_errors:
+            details = "; ".join(f"{name}: {error}" for name, error in provider_errors)
+            raise CoordinationError("Provider shutdown incomplete: " + details) from provider_errors[0][1]
