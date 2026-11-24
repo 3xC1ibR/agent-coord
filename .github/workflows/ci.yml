@@ -112,6 +112,8 @@ jobs:
         run: |
           python3 scripts/build_web.py
           python3 scripts/check_design_tokens.py
+      - name: Verify incremental asset publication and recovery
+        run: node --test tests/test_web_build.mjs
       - name: Verify durable composer drafts
         run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
       - name: Verify retained conversation architecture

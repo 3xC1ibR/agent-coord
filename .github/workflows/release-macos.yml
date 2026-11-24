@@ -79,6 +79,7 @@ jobs:
         run: |
           python3 scripts/build_web.py
           python3 scripts/check_design_tokens.py
+          node --test tests/test_web_build.mjs
       - name: Test release source
         run: |
           sudo apt-get update
