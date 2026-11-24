@@ -186,6 +186,36 @@ class OrchestrationNotificationTests(unittest.TestCase):
         self.assertEqual((thread["status"], thread["needs_attention"], thread["attention_owner_thread_id"]),
                          ("stalled", True, child))
 
+    def test_alert_labels_look_up_only_the_alerted_threads(self):
+        # Alerts are polled about once a second per event stream; labelling
+        # must not scan every app agent's creation record.
+        from unittest.mock import patch
+        from agent_coord import codex_app_server, supervision
+        child, other = self.child(), self.child()
+        self.wake(child)
+        self.sessions._event({"id": 9, "method": "item/commandExecution/requestApproval", "params": {"threadId": child}})
+        ask = self.store.asks.create(other, "Which target?", blocking=True, options=["A", "B"])
+        original = codex_app_server.app_agent_creators
+
+        def targeted_only(db, thread_id=None):
+            self.assertIsNotNone(thread_id, "alert labelling scanned every app agent")
+            return original(db, thread_id)
+        with patch.object(codex_app_server, "app_agent_creators", targeted_only):
+            events = self.sessions.approval_notifications()
+            self.assertEqual([e["title"] for e in events], ["Specialist · App agent of Orchestrator"])
+            self.assertNotIn("ask:" + str(ask["id"]), [e["request_key"] for e in events])
+            self.assertEqual(self.sessions.app_agent_supervisors([self.parent, "missing"]), {})
+            # A transferred supervisor names the new one; a user-supervised agent has none.
+            lead = self.sessions.create({"name": "New lead"})["session"]["thread_id"]
+            with self.store._connection() as db:
+                supervision.ensure_schema(db)
+                db.execute("INSERT INTO agent_supervisors (thread_id, supervisor_session_id, transfer_id, updated_at) VALUES (?, ?, 't', 1)",
+                           (child, lead))
+            self.assertEqual(self.sessions.app_agent_supervisors([child]), {child: "New lead"})
+            with self.store._connection() as db:
+                db.execute("UPDATE agent_supervisors SET supervisor_kind='user' WHERE thread_id=?", (child,))
+            self.assertEqual(self.sessions.app_agent_supervisors([child]), {})
+
     def test_closed_parent_does_not_hide_child_failure(self):
         child = self.child()
         self.wake(child)

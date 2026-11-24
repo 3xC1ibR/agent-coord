@@ -1592,17 +1592,26 @@ class BrowserSessions:
         return creators
 
     def app_agent_supervisors(self, thread_ids) -> dict[str, str]:
-        """Supervisor titles of the app agents among thread_ids, for alert labels."""
-        from .supervision import display_fields, relations
+        """Supervisor titles of the app agents among thread_ids, for alert labels.
+
+        This runs on every event-stream poll, so it reads only the named
+        threads by index; it never scans every app agent's creation record.
+        The rule matches supervision.display_fields: an explicit supervisor,
+        else the orchestration creator; a user-supervised agent has none.
+        """
+        from . import supervision
         ids = {tid for tid in thread_ids if isinstance(tid, str)}
         if not ids:
             return {}
-        creators = self._app_agent_creators(shared=True)
         result = {}
         with self.store.reading(), self.store._connection() as db:
-            related = relations(db)
             for tid in ids:
-                supervisor = display_fields(tid, creators.get(tid), related)["supervisor_thread_id"]
+                if supervision.supervised_by_user(db, tid):
+                    continue
+                supervisor = supervision.override(db, tid)
+                if supervisor is None:
+                    created = app_agent_creators(db, tid).get(tid)
+                    supervisor = created["thread_id"] if created and created["mode"] == "orchestration" else None
                 if supervisor and supervisor != tid:
                     row = db.execute("SELECT title FROM work_threads WHERE thread_id = ?", (supervisor,)).fetchone()
                     result[tid] = row["title"] if row else "another agent"
