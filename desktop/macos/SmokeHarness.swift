@@ -554,6 +554,27 @@ extension AppDelegate {
         let arguments = CommandLine.arguments
         let flag = arguments.firstIndex(of: "--smoke-observe-origins")
         let saved = flag.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
+        func workspaceSettled(_ window: DesktopWindow) -> Bool {
+            window.navigationReady && !window.restoringWorkspace && !window.navigating &&
+                window.pendingLinks.isEmpty && !window.webView.isLoading
+        }
+        func waitForSource(_ window: DesktopWindow, check: String) async throws {
+            // smokeReady observes connectivity. The cold-start overview link can
+            // still change selection after that signal and erase this fixture.
+            for _ in 0..<120 where !workspaceSettled(window) {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            smoke.results[check + "_state"] = nativeState(window)
+            try smokeCheck(check, workspaceSettled(window))
+        }
+        func nativeState(_ window: DesktopWindow) -> [String: Any] {
+            ["host": window.webView.url?.host ?? "", "document_origin": window.documentOrigin?.absoluteString ?? "",
+             "next_origin": window.nextOrigin?.absoluteString ?? "", "replacement_pending": window.replacement != nil,
+             "navigation_ready": window.navigationReady, "restoring": window.restoringWorkspace,
+             "navigating_link": window.navigating, "pending_links": window.pendingLinks.count,
+             "loading": window.webView.isLoading]
+        }
+        try await waitForSource(item, check: "origin_change_source_ready")
         let thread = try await smokeJS("""
             document.querySelector('[data-jev-skip]')?.click();
             const id = saved || (await api('sessions', {client:'claude', name:'Window continuity', cwd})).session.thread_id;
@@ -566,6 +587,7 @@ extension AppDelegate {
         let sibling = makeWindow()
         defer { if flag == nil { sibling.window.close() } }
         try await smokeReady(sibling)
+        try await waitForSource(sibling, check: "origin_change_second_source_ready")
         _ = try await smokeJS("""
             await refreshList(); await select(id);
             const field = document.querySelector('#message');
@@ -573,23 +595,45 @@ extension AppDelegate {
             field.dispatchEvent(new Event('input', {bubbles:true}));
             return true;
             """, in: sibling.webView, arguments: ["id": thread])
-        func reached(_ window: DesktopWindow, _ endpoint: URL, text: String) async -> Bool {
+        func documentState(_ window: DesktopWindow, _ endpoint: URL, text: String) async -> [String: Any]? {
+            try? await smokeJS("""
+                const field = document.querySelector('#message');
+                return {origin: location.origin === origin, thread: typeof state === 'object' && state.selected === id,
+                  draft: field?.value === text, selection: field?.selectionStart === 2 && field?.selectionEnd === 8,
+                  sending: typeof state === 'object' ? state.sending?.size || 0 : 0,
+                  openDialog: !!document.querySelector('dialog[open]')};
+                """, in: window.webView, arguments: ["id": thread, "text": text,
+                    "origin": String(endpoint.absoluteString.dropLast())]) as? [String: Any]
+        }
+        func reached(_ window: DesktopWindow, _ endpoint: URL, text: String, check: String) async -> Bool {
+            let started = DispatchTime.now().uptimeNanoseconds
+            var page: [String: Any]?
+            var matched = false
             for _ in 0..<120 {
-                if window.webView.url?.host == endpoint.host && window.navigationReady && !window.restoringWorkspace,
-                   (try? await smokeJS("""
-                      const field = document.querySelector('#message');
-                      return location.origin === origin && state.selected === id && field?.value === text &&
-                        field.selectionStart === 2 && field.selectionEnd === 8;
-                      """, in: window.webView, arguments: ["id": thread, "text": text,
-                            "origin": String(endpoint.absoluteString.dropLast())]) as? Bool) == true { return true }
+                if window.webView.url?.host == endpoint.host && workspaceSettled(window) {
+                    page = await documentState(window, endpoint, text: text)
+                    matched = ["origin", "thread", "draft", "selection"].allSatisfy { page?[$0] as? Bool == true }
+                    if matched { break }
+                }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
-            return false
+            if !matched, page == nil, window.loaded, !window.webView.isLoading {
+                page = await documentState(window, endpoint, text: text)
+            }
+            var report = nativeState(window)
+            report["document"] = page
+            report["milliseconds"] = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+            smoke.results[check + "_state"] = report
+            return matched
         }
+        let firstSeeded = await reached(item, direct, text: "An unsent draft", check: "origin_change_source_draft")
+        let secondSeeded = await reached(sibling, direct, text: "Second window draft", check: "origin_change_second_source_draft")
+        try smokeCheck("origin_change_source_draft", firstSeeded)
+        try smokeCheck("origin_change_second_source_draft", secondSeeded)
         backend.ready?(staged)
-        let stagedRestored = await reached(item, staged, text: "An unsent draft")
+        let stagedRestored = await reached(item, staged, text: "An unsent draft", check: "origin_change_staged_window")
         try smokeCheck("origin_change_staged_window", stagedRestored)
-        let otherStaged = await reached(sibling, staged, text: "Second window draft")
+        let otherStaged = await reached(sibling, staged, text: "Second window draft", check: "origin_change_independent_drafts")
         try smokeCheck("origin_change_independent_drafts", otherStaged)
         if CommandLine.arguments.contains("--smoke-observe-origins") {
             // The external reader acknowledges a fresh sample from both windows.
@@ -602,8 +646,8 @@ extension AppDelegate {
                 }
                 try smokeCheck("observed_" + endpoint.host!, FileManager.default.fileExists(atPath: acknowledgment.path))
             }
-            let firstRestored = await reached(item, direct, text: "An unsent draft")
-            let secondRestored = await reached(sibling, direct, text: "Second window draft")
+            let firstRestored = await reached(item, direct, text: "An unsent draft", check: "origin_change_first_direct_draft")
+            let secondRestored = await reached(sibling, direct, text: "Second window draft", check: "origin_change_second_direct_draft")
             try smokeCheck("both_drafts_before_quit", firstRestored && secondRestored)
             smoke.results["draft_window_ids"] = [item.id, sibling.id]
             let payload = try await smokeJS("""
@@ -629,7 +673,7 @@ extension AppDelegate {
         _ = try await smokeJS("(state.sending ||= new Set()).add(id); return true;",
                               in: item.webView, arguments: ["id": thread])
         backend.ready?(direct)
-        let otherDirect = await reached(sibling, direct, text: "Second window draft")
+        let otherDirect = await reached(sibling, direct, text: "Second window draft", check: "origin_change_ready_window_continues")
         try smokeCheck("origin_change_ready_window_continues", otherDirect)
         try await smokeFocus(item)
         item.window.makeFirstResponder(item.webView)
@@ -649,7 +693,7 @@ extension AppDelegate {
             return field.value === 'An unsent draftx';
             """, in: item.webView, arguments: ["id": thread])
         try smokeCheck("origin_change_keystroke_visible", typed as? Bool == true)
-        let directRestored = await reached(item, direct, text: "An unsent draftx")
+        let directRestored = await reached(item, direct, text: "An unsent draftx", check: "origin_change_direct_window")
         try smokeCheck("origin_change_direct_window", directRestored)
         _ = try await smokeJS("document.querySelector('[data-jev-skip]')?.click(); return true;", in: item.webView)
         try await smokeWindowImage(item, suffix: "origin-change")
