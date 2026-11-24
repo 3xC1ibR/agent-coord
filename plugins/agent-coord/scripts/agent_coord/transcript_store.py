@@ -10,6 +10,8 @@ import fcntl
 import hashlib
 import json
 import os
+import uuid
+import shutil
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -33,11 +35,27 @@ def ensure_schema(db):
         full_offset INTEGER NOT NULL, full_length INTEGER NOT NULL, digest TEXT NOT NULL, item_count INTEGER NOT NULL,
         PRIMARY KEY(thread_id, turn_seq)) WITHOUT ROWID""")
     db.execute("CREATE INDEX IF NOT EXISTS thread_turn_identity ON thread_turns(thread_id, turn_id)")
+    db.execute("""CREATE TABLE IF NOT EXISTS transcript_legacy_revisions (
+        thread_id TEXT PRIMARY KEY, revision INTEGER NOT NULL) WITHOUT ROWID""")
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone():
+        for event in ("INSERT", "UPDATE", "DELETE"):
+            identity = "OLD" if event == "DELETE" else "NEW"
+            db.execute(f"""CREATE TRIGGER IF NOT EXISTS transcript_legacy_{event.lower()}
+                AFTER {event} ON browser_history BEGIN
+                INSERT OR IGNORE INTO transcript_legacy_revisions VALUES ({identity}.thread_id, 0);
+                UPDATE transcript_legacy_revisions SET revision=revision+1 WHERE thread_id={identity}.thread_id;
+                END""")
+
+
+def legacy_revision(db, thread_id):
+    row = db.execute("SELECT revision FROM transcript_legacy_revisions WHERE thread_id=?", (thread_id,)).fetchone()
+    return "legacy:" + str(row[0] if row else 0)
 
 
 class TranscriptStore:
-    def __init__(self, store):
+    def __init__(self, store, *, minimum_free_bytes=0):
         self.store = store
+        self.minimum_free_bytes = minimum_free_bytes
         self.root = Path(str(store.database_path) + ".transcripts")
 
     def directory(self, thread_id):
@@ -93,8 +111,15 @@ class TranscriptStore:
             with self.store._connection() as db:
                 ensure_schema(db)
             with self.store.reading(), self.store._connection() as db:
-                old = db.execute("SELECT generation, active, checkpoint, source_instance FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
-                previous = {r[1]: tuple(r) for r in db.execute("SELECT * FROM thread_turns WHERE thread_id=?", (thread_id,))}
+                old = db.execute("SELECT generation, active, checkpoint, source_instance, turn_count, item_count, metadata FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
+                previous = {}
+                sequences = list(prepared)
+                for offset in range(0, len(sequences), 200):
+                    batch = sequences[offset:offset + 200]
+                    query = "SELECT * FROM thread_turns WHERE thread_id=? AND turn_seq IN (" + ",".join("?" for _ in batch) + ")"
+                    previous.update({r[1]: tuple(r) for r in db.execute(query, [thread_id, *batch])})
+                removed_items = db.execute("SELECT COALESCE(sum(item_count),0) FROM thread_turns WHERE thread_id=? AND turn_seq>=?",
+                                           (thread_id, turn_count)).fetchone()[0] if old and turn_count < old[4] else 0
             previous_instance = old[3] if old else None
             if source_instance is None:
                 source_instance = previous_instance
@@ -107,15 +132,21 @@ class TranscriptStore:
                 raise ValueError("Transcript checkpoint would move backwards")
             changed = {seq: value for seq, value in prepared.items()
                        if seq not in previous or previous[seq][7] != value[3]}
-            resulting = (set(previous) | set(changed)) & set(range(turn_count))
-            if len(resulting) != turn_count:
+            old_count = old[4] if old else 0
+            if any(seq not in changed for seq in range(old_count, turn_count)):
                 raise ValueError("Transcript publication has missing turn sequences")
+            item_count = (old[5] if old else 0) - removed_items
+            item_count += sum(value[4] - (previous[seq][8] if seq in previous else 0)
+                              for seq, value in changed.items())
+            required_bytes = sum(len(value[1]) + len(value[2]) for value in changed.values())
+            if shutil.disk_usage(directory).free < required_bytes + self.minimum_free_bytes:
+                raise OSError("Insufficient free space for durable transcript publication")
             offsets = []
             with os.fdopen(os.open(directory / "turns.compact.jsonl", os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600), "ab") as compact:
                 with os.fdopen(os.open(directory / "turns.full.jsonl", os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600), "ab") as complete:
                     a, b = compact.tell(), complete.tell()
-                    for seq, (identity, short, full, digest, item_count) in sorted(changed.items()):
-                        offsets.append((thread_id, seq, identity, a, len(short), b, len(full), digest, item_count))
+                    for seq, (identity, short, full, digest, changed_item_count) in sorted(changed.items()):
+                        offsets.append((thread_id, seq, identity, a, len(short), b, len(full), digest, changed_item_count))
                         compact.write(short)
                         complete.write(full)
                         a += len(short)
@@ -126,14 +157,14 @@ class TranscriptStore:
             self._sync_directory(directory)
             self._sync_directory(self.root)
             self._sync_directory(self.root.parent)
-            hashes = {seq: row[7] for seq, row in previous.items() if seq < turn_count}
-            hashes.update({seq: value[3] for seq, value in changed.items()})
-            generation = hashlib.sha256(encode([metadata, sorted(hashes.items())])).hexdigest()
+            generation = (old[0] if old and not changed and turn_count == old[4] and metadata == old[6]
+                          else uuid.uuid4().hex)
             with self.store.database_operation("transcript.publish", priority="background"), self.store._connection() as db:
                 if source_root is not None:
                     row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
                     if not row or row[0] != source_root:
                         raise ValueError("Legacy history changed during transcript preparation")
+                    source_root = legacy_revision(db, thread_id)
                 db.execute("DELETE FROM thread_turns WHERE thread_id=? AND turn_seq>=?", (thread_id, turn_count))
                 db.executemany("""INSERT INTO thread_turns VALUES (?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(thread_id,turn_seq) DO UPDATE SET turn_id=excluded.turn_id,
@@ -143,10 +174,12 @@ class TranscriptStore:
                     ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation,
                     metadata=excluded.metadata, turn_count=excluded.turn_count,
                     item_count=excluded.item_count, source_root=excluded.source_root,
-                    active=excluded.active, checkpoint=excluded.checkpoint, source_instance=excluded.source_instance""",
+                    active=excluded.active, checkpoint=excluded.checkpoint, source_instance=excluded.source_instance
+                    WHERE generation != excluded.generation OR source_root IS NOT excluded.source_root
+                       OR active != excluded.active OR checkpoint != excluded.checkpoint
+                       OR source_instance IS NOT excluded.source_instance""",
                     (thread_id, generation, metadata, turn_count,
-                     sum(changed[seq][4] if seq in changed else previous[seq][8]
-                         for seq in range(turn_count)),
+                     item_count,
                      source_root, int(activate or bool(old and old[1])), checkpoint, source_instance))
                 if on_publish is not None:
                     on_publish(db)
@@ -161,8 +194,7 @@ class TranscriptStore:
             if row is None or (require_active and not row[6]):
                 return None
             if require_active and row[5] is not None:
-                legacy = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
-                if not legacy or legacy[0] != row[5]:
+                if legacy_revision(db, thread_id) != row[5]:
                     return None  # An older build wrote the retained legacy generation.
             if target_turn is not None:
                 target = db.execute("SELECT turn_seq FROM thread_turns WHERE thread_id=? AND turn_id=?",
@@ -277,24 +309,39 @@ class TranscriptStore:
                 if frame["sequence"] > after_seq:
                     yield frame
 
-    def migrate(self, *, activate=False):
+    def deactivate(self):
+        """Revert to retained legacy roots only while they remain equivalent."""
+        with self.store._connection() as db:
+            rows = db.execute("SELECT thread_id, source_root FROM transcript_generations WHERE active=1").fetchall()
+            for identity, revision in rows:
+                if revision is None or legacy_revision(db, identity) != revision:
+                    raise ValueError("Rollback requires an equivalent retained legacy history")
+            db.execute("UPDATE transcript_generations SET active=0")
+
+    def migrate(self, *, activate=False, on_progress=None):
         """Copy, verify exact content, then optionally activate each stable root."""
         from .history_persistence import decode_history
         with self.store.reading(), self.store._connection() as db:
             identities = [r[0] for r in db.execute("SELECT thread_id FROM browser_history ORDER BY thread_id")]
         reports = []
+        with self.store._connection() as db:
+            ensure_schema(db)
         for identity in identities:
             with self.store.reading(), self.store._connection() as db:
                 db.execute("BEGIN")
                 source = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0]
+                revision = legacy_revision(db, identity)
                 history = decode_history(source, db=db)
             self.save(identity, history, source_root=source)
             if self.read_full(identity, require_active=False) != history:
                 raise ValueError("Transcript migration content mismatch: " + identity)
             if activate:
                 with self.store._connection() as db:
-                    db.execute("""UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?
-                        AND source_root=(SELECT history_json FROM browser_history WHERE thread_id=?)""", (identity, source, identity))
+                    if legacy_revision(db, identity) != revision:
+                        raise ValueError("Legacy history changed before activation")
+                    db.execute("UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?", (identity, revision))
             reports.append({"thread_id": identity, "turns": len(history.get("turns") or []),
                             "items": sum(len(t.get("items") or []) for t in history.get("turns") or [])})
+            if on_progress is not None:
+                on_progress(reports[-1])
         return reports

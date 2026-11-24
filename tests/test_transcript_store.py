@@ -129,6 +129,25 @@ class TranscriptStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest mismatch"):
             restarted.read_full("thread")
 
+    def test_bounded_legacy_revision_and_reversible_compaction(self):
+        self.transcripts.migrate(activate=True)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertLess(len(db.execute("SELECT source_root FROM transcript_generations").fetchone()[0]), 32)
+        self.transcripts.deactivate()
+        self.assertIsNone(self.transcripts.read_window("thread"))
+        self.transcripts.migrate(activate=True)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from migrate_transcript_storage import compact, owned_copy
+        compacted = Path(compact(self.store.database_path))
+        compact_store = CoordinationStore(compacted)
+        self.assertEqual(read_history(compact_store, "thread"), self.history)
+        self.assertEqual(read_history(self.store, "thread"), self.history)
+        unrelated = self.store.database_path.parent / "unrelated.sqlite3"
+        unrelated.write_bytes(b"unrelated")
+        with self.assertRaisesRegex(ValueError, "ownership receipt"):
+            owned_copy(self.store.database_path, unrelated)
+        self.assertEqual(unrelated.read_bytes(), b"unrelated")
+
     def test_source_instance_fence_allows_only_expected_reset(self):
         self.transcripts.save("thread", self.history, activate=True, checkpoint=10, source_instance="first")
         self.transcripts.save("thread", self.history, checkpoint=1, source_instance="second", expected_source_instance="first")

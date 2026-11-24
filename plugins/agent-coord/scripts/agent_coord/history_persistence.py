@@ -488,6 +488,8 @@ def read_history(store, thread_id, *, windows=None, live_turn=None):
         return indexed
     with store.reading(), store._connection() as db:
         db.execute("BEGIN")
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone():
+            return None
         row = db.execute("SELECT CAST(history_json AS BLOB) FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
         if not row:
             return None
