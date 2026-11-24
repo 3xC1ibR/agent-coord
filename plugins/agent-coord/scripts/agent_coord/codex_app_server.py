@@ -44,7 +44,7 @@ from .claude_code import ClaudeRPC
 from .antigravity import AntigravityRPC
 from .kimi import KimiRPC
 from .muse_code import MuseRPC
-from .attention import AttentionClassifier
+from .attention import AttentionClassifier, load_config as load_attention_config
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
@@ -1871,7 +1871,7 @@ class BrowserSessions:
             inventory.supervision = relations(db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
                                    if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)
-                                   and matches_workspace(inventory.browser.get(row["thread_id"], row["cwd"]), self.cwd)}
+                                   and matches_workspace(inventory.browser.get(row["thread_id"]) or row["cwd"], self.cwd)}
         # One consistent snapshot for the entire list. Taking the shared provider
         # lock for every card can make a single list wait for hundreds of checkpoints.
         with self.lock:
@@ -1923,7 +1923,10 @@ class BrowserSessions:
         if "handled" in body and not isinstance(body["handled"], bool):
             raise CoordinationError("Handled must be true or false.")
         cursors = tuple(body.get(key) for key in ("seen_checkpoint_id", "seen_completion_id"))
-        displayed = body.get("seen") and all(type(cursor) is int and cursor >= 0 for cursor in cursors) and any(cursors)
+        if any(cursor is not None for cursor in cursors):
+            cursors = tuple(0 if cursor is None else cursor for cursor in cursors)
+        displayed = (body.get("seen") and {"seen_checkpoint_id", "seen_completion_id"} <= body.keys()
+                     and all(type(cursor) is int and cursor >= 0 for cursor in cursors) and any(cursors))
         # Read the projection before requesting write admission. The store
         # rechecks durable blockers and cursor identity inside the transaction.
         if displayed or body.get("handled") or body.get("attention") is not None:
@@ -1935,6 +1938,13 @@ class BrowserSessions:
                                     or thread["execution"]["pending_requests"])
                            and cursors == tuple((thread[key] or {}).get("id", 0)
                                                 for key in ("checkpoint", "turn_completion")))
+        await_classification = False
+        if auto_handle and thread["turn_completion"]:
+            classification = thread["response_classification"]
+            auto_handle = (classification["status"] == "classified" if classification else
+                           not (self.classifier.config or load_attention_config(self.store.database_path)))
+            await_classification = not auto_handle
+
         def still_informational():
             # This runs inside the receipt transaction. Copy the current
             # request map without waiting for the provider's state lock.
@@ -1957,7 +1967,8 @@ class BrowserSessions:
             self.update(thread_id, {"archived": False})
         self.store.threads.update(thread_id, return_thread=False, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
                                   seen_checkpoint_id=cursors[0], seen_completion_id=cursors[1],
-                                  auto_handle_seen=still_informational if auto_handle else None,
+                                  auto_handle_seen=still_informational if auto_handle or await_classification else None,
+                                  await_seen_classification=await_classification,
                                   handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
                                   handled_completion_id=body.get("handled_completion_id"),
                                   **({"domain": body["domain"]} if "domain" in body else {}),
@@ -1965,6 +1976,24 @@ class BrowserSessions:
                                   **{key: body[key] for key in ("pinned", "quiet") if key in body}, **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
+
+    def handle_seen_classified_result(self, thread_id, completion_id):
+        """Clear a previously displayed result once it is classified as informational."""
+        with self._thread_lock(thread_id):
+            pending = self.store.threads.pending_seen_classification(thread_id, completion_id)
+            if pending is None:
+                return
+            try:
+                self._authorize_history(thread_id)
+                thread = self.work_thread(thread_id, history=False)
+            except CoordinationError:
+                return  # A moved or retired thread no longer belongs to this runtime.
+            checkpoint = (thread["checkpoint"] or {}).get("id", 0)
+            if (checkpoint == pending and (thread["turn_completion"] or {}).get("id") == completion_id and
+                    thread["seen_completion_id"] >= completion_id and thread["seen_checkpoint_id"] >= checkpoint and
+                    thread["response_state"] == "update"):
+                self._update_work_thread(thread_id, {"seen": True, "seen_checkpoint_id": checkpoint,
+                                                     "seen_completion_id": completion_id}, minimal_receipt=True)
 
     def close_work_thread(self, thread_id: str, *, stop_timeout: float = 10) -> dict:
         """Stop owned execution, or hide an externally owned conversation.

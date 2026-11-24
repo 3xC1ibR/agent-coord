@@ -30,7 +30,7 @@ def resolve_workspace(path: str, *, workspace: str | None = None) -> str:
 
 def matches_workspace(cwd: str, workspace: str | None) -> bool:
     """Include descendants and preserve grouping of a repository's worktrees."""
-    if workspace is None:
+    if workspace is None or cwd == workspace:
         return True
     directory = Path(cwd).expanduser().resolve()
     root = Path(workspace).expanduser().resolve()
@@ -45,7 +45,7 @@ def require_thread_workspaces(store, thread_ids, workspace, *, exclude_managed=F
     identities = set(thread_ids)
     with store.reading(), store._connection() as db:
         slots = ",".join("?" for _ in identities)
-        browser = db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_sessions'").fetchone()
+        browser = any(column[1] == "cwd" for column in db.execute("PRAGMA table_info(browser_sessions)"))
         browser_cwd = "b.cwd" if browser else "NULL"
         join = "LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id" if browser else ""
         managed = """AND NOT EXISTS (SELECT 1 FROM delegations d JOIN work_threads parent
@@ -71,15 +71,15 @@ def workspace_members(query):
     project = query.get("project", [""])[0]
     location = query.get("project_cwd", [""])[0]
     roots = tuple(map(Path, directory_roots(query.get("directory_root", []))))
-    folder = Path(location).expanduser().resolve() if location and not project else None
+    folder = Path(location).expanduser().resolve() if location and project in {"", "__none__"} else None
 
     def includes(thread):
         if project and thread["project_id"] != (None if project == "__none__" else project):
             return False
         if roots and not any(Path(thread["cwd"]).resolve().is_relative_to(root) for root in roots):
             return False
-        return folder is None or any(Path(path).resolve().is_relative_to(folder) for path in
-                                     (thread["project_cwd"], *thread.get("orchestration_workspaces", ())))
+        paths = (thread["project_cwd"], thread.get("project_launch_cwd"), *thread.get("orchestration_workspaces", ()))
+        return folder is None or any(path and Path(path).resolve() == folder for path in paths)
 
     return includes
 

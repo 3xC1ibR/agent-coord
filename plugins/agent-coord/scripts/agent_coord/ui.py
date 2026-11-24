@@ -697,6 +697,7 @@ def _handler(
                                           "recurringSchedules": True,
                                           # The asks view checks this before offering kinds, notes, snooze and the log.
                                           "askKinds": True,
+                                          "askTypedAnswers": 1,
                                           # Records the user's reply to an open ask, for the mark every device shows.
                                           "askReplies": True,
                                           "remote": self._remote_request(),
@@ -869,9 +870,13 @@ def _handler(
                 self._json(HTTPStatus.OK, {"watches": watches,
                                          "requests": [control.status(key) for key in pending]})
             elif route.startswith("threads/") and route.endswith("/preview"):
-                self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
+                thread_id = unquote(route[8:-8])
+                self._check_thread_workspace(thread_id)
+                self._json(HTTPStatus.OK, thread_preview(browser_sessions, thread_id))
             elif route.startswith("threads/") and route.endswith("/messages"):
-                self._json(HTTPStatus.OK, {"data": message_timeline(store, unquote(route[8:-9]), browser_sessions.cwd)})
+                thread_id = unquote(route[8:-9])
+                self._check_thread_workspace(thread_id)
+                self._json(HTTPStatus.OK, {"data": message_timeline(store, thread_id, browser_sessions.cwd)})
             elif route.startswith("threads/"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:])
@@ -1358,6 +1363,7 @@ def _handler(
                     if len(route) not in {4, 5}:
                         raise CoordinationError("Choose a work thread.")
                     thread_id = unquote(route[3])
+                    self._check_thread_workspace(thread_id)
                     if len(route) == 4:
                         result = browser_sessions.update_work_thread(
                             thread_id, body, prefer_minimal=self.headers.get("Prefer") == "return=minimal")

@@ -272,7 +272,7 @@ def dismiss(store, thread_id, incident_id):
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT classification FROM app_agent_stall_incidents WHERE id=? AND thread_id=?",
                          (incident_id, thread_id)).fetchone()
-        if row is None or row["classification"] == "waiting_for_approval":
+        if row is None or row["classification"] not in {"stalled", "unverified_tool"}:
             raise CoordinationError("Choose a stall in this conversation that can be dismissed.")
         db.execute('''INSERT OR IGNORE INTO browser_stall_dismissals
             SELECT i.id, i.thread_id, ? FROM app_agent_stall_incidents i
@@ -308,7 +308,7 @@ def apply_attention(thread, *, now, waiting=False):
         action += f"; {count} queued request{'s' if count != 1 else ''}, oldest {age // 60} min"
     thread.update(needs_attention=True, attention_reason='blocked', attention_key=f"stall:{incident['id']}",
                   attention_since=incident['created_at'], attention_action=action,
-                  attention_owner_thread_id=thread['thread_id'], can_handle_response=not waiting and state != "waiting")
+                  attention_owner_thread_id=thread['thread_id'], can_handle_response=not waiting and state == "stalled")
 
 
 def notifications(store, *, include_claimed=False, cwd=None):

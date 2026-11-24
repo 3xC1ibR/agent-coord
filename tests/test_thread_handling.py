@@ -108,6 +108,44 @@ class ThreadHandlingTests(unittest.TestCase):
         self.assertEqual(after["handled_completion_id"], latest["handled_completion_id"])
         self.assertGreater(latest["turn_completion"]["id"], after["handled_completion_id"])
 
+    def test_partial_read_receipt_does_not_advance_the_omitted_cursor(self):
+        reply = self.result()
+        projected = self.sessions.update_work_thread("terminal", {
+            "seen": True, "seen_checkpoint_id": reply["checkpoint"]["id"]})
+        self.assertEqual(projected["seen_checkpoint_id"], reply["checkpoint"]["id"])
+        self.assertEqual(projected["seen_completion_id"], 0)
+        self.assertEqual(projected["handled_completion_id"], 0)
+
+    def test_late_classification_only_handles_an_already_seen_informational_result(self):
+        for choice in ("review", "update"):
+            with self.subTest(choice=choice):
+                reply = self.result(turn=choice)
+                token = self.store.threads.attention.claim(reply)
+                seen = self.sessions.update_work_thread("terminal", self.seen_receipt(reply))
+                self.assertLess(seen["handled_completion_id"], reply["turn_completion"]["id"])
+                self.assertTrue(self.store.threads.attention.save(reply, token, result={
+                    "choice": choice, "confidence": 0.99, "probabilities": {choice: 0.99}}))
+                self.sessions.handle_seen_classified_result("terminal", reply["turn_completion"]["id"])
+                classified = self.sessions.work_thread("terminal", history=False)
+                self.assertEqual(classified["needs_attention"], choice == "review")
+                self.assertEqual(classified["handled_completion_id"] == reply["turn_completion"]["id"], choice == "update")
+
+    def test_classification_overtaking_the_receipt_is_consumed_atomically(self):
+        reply = self.result()
+        token = self.store.threads.attention.claim(reply)
+        original = self.store.threads.update
+
+        def save_classification_before_receipt(*args, **kwargs):
+            self.store.threads.attention.save(reply, token, result={
+                "choice": "update", "confidence": 0.99, "probabilities": {"update": 0.99}})
+            return original(*args, **kwargs)
+
+        with patch.object(self.store.threads, "update", side_effect=save_classification_before_receipt):
+            seen = self.sessions.update_work_thread("terminal", self.seen_receipt(reply))
+        self.assertFalse(seen["needs_attention"])
+        self.assertEqual(seen["handled_completion_id"], reply["turn_completion"]["id"])
+        self.assertIsNone(self.store.threads.pending_seen_classification("terminal", reply["turn_completion"]["id"]))
+
     def test_blocking_ask_arriving_before_receipt_commit_stays_in_attention(self):
         first = self.result()
         original = self.store.threads.update

@@ -42,7 +42,7 @@ from .thread_mentions import thread_mentions
 from .thread_search import _snippet
 from .threads import ThreadStore
 from .views import ViewStore
-from .workspaces import matches_workspace, resolve_workspace, workspace_choices, workspace_members
+from .workspaces import matches_workspace, resolve_workspace, workspace_choices
 
 
 class _PreviousSchemaReader:
@@ -488,9 +488,6 @@ class SavedRuntimeViews:
         terms = phrase.split()
         items = []
         inspected = 0
-        filters = {key: val for key, val in query.items() if key == "directory_root"
-                   or key in {"project_cwd", "project"} and scope != "all_projects"}
-        includes = workspace_members(filters)
         with self.store._connection() as db:
             db.execute("BEGIN")
             indexed = all(has_table(db, table) for table in (
@@ -498,7 +495,7 @@ class SavedRuntimeViews:
                 "conversation_search_document_entries", "conversation_search_documents"))
             rows = db.execute("""SELECT t.thread_id,t.title,t.attention,t.original_request,t.project_cwd,
                 s.cwd,s.client,c.summary,c.phase,c.next_action,c.next_actor,o.project_id,o.repository_id,
-                b.thread_id IS NOT NULL AS app_conversation, b.cwd AS browser_cwd
+                b.thread_id IS NOT NULL AS app_conversation
                 FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
                 LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id
                 LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
@@ -506,13 +503,8 @@ class SavedRuntimeViews:
                 WHERE NOT EXISTS (SELECT 1 FROM delegations d JOIN work_threads p ON p.thread_id=d.parent_session_id
                                   WHERE d.child_session_id=t.thread_id)
                 ORDER BY t.updated_at DESC,t.thread_id""")
-            creators = {}
-            if filters.get("project_cwd", [""])[0] and not filters.get("project", [""])[0]:
-                creators = app_agent_creators(db)
-                describe_creators(creators, lambda cwd: matches_workspace(cwd, self.cwd))
             for row in rows:
-                if (not matches_workspace(row["cwd"], self.cwd) or
-                        not matches_workspace(row["browser_cwd"] or row["cwd"], self.cwd)):
+                if not matches_workspace(row["cwd"], self.cwd):
                     continue
                 if scope == "current":
                     if show in {"attention", "completed"}:
@@ -520,14 +512,10 @@ class SavedRuntimeViews:
                     placement = {"archived": "archived", "later": "later"}.get(show, "now")
                     if row["attention"] != placement or query.get("phase", [""])[0] not in ("", row["phase"]):
                         continue
-                    if "repository" in query and row["repository_id"] != (
-                            None if query["repository"][0] == "__none__" else query["repository"][0]):
+                    if any(key in query and row[key + "_id"] != (None if query[key][0] == "__none__" else query[key][0])
+                           for key in ("repository", "project")):
                         continue
-                item = dict(row)
-                item.pop("browser_cwd")
-                item["project_cwd"] = item["project_cwd"] or item["cwd"]
-                item["orchestration_workspaces"] = creators.get(item["thread_id"], {}).get("workspaces", ())
-                if not includes(item):
+                if scope != "all_projects" and "project_cwd" in query and row["project_cwd"] != query["project_cwd"][0]:
                     continue
                 context = "\n".join(row[k] or "" for k in ("title", "original_request", "summary")).casefold()
                 context_match = not user_only and all(term in context for term in terms)
@@ -536,6 +524,7 @@ class SavedRuntimeViews:
                     inspected += 1
                     matches = self._indexed_matches(db, row["thread_id"], terms, user_only)
                 if context_match or matches:
+                    item = dict(row)
                     item.update(original_request=_snippet(row["original_request"], terms, 240),
                                 summary=_snippet(row["summary"], terms, 320), matches=matches, context_match=context_match,
                                 message_count=len(matches))

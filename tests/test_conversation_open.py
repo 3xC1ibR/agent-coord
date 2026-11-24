@@ -2,16 +2,20 @@
 from __future__ import annotations
 
 import http.client
+import hashlib
 import json
 import tempfile
 import threading
 import unittest
+import uuid
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 from unittest.mock import patch
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
+from agent_coord import runtime_edge, ui
 from agent_coord.app_control import AppControl
 from agent_coord.store import CoordinationError
 from agent_coord.transcript_store import TranscriptStore
@@ -135,10 +139,14 @@ class ConversationOpenTests(unittest.TestCase):
         selected = {"project": group["id"], "project_cwd": str(self.first)}
         _, listing = get("threads?" + urlencode(selected))
         self.assertEqual({t["thread_id"] for t in listing["data"]}, {parent, child})
+        _, folder = get("threads?" + urlencode({"project_cwd": str(self.first)}))
+        self.assertEqual({t["thread_id"] for t in folder["data"]}, {parent, child})
         _, filtered = get("threads?" + urlencode({**selected, "directory_root": str(self.second)}))
         self.assertEqual([t["thread_id"] for t in filtered["data"]], [child])
         _, results = get("search?" + urlencode({"q": "Migration", "scope": "current", **selected}))
         self.assertEqual({t["thread_id"] for t in results["items"]}, {parent, child})
+        _, folder_results = get("search?" + urlencode({"q": "Migration", "scope": "all", "project_cwd": str(self.first)}))
+        self.assertEqual({t["thread_id"] for t in folder_results["items"]}, {parent, child})
 
         scoped = BrowserSessions(self.store, str(self.first), rpc_factory=FakeCodex)
         self.addCleanup(scoped.close)
@@ -160,6 +168,25 @@ class ConversationOpenTests(unittest.TestCase):
         self.store.attach_delegation(delegation["delegation_id"], "managed")
         with self.assertRaisesRegex(CoordinationError, "not found in this workspace"):
             self.sessions.conversation_open.read("managed")
+
+    def test_open_unloaded_history_does_not_wait_for_an_unrelated_provider_commit(self):
+        self.store.register(session_id="indexed", client="codex", cwd=str(self.first))
+        TranscriptStore(self.store).save("indexed", {"id": "indexed", "turns": [
+            {"id": "saved-turn", "items": [], "status": "completed"}]}, activate=True)
+        observation = SimpleNamespace(unloaded_observation={"excluded": {"unrelated"}})
+        with patch.object(self.sessions, "projection", observation, create=True), self.sessions.lock:
+            result, finished = [], threading.Event()
+
+            def read():
+                result.append(self.sessions.conversation_open.read("indexed"))
+                finished.set()
+
+            worker = threading.Thread(target=read)
+            worker.start()
+            fast = finished.wait(2)
+        worker.join(5)
+        self.assertTrue(fast)
+        self.assertEqual(result[0]["recent_turns"]["turns"][0]["id"], "saved-turn")
 
     def test_connected_stream_invalidates_external_ask_and_scratchpad_writes(self):
         thread = self.browser_thread(self.first)
@@ -190,3 +217,71 @@ class ConversationOpenTests(unittest.TestCase):
                         revisions.append(data["revision"])
                         topics.update(data["topics"])
             self.assertGreater(revisions[0], config["conversationMetadataCursor"])
+
+    def test_metadata_revisions_follow_settings_membership_asks_and_schedules(self):
+        thread = self.browser_thread(self.second)
+        group = self.store.threads.organization.create_project("Delivery", str(self.first))
+        actions = [
+            lambda: self.store.threads.update(thread, pinned=True),
+            lambda: self.store.threads.update(thread, quiet=True),
+            lambda: self.store.threads.update(thread, project_id=group["id"]),
+            lambda: self.store.asks.create(thread, "Which branch?", blocking=False, context="Default: main."),
+            lambda: self.sessions.schedules.create({"id": str(uuid.uuid4()), "target_thread_id": thread,
+                "message": "Check deployment.", "run_at": self.store.clock() + 3600, "timezone": "UTC"}),
+        ]
+        old = self.sessions.conversation_open.read(thread)
+        for change in actions:
+            change()
+            fresh = self.sessions.conversation_open.read(thread)
+            self.assertGreater(fresh["metadata_revision"], old["metadata_revision"])
+            self.assertEqual(fresh["history_revision"], old["history_revision"])
+            old = fresh
+        self.assertTrue(fresh["work_thread"]["pinned"])
+        self.assertTrue(fresh["work_thread"]["quiet"])
+        self.assertEqual(fresh["work_thread"]["project_id"], group["id"])
+        self.assertEqual(fresh["asks"][0]["question"], "Which branch?")
+        self.assertEqual(fresh["schedules"][0]["target_thread_id"], thread)
+
+    def test_stable_edge_forwards_bundle_and_open_with_its_origin(self):
+        thread = self.browser_thread(self.first)
+        get = self.serve(self.sessions)
+        _, config = get("config")
+        edge_directory = self.root / "edge"
+        edge_directory.mkdir()
+        edge = runtime_edge.EdgeServer(edge_directory, {})
+        worker = threading.Thread(target=edge.serve_forever)
+        worker.start()
+        self.addCleanup(edge.server_close)
+        self.addCleanup(worker.join, 3)
+        self.addCleanup(edge.shutdown)
+        runtime_edge.publish(edge_directory, {"url": f"http://127.0.0.1:{get.server_port}/",
+            "instance": "a" * 32, "status": "serving"}, config["token"], ready=True)
+        web = self.root / "web"
+        dist = web / "dist"
+        dist.mkdir(parents=True)
+        script = b"globalThis.fixtureReady = true;"
+        token_css = b":root { --surface: white; }"
+        name = "app-" + hashlib.sha256(script).hexdigest()[:20] + ".js"
+        document = f'<html><script src="/dist/{name}"></script></html>'.encode()
+        (dist / name).write_bytes(script)
+        (dist / "index.html").write_bytes(document)
+        (web / "tokens.css").write_bytes(token_css)
+        (web / "openui-frame.html").write_bytes(b"<!doctype html>")
+        with patch.object(ui, "_WEB_ROOT", web), closing(
+                http.client.HTTPConnection("127.0.0.1", edge.server_port, timeout=5)) as client:
+            expected = {"/": document, f"/dist/{name}": script, "/tokens.css": token_css}
+            for route, body in expected.items():
+                client.request("GET", route)
+                response = client.getresponse()
+                self.assertEqual((response.status, response.read()), (200, body))
+                if route.startswith("/dist/"):
+                    self.assertIn("immutable", response.getheader("Cache-Control"))
+            client.request("GET", "/openui-frame.html")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn("script-src " + edge.origin, response.getheader("Content-Security-Policy"))
+            response.read()
+            client.request("GET", f"/api/browser/conversations/{thread}/open")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["session"]["thread_id"], thread)

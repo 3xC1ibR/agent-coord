@@ -122,23 +122,31 @@ class ConversationOpen:
                 "conversation.open", priority="foreground"), self.store.reading():
             return self._read(thread_id, detail_only=detail_only)
 
-    def _read(self, thread_id, *, detail_only):
+    def _read(self, thread_id, *, detail_only, synchronized=False):
         from .agent_tree import bounded_family
 
         sessions = self.sessions
         sessions._authorize_history(thread_id)
-        with sessions.lock:
-            runtime = sessions._thread_runtime_state(thread_id)
-            active_turn = sessions.active.get(thread_id)
+        projection = getattr(sessions, "projection", None)
+        observation = None if synchronized else getattr(projection, "unloaded_observation", None)
+        unloaded = observation is not None and thread_id not in observation["excluded"]
+        if unloaded:
+            # A different provider may hold the state lock while committing.
+            # Its staged writes cannot change this conversation's resident view.
+            runtime, active_turn = ({}, False, False, None), None
             stream_seq = sessions.thread_stream_sequences.get(thread_id, 0)
-            resident = sessions.histories.get(thread_id)
-            resident_version = sessions.history_revisions.get(thread_id, 0)
-            if resident is not None:
-                history = copy.deepcopy(recent_view(resident, live_turn=active_turn))
-                history.update(beforeSeq=history["earlierTurns"],
-                               totalTurns=history["earlierTurns"] + len(history["turns"]))
-            else:
-                history = None
+            resident_version, history = 0, None
+        else:
+            with sessions.lock:
+                runtime = sessions._thread_runtime_state(thread_id)
+                active_turn = sessions.active.get(thread_id)
+                stream_seq = sessions.thread_stream_sequences.get(thread_id, 0)
+                resident = sessions.histories.get(thread_id)
+                resident_version = sessions.history_revisions.get(thread_id, 0)
+                history = copy.deepcopy(recent_view(resident, live_turn=active_turn)) if resident is not None else None
+                if history is not None:
+                    history.update(beforeSeq=history["earlierTurns"],
+                                   totalTurns=history["earlierTurns"] + len(history["turns"]))
         family = bounded_family(sessions, thread_id, limit=PANEL_LIMIT, runtime=runtime)
         work = next(thread for thread in family["data"] if thread["thread_id"] == thread_id)
         work = {**work, "close_when_done": ThreadControl(self.store).status(thread_id)}
@@ -188,6 +196,10 @@ class ConversationOpen:
             "reviews": reviews, "queuedMessages": sessions.queue.list(thread_id, limit=PANEL_LIMIT) if browser else [],
             "legacyDetailRequired": legacy_required,
         }
+        if unloaded and projection.unloaded_observation is not observation:
+            # Re-read under the runtime lock after a publication or rollback
+            # rather than allocating a new revision to the stale observation.
+            return self._read(thread_id, detail_only=detail_only, synchronized=True)
         history_revision, metadata_revision = self._versions(thread_id, version, metadata)
         if detail_only:
             metadata = {key: value for key, value in metadata.items() if key not in PANELS}

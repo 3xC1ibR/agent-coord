@@ -669,6 +669,8 @@ def search_browser_threads(store, sessions, query):
     show = query.get("show", ["active"])[0]
     phase = query.get("phase", [""])[0]
     placement = "archived" if show == "archived" else "later" if show == "later" else "now"
+    filters = {key: val for key, val in query.items() if key == "directory_root"
+               or key == "project_cwd" and scope != "all_projects" or key == "project" and scope == "current"}
     if scope == "current" and (show in {"attention", "completed"} or phase):
         # No detail reads, provider resumes, or seen marks.
         threads = [t for t in sessions.list_work_threads(archived=show == "archived")
@@ -679,16 +681,14 @@ def search_browser_threads(store, sessions, query):
             threads = [t for t in threads if (t["work_phase"] or "new") == phase]
     else:
         with store.reading(), store._connection() as db:
-            threads = listed_threads(store.threads, db, sessions.cwd,
-                                     include_family=bool(query.get("project_cwd", [""])[0] and not query.get("project", [""])[0]))
+            folder_filter = filters.get("project_cwd", [""])[0] and filters.get("project", [""])[0] in {"", "__none__"}
+            threads = listed_threads(store.threads, db, sessions.cwd, include_family=bool(folder_filter))
         if scope == "current":
             threads = [t for t in threads if t["attention"] == placement]
     if scope == "current":
         repository = query.get("repository", [""])[0]
         if repository:
             threads = [t for t in threads if t["repository_id"] == (None if repository == "__none__" else repository)]
-    filters = {key: val for key, val in query.items() if key == "directory_root"
-               or key in {"project_cwd", "project"} and scope != "all_projects"}
     threads = list(filter(workspace_members(filters), threads))
     return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
                           my_messages=query.get("my_messages") == ["true"], snapshot_dirty=True,

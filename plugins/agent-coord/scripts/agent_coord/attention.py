@@ -418,9 +418,11 @@ class AttentionClassifier:
                 state = context_for(self.store, thread)
                 result = self.classify_fn(state, self.config)
                 incomplete = result["choice"] in {"update", "findings", "done"} and any(m["truncated"] for m in state["recent_messages"][-2:])
-                self.store.threads.attention.save(thread, token, result=result,
+                saved = self.store.threads.attention.save(thread, token, result=result,
                     summary=" ".join(state["recent_messages"][-1]["text"][:1000].split())[:480],
                     error="context_truncated" if incomplete else None)
+                if saved and not incomplete and result["confidence"] >= MIN_CONFIDENCE and result["choice"] in {"update", "findings", "done"}:
+                    self.sessions.handle_seen_classified_result(thread["thread_id"], completion["id"])
             except ClassificationError as exc:
                 self.store.threads.attention.save(thread, token, error=str(exc))
             self.sessions._publish("thread/classified", {"threadId": thread["thread_id"]})

@@ -284,7 +284,7 @@ class StallNotificationsTests(unittest.TestCase):
                 thread.update(status='running', needs_attention=False, response_state='working')
                 stalls.apply_attention(thread, now=self.now, waiting=classification == 'waiting_for_approval')
                 self.assertTrue(thread['needs_attention'])
-                self.assertFalse(thread['can_handle_response'])
+                self.assertEqual(thread['can_handle_response'], classification == 'stalled')
                 self.assertEqual(thread['attention_owner_thread_id'], 'child')
                 if classification != 'stalled':
                     self.assertNotEqual(thread['status'], 'stalled')

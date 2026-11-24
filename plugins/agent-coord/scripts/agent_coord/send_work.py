@@ -195,8 +195,7 @@ def require_destination(runtime, target, cwd, project):
     sessions._record(target)
     thread = sessions.work_thread(target, history=False)
     if project is None:
-        assigned_here = thread["project_launch_cwd"] == cwd
-        member = assigned_here or workspace_members({"project_cwd": [cwd]})(thread)
+        member = workspace_members({"project_cwd": [cwd]})(thread)
     else:
         launch = thread["project_launch_cwd"]
         member = workspace_members({"project": [project]})(thread) and (
