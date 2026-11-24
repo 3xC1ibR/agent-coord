@@ -256,6 +256,7 @@ async function captureSurface(page, fixture, surface, mobile) {
       if (state === "long-error") {
         await expectContains(page.locator("#timeline"), "Cutoff length exceeds the stated inspection limit.");
       }
+      await page.locator("#conversation-refresh").waitFor({state: "hidden"});
       break;
     case "tiled": {
       await openTiling(page, fixture, fixture.pair, mobile ? 1 : 2);
