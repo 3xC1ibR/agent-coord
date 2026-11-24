@@ -25,14 +25,10 @@ class PluginToolsTests(unittest.TestCase):
     def stop_native_process_group(process):
         # Native Codex may leave marketplace Git downloads running after exit.
         # Each fixture client owns a separate process group, including its helpers.
-        from agent_coord.provider_transport import Owner
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except PermissionError:
-            if process.poll() is None or Owner._group_has_live_members(process.pid):
-                raise
         process.wait(timeout=5)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -48,10 +44,6 @@ class PluginToolsTests(unittest.TestCase):
                        if int(group) == process.pid and not status.startswith("Z")]
             if not running:
                 return
-            except PermissionError:
-                if not Owner._group_has_live_members(process.pid):
-                    return
-                raise
             time.sleep(.02)
         raise AssertionError(f"Native fixture process group {process.pid} did not exit: {running}")
 
