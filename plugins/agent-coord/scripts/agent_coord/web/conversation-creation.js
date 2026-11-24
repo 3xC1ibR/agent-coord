@@ -7,12 +7,12 @@ function showCreationIntent(projectId, intent) {
   const row = intent.row;
   replaceTimelineContent(state.outgoing.node(document, {
     key: row.requestId, text: row.text, images: row.images.length, status: intent.status,
-    release: !canReplayCreation(row) && intent.status === "uncertain" ? async () => {
+    release: !intent.created && !canReplayCreation(row) && intent.status === "uncertain" ? async () => {
       await state.durableDrafts.acknowledge(projectId, row.requestId);
       state.creationIntents.delete(projectId);
       intent.status = "unverified"; showCreationIntent(projectId, intent);
     } : null,
-    error: intent.error, retry: canReplayCreation(row) ? () => continueCreation(projectId, intent).catch(showError) : null,
+    error: intent.error, retry: intent.created || canReplayCreation(row) ? () => continueCreation(projectId, intent).catch(showError) : null,
   }));
 }
 
@@ -31,15 +31,15 @@ function restoreCreationIntent(projectId, row) {
   showCreationIntent(projectId, intent);
 }
 
-function startCreation(projectId, settings, text, images, mentions, quiet) {
+function startCreation(projectId, settings, text, images, mentions, quiet, options = {}) {
   const intents = state.creationIntents ||= new Map();
   const existing = intents.get(projectId);
   if (existing) {
     showCreationIntent(projectId, existing);
     throw new Error("The first message is still awaiting session creation. Your follow-up is saved.");
   }
-  const creation = {settings, firstMessageId: crypto.randomUUID(), windowId: state.sourceWindowId,
-    receiptCapable: state.config?.sessionCreationReceipts === 1, quiet};
+  const creation = {settings, firstMessageId: options.requestId || crypto.randomUUID(), windowId: state.sourceWindowId,
+    receiptCapable: state.config?.sessionCreationReceipts === 1, quiet, options};
   const row = {requestId: crypto.randomUUID(), path: "sessions", text, images, mentions, body: {creationIntent: creation}};
   const intent = {row, status: "sending"};
   const discovery = discoverComposerSubmissions(projectId);
@@ -106,7 +106,7 @@ function continueCreation(projectId, intent) {
       throw error;
     }
     const threadId = created.session.thread_id;
-    const body = {message: row.text, requestId: creation.firstMessageId};
+    const body = {...creation.options, message: row.text, requestId: creation.firstMessageId};
     if (creation.windowId) body.windowId = creation.windowId;
     if (creation.quiet) body.quiet = true;
     if (row.mentions.length) body.mentions = row.mentions;
@@ -132,10 +132,16 @@ function continueCreation(projectId, intent) {
     delivery.catch(() => {});
     await adoptCreatedConversation(projectId, created, creation.settings);
     await delivery;
+    state.reviewUI?.sent(projectId);
     if (state.selected === threadId) refreshDetail({background: true}).catch(showError);
     refreshList({background: true}).catch(showError);
   };
-  intent.attempt = operation().finally(() => { intent.attempt = null; });
+  intent.attempt = operation().catch(error => {
+    if (intent.created && state.creationIntents.get(projectId) === intent) {
+      intent.status = "uncertain"; showCreationIntent(projectId, intent);
+    }
+    throw error;
+  }).finally(() => { intent.attempt = null; });
   return intent.attempt;
 }
 

@@ -109,7 +109,13 @@ class ConversationPane {
   render() {
     if (this.disposed) return;
     const detail = this.view.detail = conversationEntry(this.id).detail;
-    if (!detail) { this.timeline.textContent = "Opening conversation…"; this.input.disabled = true; return; }
+    if (!detail) {
+      const entry = conversationEntry(this.id);
+      this.timeline.textContent = entry.refreshError || "Opening conversation…";
+      this.input.disabled = !!entry.accessDenied || !!this.workspace.transferLocks?.has(this.id);
+      this.workspace.outgoing.update(document, this.timeline, this.id, null);
+      return;
+    }
     this.composer.hidden = !detail.work_thread.browser_session || detail.work_thread.attention === "archived";
     this.input.disabled = !!this.workspace.transferLocks?.has(this.id);
     this.showImages();
@@ -143,17 +149,21 @@ class ConversationPane {
 
   async submit(text, clear = true, quiet = false) {
     const detail = this.view.detail, draft = this.exportDraft();
-    if (!detail?.work_thread.browser_session || detail.work_thread.attention === "archived" || this.input.disabled) return;
+    if (this.input.disabled || detail && (!detail.work_thread.browser_session || detail.work_thread.attention === "archived")) return;
+    if (!detail && (!this.workspace.durableDrafts?.resolveSubmission || text.trimStart().startsWith("/"))) return;
     const images = clear ? draft.images : [], mentions = clear ? draft.mentions : [];
     if (this.images.pending() || !text.trim() && !images.length) return;
     const body = {message: text, windowId: this.workspace.sourceWindowId};
     if (quiet) body.quiet = true;
     if (mentions.length) body.mentions = mentions;
     if (images.length) body.images = images.map(({name, url}) => ({name, url}));
-    if (detail.running && detail.activeTurn) body.expectedTurnId = detail.activeTurn;
-    const queue = detail.running && ["antigravity", "kimi"].includes(detail.work_thread.client);
-    await submitComposerMessage({id: this.id, text, images, mentions, body, detail,
-      path: sessionPath(this.id) + (queue ? "/queue" : "/messages"), clear: () => {
+    const dispatcher = detail?.work_thread.dispatcher, reviewing = detail?.reviews?.some(run => run.active);
+    const queue = detail?.running && !dispatcher && !reviewing && ["antigravity", "kimi"].includes(detail.work_thread.client);
+    if (dispatcher) body.askDispatcher = false;
+    else if (!queue && !reviewing && detail?.running && detail.activeTurn) body.expectedTurnId = detail.activeTurn;
+    if (!detail?.running && !reviewing) this.workspace.reviewUI?.decorate(body, this.id);
+    await submitComposerMessage({id: this.id, requestId: body.requestId, text, images, mentions, body, detail,
+      path: detail ? sessionPath(this.id) + (queue ? "/queue" : "/messages") : "", clear: () => {
         if (clear) { this.restoreDraft({text: "", images: [], mentions: []}); this.saveDraft(); }
         this.view.timelineScroll.latest();
       }});

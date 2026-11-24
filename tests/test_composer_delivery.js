@@ -407,3 +407,31 @@ test("a legacy unknown row releases later messages only after the user explicitl
   assert.deepEqual(f.effects, ["next"]);
   assert.deepEqual(f.acknowledged, ["legacy", "next"]);
 });
+
+test("a later checkpoint retries a failed repair using the current complete composer", async () => {
+  const f = environment(), writes = [];
+  f.discovery.resolve([]); f.context.composerDraftId = () => "one";
+  f.state.durableDrafts.stage = async () => {throw Error("Storage unavailable");};
+  f.state.durableDrafts.write = async () => {throw Error("Still unavailable");};
+  await assert.rejects(f.send("one", "A"));
+  await assert.rejects(f.context.drainComposerWrites(), /unavailable/);
+  f.input.value = "B";
+  f.state.durableDrafts.write = async (id, patch) => {writes.push(patch);};
+  await f.context.writeComposerRecord("one", () => f.state.durableDrafts.write("one", {text: "B"}), "text");
+  await f.context.drainComposerWrites();
+  assert.equal(writes.at(-1).text, "B");
+  assert.equal(f.state.composerWriteFailures.size, 0);
+  assert.equal(f.effects.length, 0);
+});
+
+test("configured Review is recorded with a cold input and bound to the verified idle thread", async () => {
+  const f = environment();
+  const entry = {pending: Promise.resolve(true), detail: {work_thread: {thread_id: "one", browser_session: true, client: "codex"}}};
+  f.context.conversationEntry = () => entry; f.context.sessionPath = id => "sessions/" + id;
+  f.state.durableDrafts.resolveSubmission = async (id, key, path, body) => ({path, body});
+  const row = {requestId: "review", body: {message: "Review this", review: {mode: "standard"}}};
+  const bound = await f.context.bindComposerSubmission("one", row);
+  assert.equal(bound.body.review.mode, "standard");
+  entry.detail.running = true; entry.detail.activeTurn = "active";
+  assert.equal((await f.context.bindComposerSubmission("one", row)).body.review, undefined);
+});

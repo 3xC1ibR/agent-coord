@@ -1383,6 +1383,10 @@ async function refreshDetail({markSeen = true, background = false, threadId = st
     entry.validatedRevision = revision;
     entry.accessDenied = false;
     entry.detail = detail;
+    for (const echo of state.outgoing?.list?.(id) || []) if (echo.awaitingRoute && echo.retry) {
+      echo.awaitingRoute = false;
+      queueMicrotask(echo.retry);
+    }
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
     state.detail = detail;
@@ -1993,6 +1997,12 @@ class OutgoingMessages {
   }
 
   list(id) { return this.threads.get(id) || []; }
+
+  remove(id, entry) {
+    const remaining = this.list(id).filter(item => item !== entry);
+    if (remaining.length) this.threads.set(id, remaining);
+    else this.threads.delete(id);
+  }
 
   itemKey(turnId, itemId) { return JSON.stringify([turnId, itemId]); }
 
@@ -2665,7 +2675,7 @@ function renderConversationTimeline(pane = null) {
       thread,
       theme: document.documentElement?.dataset.theme || "light",
       disabled: !view.detail?.work_thread?.browser_session || view.detail.work_thread.attention === "archived" || view.closing?.has(thread),
-      onAction: text => pane ? pane.submit(text, false) : sendOpenUIResponse(thread, text),
+      onAction: text => sendOpenUIResponse(thread, text, pane),
     });
   } else if (globalThis.ResponseActions) ResponseActions.commit(el, fragment);
   else el.replaceChildren(fragment);
@@ -2690,9 +2700,10 @@ function renderConversationTimeline(pane = null) {
   }
   if (!pane && view.searchTarget?.thread === view.selected) focusSearchMessage(view.searchTarget);
 }
-async function sendOpenUIResponse(thread, text) {
-  const detail = state.detail;
-  if (thread !== state.selected || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(thread)) {
+async function sendOpenUIResponse(thread, text, pane = null) {
+  const detail = pane ? pane.view.detail : state.detail;
+  const active = pane ? !pane.disposed && pane.id === thread && pane.shell.layout?.tabs.includes(thread) : thread === state.selected;
+  if (!active || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(thread)) {
     throw new Error("Reopen this thread to send a response.");
   }
   const dispatcher = !!detail.work_thread.dispatcher;
@@ -2704,7 +2715,7 @@ async function sendOpenUIResponse(thread, text) {
   }
   await api(sessionPath(thread) + (!dispatcher && detail.running ? "/queue" : "/messages"), body);
   // A refresh failure must not invite resending an already accepted response.
-  try { if (thread === state.selected) await refreshDetail(); await refreshList(); }
+  try { if (pane) await pane.refresh(); else if (thread === state.selected) await refreshDetail(); await refreshList(); }
   catch (error) { console.warn("OpenUI response accepted before refresh failed", error); }
 }
 function focusSearchMessage(target) {
@@ -3659,10 +3670,13 @@ async function sendSessionDraft(text, images, mentions = [], quiet = false) {
   }
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
   const ordinary = !command.startsWith("/") && !state.reviewUI?.settings?.has(draftId);
-  if (ordinary && !draft.createdId && state.durableDrafts) {
+  if (!draft.createdId && state.durableDrafts) {
     const settings = {...draft.session};
     if (settings.permission_mode) delete settings.yolo;
-    return startCreation(draftId, settings, text, images, mentions, quiet);
+    const message = {message: text, mentions, images};
+    state.reviewUI?.decorate(message, draftId);
+    const options = message.review ? {review: message.review, requestId: message.requestId} : {};
+    return startCreation(draftId, settings, text, images, mentions, quiet, options);
   }
   const requestId = ordinary ? crypto.randomUUID() : null;
   if (ordinary) {
@@ -4445,7 +4459,8 @@ function submitAfterFirstRead(quiet) {
     if (mentions.length) body.mentions = mentions;
     if (images.length) body.images = images.map(({name, url}) => ({name, url}));
     if (quiet || state.quietSubmissions?.has(id)) { body.quiet = true; state.quietSubmissions?.delete(id); }
-    return submitComposerMessage({id, text, images, mentions, body, detail: null, path: "", clear() {
+    state.reviewUI?.decorate(body, id);
+    return submitComposerMessage({id, requestId: body.requestId, text, images, mentions, body, detail: null, path: "", clear() {
       $("message").value = ""; state.drafts.delete(id);
       state.mentions?.sent(id, text, mentions);
       if (images.length) state.attachments?.sent(id, images);
@@ -4907,10 +4922,13 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
 function setupComposerSizing(input) {
   let frame = 0, width;
   const resize = () => {
+    // A one-row empty textarea already has its stylesheet minimum height.
+    // Restoring that intrinsic size needs no synchronous geometry read.
+    if (!input.value) { if (input.style.height) input.style.height = ""; return; }
     if (frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      if (!input.getClientRects().length) return;
+      if (!input.value || !input.getClientRects().length) return;
       // Reset before measuring so deleting text also shrinks the composer.
       // CSS retains the height limits for desktop, mobile, and tiled chats.
       input.style.height = "auto";

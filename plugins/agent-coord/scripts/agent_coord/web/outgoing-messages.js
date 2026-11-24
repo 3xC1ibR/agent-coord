@@ -84,7 +84,14 @@ async function composerWindowScope(view, claim = claimComposerWindowHandoff) {
     const occupy = scope => new Promise((resolve, reject) => {
       view.navigator.locks.request(storageKey + ":" + scope, {ifAvailable: true}, lock => {
         resolve(!!lock);
-        if (lock) return new Promise(release => view.addEventListener("pagehide", release, {once: true}));
+        if (lock) return new Promise(release => {
+          const departing = event => {
+            if (event?.persisted) return;
+            view.removeEventListener?.("pagehide", departing);
+            release();
+          };
+          view.addEventListener("pagehide", departing);
+        });
       }).catch(reject);
     });
     while (!await occupy(id)) id = allocate();
@@ -100,7 +107,9 @@ async function composerWindowScope(view, claim = claimComposerWindowHandoff) {
         generation = ticket.generation;
       else id = allocate();
       view.sessionStorage.removeItem(handoff);
-      view.addEventListener("pagehide", () => view.sessionStorage.setItem(handoff, JSON.stringify({id, generation: generation + 1})));
+      view.addEventListener("pagehide", event => {
+        if (!event?.persisted) view.sessionStorage.setItem(handoff, JSON.stringify({id, generation: generation + 1}));
+      });
       view.addEventListener("pageshow", () => view.sessionStorage.removeItem(handoff));
     } catch { id = allocate(); }
   }
@@ -123,7 +132,13 @@ function writeComposerRecord(id, write, field = "draft") {
 
 async function drainComposerWrites() {
   await globalThis.ChatImageAttachments?.drain?.();
-  while (state.composerWrites?.size) {
+  let repaired = false;
+  while (state.composerWrites?.size || !repaired && state.composerRepairs?.size) {
+    if (!state.composerWrites?.size) {
+      repaired = true;
+      await Promise.allSettled([...state.composerRepairs.keys()].map(saveRepairedComposer));
+      continue;
+    }
     for (const proceed of state.composerPaints || []) proceed();
     await Promise.allSettled(state.composerWrites.values());
   }
@@ -171,11 +186,7 @@ function persistAttachmentChanges() {
 function repairComposerStage(id, row, echo, error) {
   echo.localFailure = true;
   state.outgoing.rejected(echo, error.message || String(error));
-  const pane = globalThis.agentCoordPanes?.records.get(id)?.api;
-  const selected = id === composerDraftId(), field = selected ? $("message") : null;
-  const savedProject = id.startsWith("new-session:") && state.projectDrafts?.get(id.slice("new-session:".length));
-  const current = pane?.exportDraft() || {text: field?.value ?? savedProject?.text ?? state.drafts.get(id) ?? "",
-    images: state.attachments?.snapshot(id) || [], mentions: []};
+  const {pane, selected, field, savedProject, current} = composerRecoveryState(id);
   if (!current.text && !current.images.length) {
     current.text = row.text; current.images = row.images; current.mentions = row.mentions;
     if (savedProject && !selected) savedProject.text = current.text;
@@ -184,11 +195,35 @@ function repairComposerStage(id, row, echo, error) {
     state.attachments?.drafts.set(id, current.images);
     state.mentions?.restore(id, current.text, current.mentions);
     pane?.restoreDraft(current);
-  } else if (!pane) current.mentions = state.mentions?.snapshot(id, current.text) || [];
+  }
+  const repairs = state.composerRepairs ||= new Map();
+  if (!repairs.has(id)) repairs.set(id, new Set());
+  repairs.get(id).add(row.requestId);
   updateOutgoing(id);
-  const recovered = writeComposerRecord(id, () => state.durableDrafts.write(id,
-    {text: current.text, images: current.images, mentions: current.mentions}));
-  return recovered.then(() => state.composerWriteFailures?.delete(JSON.stringify([id, row.requestId])));
+  return saveRepairedComposer(id);
+}
+
+function composerRecoveryState(id) {
+  const pane = globalThis.agentCoordPanes?.records.get(id)?.api;
+  const selected = id === composerDraftId(), field = selected ? $("message") : null;
+  const savedProject = id.startsWith("new-session:") && state.projectDrafts?.get(id.slice("new-session:".length));
+  const text = field?.value ?? savedProject?.text ?? state.drafts.get(id) ?? "";
+  const current = pane?.exportDraft() || {text, images: state.attachments?.snapshot(id) || [],
+    mentions: state.mentions?.snapshot(id, text) || []};
+  return {pane, selected, field, savedProject, current};
+}
+
+async function saveRepairedComposer(id) {
+  const repairs = state.composerRepairs.get(id);
+  if (!repairs) return;
+  const requestIds = [...repairs], {current} = composerRecoveryState(id);
+  const full = {text: current.text, images: current.images, mentions: current.mentions};
+  await writeComposerRecord(id, () => state.durableDrafts.write(id, full));
+  for (const key of requestIds) {
+    state.composerWriteFailures?.delete(JSON.stringify([id, key]));
+    repairs.delete(key);
+  }
+  if (!repairs.size) state.composerRepairs.delete(id);
 }
 
 function updateOutgoing(id) {
@@ -273,7 +308,9 @@ function allowUnconfirmedRelease(id, row, echo) {
 
 async function bindComposerSubmission(id, row) {
   const entry = conversationEntry(id);
-  const fresh = await (entry.pending || refreshDetail({threadId: id, markSeen: false, background: true}));
+  const verified = entry.detail && !entry.accessDenied && entry.validatedRevision === entry.revision &&
+    entry.detail.revisionEpoch === state.config?.conversationRevisionEpoch;
+  const fresh = verified || await (entry.pending || refreshDetail({threadId: id, markSeen: false, background: true}));
   const detail = entry.detail, work = detail?.work_thread;
   if (fresh === false || !work || work.thread_id !== id || entry.accessDenied)
     throw new Error("Waiting for current conversation details.");
@@ -283,6 +320,7 @@ async function bindComposerSubmission(id, row) {
   const ordered = state.outgoing.pendingTransferCounts?.has(id) && ["codex", "claude"].includes(work.client);
   const queue = !work.dispatcher && !reviewing && detail.running && ["antigravity", "kimi"].includes(work.client);
   const body = {...row.body}, path = sessionPath(id) + (queue ? "/queue" : "/messages");
+  if (detail.running || reviewing) delete body.review;
   if (work.dispatcher) body.askDispatcher = false;
   else if (!queue && !reviewing && !ordered && detail.running) {
     if (detail.activeTurn) body.expectedTurnId = detail.activeTurn;
@@ -323,6 +361,11 @@ async function deliverComposerSubmission(id, row, echo, staged) {
         if (result.acceptedMessage) state.outgoing.confirm(id, [result.acceptedMessage]);
         if (result.queued && result.id) echo.queueId = result.id;
         state.outgoing.accepted(echo);
+        if (result.command || result.review) {
+          state.outgoing.remove(id, echo);
+          if (result.command) state.commandFeedback?.set(id, result.command.message);
+          if (result.review) state.reviewUI?.sent(id);
+        }
       }
       await state.durableDrafts?.acknowledge(id, row.requestId);
       return result;
@@ -337,6 +380,7 @@ async function deliverComposerSubmission(id, row, echo, staged) {
         (!error.status || error.status >= 500 || error.status === 429);
       if (awaitingRoute || posted && submissionOutcomeUnknown(error)) {
         error.submissionUnconfirmed = true;
+        echo.awaitingRoute = awaitingRoute;
         echo.status = "uncertain";
         if (awaitingRoute || state.config?.ordinarySubmissionReceipts === 1)
           echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
