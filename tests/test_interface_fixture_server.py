@@ -7,9 +7,11 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+import time
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/interface_fixture_server.py"
@@ -68,6 +70,22 @@ class InterfaceFixtureServerTests(unittest.TestCase):
         self.assertEqual(self.get(fixture["base"], "/fixture/advance"), {"advanced": True})
         after = self.get(fixture["base"], f"/api/browser/sessions/{thread}?recent=1")
         self.assertIn("Applied the final calibration sample.", json.dumps(after))
+
+    def test_interaction_fixture_accepts_a_visit_at_the_browser_wall_clock(self):
+        _, fixture = self.start_fixture("interactions")
+        base = fixture["base"]
+        token = self.get(base, "/api/browser/config")["token"]
+        event = {
+            "event_id": str(uuid4()), "kind": "visit_started", "thread_id": fixture["threads"]["other"]["id"],
+            "occurred_at": time.time(), "window_id": str(uuid4()), "visit_id": str(uuid4()), "source": "focus",
+        }
+        request = Request(base + "/api/browser/activity/events", data=json.dumps({"events": [event]}).encode(),
+                          headers={"Content-Type": "application/json", "X-Agent-Coord-Token": token, "Origin": base},
+                          method="POST")
+        with urlopen(request, timeout=5) as response:
+            receipt = json.load(response)["receipts"][0]
+        self.assertEqual(receipt["event_id"], event["event_id"])
+        self.assertGreater(receipt["sequence"], 0)
 
 
 if __name__ == "__main__":

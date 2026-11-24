@@ -34,11 +34,11 @@ POST_PREFIXES = ("/api/browser/asks/", "/api/browser/threads/", "/api/browser/se
                  "/api/browser/navigation/resolve")
 
 
-def make_turn(thread, index, text, *, status="completed", request=None):
+def make_turn(thread, index, text, *, anchor, status="completed", request=None):
     identity = f"{thread}-turn-{index:04}"
     return {
         "id": identity, "status": status,
-        "startedAt": ANCHOR - 1000 + index, "completedAt": ANCHOR - 999 + index,
+        "startedAt": anchor - 1000 + index, "completedAt": anchor - 999 + index,
         "items": [
             {"id": identity + "-request", "type": "userMessage",
              "content": [{"type": "text", "text": request or f"Inspection request {index:04}."}]},
@@ -52,6 +52,7 @@ def seed(root, workspace, sessions, state):
     from agent_coord.attention import AttentionStore
 
     store = sessions.store
+    anchor = int(store.clock()) if state == "interactions" else ANCHOR
     AppControl(store)
     remote, pair, six, vacant = (root / name for name in ("Instrumentation", "Bench", "Assembly", "Receiving"))
     for directory in (workspace, remote, pair, six, vacant):
@@ -72,7 +73,7 @@ def seed(root, workspace, sessions, state):
                 content += " The recorded clearance remained within the reference tolerance." * 14
             if index == history and key in {"supervisor", "other"}:
                 content += "\n\n```python\nrecheck = measured_value > acceptance_limit\n```\n\n" + OPENUI
-            turns.append(make_turn(thread, index, content))
+            turns.append(make_turn(thread, index, content, anchor=anchor))
         original = sessions.rpc.threads[thread]
         original["turns"] = turns
         with sessions.lock:
@@ -82,18 +83,18 @@ def seed(root, workspace, sessions, state):
                 db.execute("""INSERT INTO app_control_requests
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json, status, created_at, updated_at)
                     VALUES (?, 'create', ?, ?, ?, '{"mode":"orchestration"}', 'completed', ?, ?)""",
-                           (f"interface-{key}", catalog[parent]["id"], str(directory), thread, ANCHOR, ANCHOR))
+                           (f"interface-{key}", catalog[parent]["id"], str(directory), thread, anchor, anchor))
         return thread
 
     def completion(thread, status, age):
         turn = thread + "-fixture-completion"
         store.threads.start_turn(thread, prompt="Check the assembly dimensions.", turn_id=turn,
-                                 occurred_at=ANCHOR - age - 120)
-        store.threads.finish_turn(thread, turn_id=turn, status=status, occurred_at=ANCHOR - age)
+                                 occurred_at=anchor - age - 120)
+        store.threads.finish_turn(thread, turn_id=turn, status=status, occurred_at=anchor - age)
 
     def streaming(thread):
         turn = make_turn(thread, 999, "Streaming inspection update · comparing the second assembly.",
-                         status="inProgress", request="Compare the diameter readings as they arrive.")
+                         anchor=anchor, status="inProgress", request="Compare the diameter readings as they arrive.")
         turn.pop("completedAt")
         sessions.rpc.threads[thread]["turns"].append(turn)
         sessions._event({"method": "turn/started", "params": {"threadId": thread, "turn": turn}})
@@ -168,7 +169,7 @@ def seed(root, workspace, sessions, state):
         sessions.schedules.create({
             "id": "41308a97-510d-46da-88b1-c032e7c95bc8", "target_thread_id": other,
             "message": "Review the next lot of inspection records.",
-            "run_at": ANCHOR + 7 * 86400, "timezone": "America/Chicago",
+            "run_at": anchor + 7 * 86400, "timezone": "America/Chicago",
         })
         stored = ask(lead, "Which reference plate should be retained?", options=["Plate A", "Plate B"])
         store.asks.resolve(stored, "answered", option="Plate A")
@@ -184,7 +185,7 @@ def seed(root, workspace, sessions, state):
             latest = "The fixture rejected the recorded measurement."
             catalog["failed"]["latest"] = latest
             failed_turn = make_turn(failed, 999, (latest + " ") * 38,
-                                    status="failed", request="Review the long inspection record.")
+                                    anchor=anchor, status="failed", request="Review the long inspection record.")
             failed_turn["error"] = {"message": "Cutoff length exceeds the stated inspection limit."}
             original["turns"].append(failed_turn)
             sessions._remember_thread(original)
@@ -206,7 +207,7 @@ def seed(root, workspace, sessions, state):
     if not sessions.persistence.flush(timeout=20):
         raise RuntimeError("The fixture did not persist its conversation histories.")
     return {"state": state, "workspace": str(workspace), "vacant": str(vacant), "pair": str(pair),
-            "six": str(six), "threads": catalog, "asks": asks, "stream": stream, "anchor": ANCHOR,
+            "six": str(six), "threads": catalog, "asks": asks, "stream": stream, "anchor": anchor,
             "project": project_id}
 
 
@@ -303,7 +304,8 @@ def main():
         root = Path(directory).resolve()
         workspace = root / "Fabrication"
         origin = time.monotonic()
-        store = CoordinationStore(root / "fixture.sqlite3", clock=lambda: ANCHOR + time.monotonic() - origin)
+        clock = time.time if args.state == "interactions" else lambda: ANCHOR + time.monotonic() - origin
+        store = CoordinationStore(root / "fixture.sqlite3", clock=clock)
         JevSettings(store.database_path).configure({"action": "dismiss"})
         sessions = BrowserSessions(store, str(root), rpc_factory=FixtureProvider, claude_factory=FixtureProvider,
                                    antigravity_factory=FixtureProvider, kimi_factory=FixtureProvider, muse_factory=FixtureProvider)

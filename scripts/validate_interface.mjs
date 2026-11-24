@@ -13,6 +13,7 @@ import {createInterface} from "node:readline";
 import {fileURLToPath} from "node:url";
 import {setTimeout as delay} from "node:timers/promises";
 import {parseArgs} from "node:util";
+import {gzipSync} from "node:zlib";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const {values: options} = parseArgs({options: {
@@ -31,6 +32,7 @@ const {values: options} = parseArgs({options: {
   switches: {type: "string", default: "120"},
   sends: {type: "string", default: "20"},
   "idle-seconds": {type: "string", default: "60"},
+  "boot-trace": {type: "boolean"},
   check: {type: "boolean"},
 }});
 assert(options.output && ["all", "capture", "interactions", "performance"].includes(options.mode),
@@ -1050,7 +1052,7 @@ function elapsedUnion(intervals, from, to) {
   return elapsed;
 }
 
-async function traceBoot(page, fixture) {
+async function traceBoot(page, fixture, thread = null) {
   const browser = page.context().browser();
   const cdp = await browser.newBrowserCDPSession();
   const data = [];
@@ -1060,19 +1062,38 @@ async function traceBoot(page, fixture) {
     transferMode: "ReportEvents",
   });
   try {
-    await page.addInitScript(() => {
+    await page.addInitScript(({diagnostic, title, latest}) => {
       const observer = new MutationObserver(() => {
-        const status = document.getElementById("results-count");
-        if (!status || !/\d+ threads?/.test(status.textContent)) return;
-        const selected = document.querySelector('#view-tabs [aria-selected="true"]');
-        if (!selected?.getClientRects().length) return;
+        if (title) {
+          const composer = document.getElementById("message");
+          const headline = document.getElementById("title-heading");
+          const turns = document.getElementById("timeline");
+          if (!headline?.textContent.includes(title) || !turns?.textContent.includes(latest) ||
+              !composer?.getClientRects().length || composer.disabled ||
+              /opening conversation/i.test(composer.placeholder)) return;
+        } else {
+          const status = document.getElementById("results-count");
+          if (!status || !/\d+ threads?/.test(status.textContent)) return;
+          const selected = document.querySelector('#view-tabs [aria-selected="true"]');
+          if (!selected?.getClientRects().length) return;
+        }
         performance.mark("ribbon-field-fixture-ready");
         observer.disconnect();
+        if (diagnostic) requestAnimationFrame(() => {
+          const channel = new MessageChannel();
+          channel.port1.onmessage = () => {
+            performance.mark("ribbon-field-fixture-rendered");
+            channel.port1.close();
+            channel.port2.close();
+          };
+          channel.port2.postMessage(null);
+        });
       });
       observer.observe(document, {subtree: true, childList: true, characterData: true, attributes: true});
-    });
-    await browserOpen(page, fixture);
-    await page.waitForFunction(() => performance.getEntriesByName("ribbon-field-fixture-ready").length === 1);
+    }, {diagnostic: Boolean(options["boot-trace"]), title: thread?.title, latest: thread?.latest});
+    await browserOpen(page, fixture, fixture.workspace, thread ? {thread} : undefined);
+    const mark = options["boot-trace"] ? "ribbon-field-fixture-rendered" : "ribbon-field-fixture-ready";
+    await page.waitForFunction(mark => performance.getEntriesByName(mark).length === 1, mark);
   } finally {
     const complete = new Promise(resolve => cdp.once("Tracing.tracingComplete", resolve));
     await cdp.send("Tracing.end");
@@ -1095,13 +1116,55 @@ async function traceBoot(page, fixture) {
   assert(Number.isFinite(start) && start <= stop, "No browser trace execution for first-party workspace JavaScript.");
   const tasks = events.filter(event => event.ph === "X" && ["RunTask", "ThreadControllerImpl::RunTask"].includes(event.name));
   assert(tasks.length, "No renderer main-thread task spans in trace.");
-  return {
+  const timings = {
     mainThreadBootMs: elapsedUnion(tasks.map(event => [event.ts, event.ts + event.dur]), start, stop) / 1000,
     wallFromFirstScriptToReadyMs: (stop - start) / 1000,
     taskSpans: tasks.length, bundle: bundle?.path || null,
     scriptRequests: scripts, httpRequests: resources.filter(entry => entry.path.startsWith("/api/browser/")),
     method: "Chromium renderer main-thread task spans from first local script evaluation or compilation to visible inventory readiness. Overlapping spans are unioned, leaving network waits and other idle gaps out. Includes style, layout, and any other renderer work on that thread.",
   };
+  if (!options["boot-trace"]) return timings;
+
+  const traceFile = `boot-${thread ? "conversation" : "inventory"}.json.gz`;
+  await writeFile(join(output, traceFile), gzipSync(JSON.stringify({traceEvents: data})));
+  const rendered = events.find(event => event.name === "ribbon-field-fixture-rendered");
+  const deadline = rendered?.ts || stop;
+  const frames = data.flatMap(event => {
+    if (event.name === "TracingStartedInBrowser") return event.args?.data?.frames || [];
+    if (["CommitLoad", "FrameCommittedInBrowser"].includes(event.name)) return [event.args?.data];
+    return [];
+  }).filter(frame => frame?.frame);
+  const openUIFrames = new Set(frames.filter(frame => frame.parent && frame.url?.includes("/openui-frame.html"))
+    .map(frame => frame.frame));
+  const spans = events.filter(event => event.ph === "X" && event.ts < deadline && event.ts + event.dur > start);
+  const duration = (selected, until = stop) => elapsedUnion(
+    selected.map(event => [event.ts, event.ts + event.dur]), start, until) / 1000;
+  const selectedScript = event => JSON.stringify(event.args).includes(bundle?.path || fixture.base);
+  const frameOf = event => event.args?.data?.frame || event.args?.beginData?.frame;
+  const openUICommit = data.find(event => event.name === "CommitLoad" && openUIFrames.has(frameOf(event)));
+  const work = name => spans.filter(event => name.test(event.name));
+  const paint = work(/^(Paint|PrePaint|CompositeLayers|Layerize|UpdateLayerTree)$/);
+  const layout = work(/^(Layout|UpdateLayoutTree|LocalFrameView::performLayout|RecalculateStyles)$/);
+  timings.diagnostic = {
+    traceFile,
+    rendererWorkToRenderingOpportunityMs: duration(tasks, deadline),
+    wallToRenderingOpportunityMs: (deadline - start) / 1000,
+    workspaceMainThreadCompileMs: duration(work(/compile/i).filter(selectedScript)),
+    workspaceBackgroundParseMs: data.filter(event => event.ph === "X" &&
+      event.name === "v8.parseOnBackground" && selectedScript(event))
+      .reduce((milliseconds, event) => milliseconds + event.dur / 1000, 0),
+    workspaceEvaluateMs: duration(work(/^EvaluateScript$/).filter(selectedScript)),
+    tracedLayoutAndStyleMs: duration(layout),
+    tracedPaintAndLayersMs: duration(paint, deadline),
+    identifiableOpenUIFrameWorkMs: duration(spans.filter(event => openUIFrames.has(frameOf(event))), deadline),
+    firstOpenUIFrameCommitMs: openUICommit ? (openUICommit.ts - start) / 1000 : null,
+    paintEntries: await page.evaluate(() => performance.getEntriesByType("paint").map(entry => ({
+      name: entry.name, startMs: entry.startTime,
+    }))),
+    method: "Category spans overlap and are reported independently. OpenUI work counts trace events on the primary renderer thread explicitly attributed to an OpenUI child frame. Background parsing can precede the first main-thread script and overlap network transfer. The rendering opportunity is a task queued from requestAnimationFrame after the original readiness mark.",
+  };
+  if (thread) timings.method = timings.method.replace("visible inventory", "visible expected transcript and usable composer");
+  return timings;
 }
 
 async function installInputObserver(page) {
@@ -1227,30 +1290,53 @@ async function idleNetwork(page, fixture, duration, result) {
       }
     };
   });
-  await openConversation(page, fixture, fixture.threads.other);
   const snapshot = () => page.evaluate(() => window.interfaceEventSources.map(({source, opens, errors}) =>
     ({readyState: source.readyState, opens, errors})));
-  await page.waitForFunction(() => window.interfaceEventSources.some(entry => entry.source.readyState === EventSource.OPEN));
-  await delay(1500); // Allow one-off boot and displayed-thread receipt requests to settle.
-  const before = await snapshot();
-  const traffic = [];
+  const requests = new Map();
   const collect = request => {
     const url = new URL(request.url());
     if (!url.pathname.startsWith("/api/browser/")) return;
-    traffic.push({method: request.method(), path: url.pathname, time: Date.now()});
+    const entry = {method: request.method(), path: url.pathname, time: Date.now()};
+    if (entry.method === "POST" && entry.path === "/api/browser/activity/events") {
+      entry.visits = (request.postDataJSON()?.events || []).map(visit => ({
+        kind: visit.kind, source: visit.source,
+        identity: createHash("sha256").update(visit.event_id).digest("hex").slice(0, 12),
+      }));
+    }
+    requests.set(request, entry);
+  };
+  const observeResponse = response => {
+    const entry = requests.get(response.request());
+    if (entry) entry.status = response.status();
   };
   page.on("request", collect);
-  const start = performance.now();
-  await delay(duration * 1000);
-  page.off("request", collect);
-  const elapsed = performance.now() - start;
-  const after = await snapshot();
-  const polling = traffic.filter(request => request.path !== "/api/browser/events");
-  Object.assign(result, {elapsed, traffic, polling, requestsPerMinute: polling.length * 60000 / elapsed,
-    eventSourcesBefore: before, eventSourcesAfter: after});
-  assert.deepEqual(before, [{readyState: 1, opens: 1, errors: 0}], JSON.stringify(result));
-  assert.deepEqual(after, before, "EventSource disconnected or reopened during the idle observation.");
-  assert.equal(polling.length, 0, `${polling.length} HTTP requests during healthy idle SSE.`);
+  page.on("response", observeResponse);
+  try {
+    await openConversation(page, fixture, fixture.threads.other);
+    await page.waitForFunction(() => window.interfaceEventSources.some(entry => entry.source.readyState === EventSource.OPEN));
+    // One-time health and visit receipts can overlap opening the conversation.
+    // Use a fixed settling window so recurring requests cannot postpone sampling.
+    await delay(2500);
+    const before = await snapshot();
+    const settlingRequests = new Set(requests.keys());
+    const start = performance.now();
+    await delay(duration * 1000);
+    const elapsed = performance.now() - start;
+    const after = await snapshot();
+    const startupVisits = [...settlingRequests].map(request => requests.get(request)).filter(entry => entry.visits);
+    const traffic = [...requests].filter(([request]) => !settlingRequests.has(request)).map(([, entry]) => entry);
+    const polling = traffic.filter(request => request.path !== "/api/browser/events");
+    Object.assign(result, {elapsed, startupVisits, traffic, polling, requestsPerMinute: polling.length * 60000 / elapsed,
+      eventSourcesBefore: before, eventSourcesAfter: after});
+    assert(startupVisits.every(entry => entry.status >= 200 && entry.status < 300),
+      "A startup visit was rejected or unfinished before the observation; inspect the startup receipts.");
+    assert.deepEqual(before, [{readyState: 1, opens: 1, errors: 0}], JSON.stringify(result));
+    assert.deepEqual(after, before, "EventSource disconnected or reopened during the idle observation.");
+    assert.equal(polling.length, 0, `${polling.length} HTTP requests during healthy idle SSE.`);
+  } finally {
+    page.off("request", collect);
+    page.off("response", observeResponse);
+  }
 }
 
 async function performanceChecks(browser, fixture, report) {
@@ -1267,6 +1353,9 @@ async function performanceChecks(browser, fixture, report) {
   });
   await recordCheck(report, "Renderer compile and boot work <80 ms", () => open(async page => {
     results.boot = await traceBoot(page, fixture);
+    if (options["boot-trace"]) {
+      results.conversationBoot = await open(conversation => traceBoot(conversation, fixture, fixture.threads.other));
+    }
     assert(results.boot.mainThreadBootMs < 80, `Renderer boot was ${results.boot.mainThreadBootMs} ms.`);
     assert(results.boot.bundle && results.boot.scriptRequests.length === 1,
       `Expected one hashed workspace script. Observed ${results.boot.scriptRequests.length} scripts.`);
