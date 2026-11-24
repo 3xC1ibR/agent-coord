@@ -181,7 +181,9 @@ def seed(root, workspace, sessions, state):
             stream = streaming(supervisor)
         if state == "long-error":
             original = sessions.rpc.threads[failed]
-            failed_turn = make_turn(failed, 999, "The fixture rejected the recorded measurement. " * 38,
+            latest = "The fixture rejected the recorded measurement."
+            catalog["failed"]["latest"] = latest
+            failed_turn = make_turn(failed, 999, (latest + " ") * 38,
                                     status="failed", request="Review the long inspection record.")
             failed_turn["error"] = {"message": "Cutoff length exceeds the stated inspection limit."}
             original["turns"].append(failed_turn)

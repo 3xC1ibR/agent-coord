@@ -544,6 +544,41 @@ async function attentionReceipts(page, fixture, key, clear, expectedResponse) {
   return {before: before.response_state, after: after.response_state, needsAttention: after.needs_attention};
 }
 
+async function attentionOrder(page, fixture) {
+  await browserOpen(page, fixture);
+  const section = page.locator('#thread-list-overview [data-section="attention"]');
+  const relevant = ["failed", "approval", "blocking", "supervisor"];
+  for (const key of relevant) await shown(page, `#thread-list-overview [data-section="attention"] li[data-thread="${fixture.threads[key].id}"]`);
+  const order = await section.locator("li.tl-row").evaluateAll(rows => rows.map(row => row.dataset.thread));
+  const position = key => order.indexOf(fixture.threads[key].id);
+  assert(position("failed") < position("supervisor") && position("blocking") < position("supervisor"), JSON.stringify(order));
+  assert(position("approval") < position("supervisor"), JSON.stringify(order));
+  return {order};
+}
+
+async function quietSubmission(page, fixture) {
+  const thread = fixture.threads.update;
+  const marker = "Check the next sample quietly.";
+  await openConversation(page, fixture, thread);
+  const {body: before} = await getBrowserAPI(fixture, "threads/" + thread.id);
+  const accepted = page.waitForResponse(response => isSubmission(response.request()) && sentText(response.request()) === marker);
+  void accepted.catch(() => {});
+  await compose(page, marker, "Alt+Meta+Enter");
+  const response = await accepted;
+  assert(response.ok());
+  assert.equal(response.request().postDataJSON()?.quiet, true);
+  await expectContains(page.locator("#timeline article.message.user"), marker);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const {body} = await getBrowserAPI(fixture, "threads/" + thread.id);
+    if (body.turn_completion?.status === "completed" && body.turn_completion.id > before.turn_completion.id) {
+      assert.equal(body.needs_attention, false);
+      return {thread: thread.id, attention: body.needs_attention, completion: body.turn_completion.id};
+    }
+    await delay(50);
+  }
+  assert.fail("Could not observe the quiet completion.");
+}
+
 async function optimisticOrdering(page, fixture) {
   const first = fixture.threads.supervisor;
   const second = fixture.threads.other;
@@ -556,9 +591,11 @@ async function optimisticOrdering(page, fixture) {
   const hold = new Promise(resolve => { releaseAcceptance = resolve; });
   const marker = "Synthetic acceptance ";
   const acknowledgements = [];
+  const receipts = [];
   page.on("response", response => {
     if (isSubmission(response.request()) && sentText(response.request())?.startsWith(marker)) {
       acknowledgements.push({text: sentText(response.request()), status: response.status()});
+      receipts.push(response.json().then(body => body.acceptedMessage || body.transferSubmission || null).catch(() => null));
     }
   });
   await page.route(/\/api\/browser\/sessions\/[^/]+\/(?:messages|queue)$/, async route => {
@@ -592,7 +629,11 @@ async function optimisticOrdering(page, fixture) {
   await selectTab(page, first);
   await expectContains(page.locator("#timeline"), marker + "first");
   await expectContains(page.locator("body"), "Synthetic acceptance was rejected.");
-  assert.equal(await page.locator("#timeline article.message.user").filter({hasText: marker + "first"}).count(), 1);
+  const firstRows = page.locator("#timeline article.message.user").filter({hasText: marker + "first"});
+  const rendered = await firstRows.evaluateAll(rows => rows.map(row => ({
+    optimistic: row.hasAttribute("data-outgoing"), turn: row.dataset.searchTurn, item: row.dataset.searchItem,
+    status: row.querySelector(".outgoing-status")?.textContent,
+  })));
   assert.equal(await page.locator("#timeline article.message.user").filter({hasText: marker + "other"}).count(), 0);
   assert.equal(signals.filter(signal => signal.path.includes(`/${first.id}/`)).length, 2);
   assert.equal(signals.filter(signal => signal.path.includes(`/${second.id}/`)).length, 1);
@@ -601,14 +642,19 @@ async function optimisticOrdering(page, fixture) {
   assert.equal(new Set(ids).size, 3);
   const [firstHistory, secondHistory] = await Promise.all([first, second].map(thread =>
     getBrowserAPI(fixture, `sessions/${thread.id}?recent=1`)));
+  const canonical = [];
   for (const [history, good, foreign] of [[firstHistory, "first", "other"], [secondHistory, "other", "first"]]) {
     const turns = history.body.thread?.turns || [];
     const text = turns.flatMap(turn => turn.items.filter(item => item.type === "userMessage"))
       .flatMap(item => item.content.map(part => part.text));
     assert.equal(text.filter(value => value === marker + good).length, 1, JSON.stringify(acknowledgements));
     assert(!text.some(value => value === marker + foreign || value === marker + "reject"));
+    canonical.push(...turns.flatMap(turn => turn.items.filter(item => item.type === "userMessage" &&
+      item.content?.some(part => part.text === marker + good)).map(item => ({turn: turn.id, item: item.id, text: marker + good}))));
   }
-  return {requests: signals, acknowledgements};
+  const accepted = await Promise.all(receipts);
+  assert.equal(rendered.length, 1, JSON.stringify({rendered, accepted, canonical}));
+  return {requests: signals, acknowledgements, rendered, canonical};
 }
 
 async function drafts(page, fixture) {
@@ -937,6 +983,8 @@ async function interactions(browser, fixture, report) {
   await recordCheck(report, "List default, retained overview modes and one Queue entry",
     () => withPage(browser, page => retainedOverviewModes(page, fixture)));
   await recordCheck(report, "real composite open and authorization", () => compositeOpen(fixture));
+  await recordCheck(report, "Attention stages blockers and approvals before informational replies",
+    () => desktop(page => attentionOrder(page, fixture)));
   await recordCheck(report, "mobile composer, geometry and header controls",
     () => withPage(browser, page => mobileLayout(page, fixture),
       {viewport: {width: 390, height: 844}, hasTouch: true, colorScheme: "dark"}));
@@ -944,6 +992,8 @@ async function interactions(browser, fixture, report) {
     desktop(page => attentionReceipts(page, fixture, "supervisor", true, "reply")));
   await recordCheck(report, "routine update clears when read", () =>
     desktop(page => attentionReceipts(page, fixture, "update", true, "update")));
+  await recordCheck(report, "quiet keyboard submission suppresses clean completion attention",
+    () => desktop(page => quietSubmission(page, fixture)));
   await recordCheck(report, "stalled provider stays in Attention after reading", () =>
     desktop(page => attentionReceipts(page, fixture, "stalled", false, "action")));
   // Discuss before Enter, so the same Ask must survive the first operation.
