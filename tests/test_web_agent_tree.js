@@ -403,16 +403,19 @@ test("late family discovery respects explicit Context and close choices", async 
   }
 });
 
-test("same-tab child navigation keeps panel choices and does not reopen the mobile sheet", async () => {
+test("on a phone, opening a conversation with agents lands on the conversation; the tree waits in the panel", async () => {
   const c = setupController([thread("root"), thread("child", "root")]);
   let opened = 0;
   c.state.mobileChat = {matches: true, open() { opened++; }, layoutContext() {}};
+  const collapsed = c.collapsed;
   c.controller.bind(); await c.controller.load();
-  assert.equal(opened, 1);
+  assert.equal(opened, 0, "the thread sheet does not open over the conversation");
+  assert.equal(c.collapsed, collapsed, "the default does not expand the context panel");
+  assert.equal(c.controller.mode, "agents", "thread options open on the tree when asked");
   c.state.selected = "child";
   c.controller.bind({preservePanel: true}); await c.controller.load();
   assert.equal(c.controller.mode, "agents");
-  assert.equal(opened, 1);
+  assert.equal(opened, 0);
   c.controller.setMode("context");
   c.controller.bind({preservePanel: true}); await c.controller.load();
   assert.equal(c.controller.mode, "context");

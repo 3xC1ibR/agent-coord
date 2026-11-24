@@ -461,6 +461,7 @@ test("production integration shares cards and uses seen receipt IDs without mark
     threadPath: id => "threads/" + id, api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"]),
     markThreadHandled: async item => calls.push(["dismiss", item])};
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
   c.renderOverviewLayout([]); assert.equal(nodes["atlas-overview"].hidden, true); assert.equal(nodes["working-set-overview"].hidden, false); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.workspace, "/work");
   assert.equal(options.selectedGroup, null);
@@ -527,7 +528,8 @@ test("list order puts requests first, then follows the user's own last message, 
     listThread("blank", {created_at: NOW - 1})];
   const {sections} = WorkingSet.listSections(threads, {now: NOW, workspace: "/work"});
   assert.deepEqual(sections.attention.map(t => t.thread_id), ["failed", "new-reply", "old-reply"]);
-  assert.deepEqual(sections.idle.map(t => t.thread_id), ["pinned", "mine-recent", "turn-only", "agent-woke"]);
+  assert.deepEqual(sections.pinned.map(t => t.thread_id), ["pinned"], "a pin leaves the stages for Pinned");
+  assert.deepEqual(sections.idle.map(t => t.thread_id), ["mine-recent", "turn-only", "agent-woke"]);
   assert.deepEqual(sections.empty.map(t => t.thread_id), ["blank"]);
 });
 test("list groups count Attention per group, filter by the chosen group, and show parked threads as one list", () => {
@@ -813,6 +815,7 @@ test("production integration renders the list beside Focus with the shared threa
     toggleThreadClosed: t => calls.push(["close", t.thread_id]), threadPath: id => "threads/" + id,
     api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
   c.renderOverviewLayout([]);
   assert.equal(nodes["thread-list-overview"].hidden, false); assert.equal(nodes["working-set-overview"].hidden, true); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.selectedGroup, null); assert.equal(options.placement, "active"); assert.equal(options.revision, "rev");
@@ -820,4 +823,36 @@ test("production integration renders the list beside Focus with the shared threa
   config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onRead(t);
   assert.deepEqual(calls.slice(0, 3), [["open", "a"], ["close", "a"], ["menu", "anchor", "Thread a", [{label: "Pin a"}], "event"]]);
   assert.equal(JSON.stringify(calls[3]), JSON.stringify(["threads/a", {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}]));
+});
+
+test("Pinned leads the inbox: every pinned thread or app agent appears once, needs-you first, then working, then recency", () => {
+  const parent = listThread("parent", {checkpoint: {id: 1}});
+  const threads = [parent,
+    listThread("pin-idle", {pinned: true, last_user_message_at: NOW - 10, checkpoint: {id: 2}}),
+    listThread("pin-old", {pinned: true, last_user_message_at: NOW - 3000, checkpoint: {id: 3}}),
+    listThread("pin-working", {pinned: true, status: "running", response_state: "working"}),
+    listThread("pin-needs", {pinned: true, status: "needs input", attention_since: NOW - 60, checkpoint: {id: 4}}),
+    listThread("pin-later", {pinned: true, attention: "later", checkpoint: {id: 5}}),
+    listThread("pin-closed", {pinned: true, attention: "archived", checkpoint: {id: 6}}),
+    listThread("pin-snoozed", {pinned: true, snoozed: true, attention: "later", checkpoint: {id: 7}}),
+    listThread("pin-agent", {pinned: true, agent_parent_id: "parent", status: "stalled", checkpoint: {id: 8}}),
+    listThread("agent", {agent_parent_id: "parent", status: "stalled", checkpoint: {id: 9}})];
+  const {sections, groups} = WorkingSet.listSections(threads, {now: NOW, workspace: "/work"});
+  assert.deepEqual(sections.pinned.map(t => t.thread_id), ["pin-agent", "pin-needs", "pin-working", "pin-idle", "pin-old", "pin-later"]);
+  const elsewhere = ["attention", "working", "quiet", "idle", "empty"].flatMap(name => sections[name].map(t => t.thread_id));
+  for (const id of sections.pinned.map(t => t.thread_id)) assert.ok(!elsewhere.includes(id), id + " appears only in Pinned");
+  assert.ok(sections.attention.some(t => t.thread_id === "agent"), "an unpinned escalating agent keeps its Attention row");
+  assert.ok(!sections.pinned.some(t => ["pin-closed", "pin-snoozed"].includes(t.thread_id)), "closed and snoozed pins wait in their views");
+  assert.equal(groups[0].attention, 3, "Attention counts still include pinned threads that need you");
+  const parked = WorkingSet.listSections(threads, {now: NOW, workspace: "/work", view: "later"});
+  assert.deepEqual(parked.sections.pinned, [], "Later and Closed stay single lists");
+});
+test("the Pinned section renders first and only when something is pinned", () => {
+  const c = listSetup();
+  c.render([listThread("reply", {unread_result: true, attention_since: NOW - 60, checkpoint: {id: 1}}), listThread("idle", {checkpoint: {id: 2}})]);
+  assert.equal(c.host.querySelectorAll(".tl-section").some(s => s.dataset.section === "pinned"), false);
+  c.render([listThread("reply", {unread_result: true, attention_since: NOW - 60, checkpoint: {id: 1}}), listThread("idle", {pinned: true, checkpoint: {id: 2}})]);
+  assert.equal(c.host.querySelectorAll(".tl-section")[0].dataset.section, "pinned");
+  assert.deepEqual([c.rows("pinned"), c.rows("idle")], [["idle"], []]);
+  assert.ok(c.control("idle", "more"), "pinned rows keep their row actions");
 });

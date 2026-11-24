@@ -103,7 +103,9 @@ Interpret the saved evidence carefully:
   investigation retains that stage; Done indicates delivered implementation or
   execution. `work_phase` retains the activity of older inquiry checkpoints
   marked finished. A stopped process or completed turn alone is not delivery.
-- Pins stay within stages and never hide required attention. Done stays quietly
+- Pinned threads and app agents leave their stages for a Pinned section at the
+  top of the inbox, ordered needs-you, working, then recency; Attention counts
+  still include them. Done stays quietly
   visible until the user moves or closes it. Later has a separate browsable view
   with checkpoint summaries and preserves pending responses.
 - A stale or missing checkpoint leaves progress uncertain. Describe that gap;

@@ -342,7 +342,8 @@ const WorkingSet = (() => {
   // A quiet thread's results never enter Attention; it is in Working while it
   // runs and otherwise in Quiet, unless it fails, stalls or needs the user.
   const DAY = 86400, IDLE_CAP = 50;
-  const SECTIONS = [["attention", "Attention"], ["working", "Working"], ["quiet", "Quiet"], ["idle", "Idle"]];
+  // Pinned leads the inbox and is shown only when it holds threads; Attention keeps meaning "needs you now".
+  const SECTIONS = [["pinned", "Pinned"], ["attention", "Attention"], ["working", "Working"], ["quiet", "Quiet"], ["idle", "Idle"]];
   const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", "needs-you": "Needs you"};
   const PROVIDERS = {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code", muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"};
   // Until the payload carries the user's last message, the latest turn start stands in for it.
@@ -433,29 +434,42 @@ const WorkingSet = (() => {
       if (escalates(t) && t.attention !== "archived" && !t.snoozed && t.attention !== "later") escalated.push(t);
     }
     const parked = ["later", "archived"].includes(view);
+    // A pin moves a thread, or an app agent, into Pinned whatever its state; it keeps
+    // the place it would otherwise have as origin, so Attention counts still include it.
+    const pinnedHere = t => !parked && t.pinned && t.attention !== "archived" && !t.snoozed;
     const rows = [];
     for (const t of visible) {
       if (parents.has(t.thread_id)) continue;
       const place = parked ? "idle" : placementOf(t, byId, now, workingRoots, false);
-      if (place && place !== "later") rows.push({thread: t, place, group: descriptor(t)});
+      if (pinnedHere(t)) rows.push({thread: t, place: "pinned", origin: place, group: descriptor(t)});
+      else if (place && place !== "later") rows.push({thread: t, place, group: descriptor(t)});
     }
-    if (!parked) for (const t of escalated) rows.push({thread: t, place: "attention", group: descriptor(t)});
+    if (!parked) {
+      for (const t of escalated) if (!pinnedHere(t)) rows.push({thread: t, place: "attention", group: descriptor(t)});
+      for (const t of visible) if (parents.has(t.thread_id) && pinnedHere(t))
+        rows.push({thread: t, place: "pinned", origin: escalated.includes(t) ? "attention" : running(t) ? "working" : "idle", group: descriptor(t)});
+    }
+    const needsYou = row => row.place === "attention" || row.origin === "attention";
     const groups = new Map();
-    for (const {thread, place, group} of rows) {
+    for (const {thread, place, origin, group} of rows) {
       if (!groups.has(group.key)) groups.set(group.key, {...group, attention: 0, touch: 0});
       const entry = groups.get(group.key);
-      entry.attention += place === "attention"; entry.touch = Math.max(entry.touch, engagedAt(thread));
+      entry.attention += needsYou({place, origin}); entry.touch = Math.max(entry.touch, engagedAt(thread));
     }
     const ordered = [...groups.values()].sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
-    const all = {key: ALL, name: "All groups", attention: rows.filter(r => r.place === "attention").length};
+    const all = {key: ALL, name: "All groups", attention: rows.filter(needsYou).length};
     const selected = pageKey;
-    const sections = {attention: [], working: [], quiet: [], idle: [], empty: []};
+    const sections = {pinned: [], attention: [], working: [], quiet: [], idle: [], empty: []};
     for (const {thread, place, group} of rows) {
       if (selected !== ALL && group.key !== selected) continue;
       const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
       sections[empty ? "empty" : place].push(thread);
     }
     sections.attention.sort(attentionOrder);
+    // Pinned: what needs you, then what is working, then the rest by recency.
+    const origins = new Map(rows.map(row => [row.thread.thread_id, row.origin]));
+    const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
+    sections.pinned.sort((a, b) => pinOrder(a) - pinOrder(b) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
     for (const key of ["working", "quiet", "idle", "empty"])
       sections[key].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
     // Agents waiting on you lead their orchestrator's list, then the ones still working.
@@ -578,7 +592,7 @@ const WorkingSet = (() => {
         const empty = {attention: "Nothing needs you right now.", working: "No agents are working.", idle: "No idle threads."};
         // Quiet is only shown when it holds threads; most inboxes never use it.
         for (const [name, title] of SECTIONS)
-          if (name !== "quiet" || data.sections.quiet.length) parts.push(section(data, name, title, data.sections[name], empty[name]));
+          if (!["quiet", "pinned"].includes(name) || data.sections[name].length) parts.push(section(data, name, title, data.sections[name], empty[name]));
         const blank = data.sections.empty;
         if (blank.length) {
           if (shown.has("empty")) parts.push(section(data, "empty", "Empty", blank, ""));

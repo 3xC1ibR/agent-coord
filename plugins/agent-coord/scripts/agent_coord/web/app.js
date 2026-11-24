@@ -411,6 +411,12 @@ async function markThreadHandled(thread) {
   await state.rollUp?.responded(ticket);
   await refreshList();
 }
+// The inbox's Mark read button, its row menu and the Working set share one read receipt.
+async function markThreadRead(thread) {
+  await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
+    seen_completion_id: thread.turn_completion?.id || 0});
+  await refreshList();
+}
 async function toggleThreadLater(thread) {
   await updateThreadAttention(thread, {attention: thread.attention === "later" ? "now" : "later"});
 }
@@ -599,7 +605,7 @@ function threadCard(thread, compact = false, inAttention = false) {
   }
   return button;
 }
-function threadMenuItems(thread) {
+function threadMenuItems(thread, {inbox = false} = {}) {
   const items = [
     ...(thread.orchestration_workspaces?.includes(state.projectCwd)
       && (thread.project_cwd || thread.cwd) !== state.projectCwd
@@ -618,6 +624,12 @@ function threadMenuItems(thread) {
   if (thread.attention !== "archived" && (thread.supervised_by_user || thread.supervisor_thread_id || thread.created_by_thread_id))
     items.push({label: "Change supervisor…", run: () => openSupervisorDialog(thread)});
   if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
+  if (inbox && thread.attention !== "archived") {
+    // Inbox rows have no Dismiss button. Live approvals and blocking questions resolve only by answering.
+    if (thread.unread_result || thread.unread) items.unshift({label: "Mark as read", run: () => action(() => markThreadRead(thread))});
+    if (thread.can_handle_response && !["approval", "question"].includes(WorkingSet.requestOf(thread)))
+      items.unshift({label: "Dismiss from Attention", run: () => action(() => markThreadHandled(thread))});
+  }
   return items;
 }
 function appAgentIndicator(thread) {
@@ -932,13 +944,9 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
   if (list && listHost && !$("welcome").hidden) {
     state.threadList ||= WorkingSet.createList({document,
       onOpen: id => action(() => select(id)),
-      onRead: thread => action(async () => {
-        await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
-          seen_completion_id: thread.turn_completion?.id || 0});
-        await refreshList();
-      }),
+      onRead: thread => action(() => markThreadRead(thread)),
       onClose: thread => action(() => toggleThreadClosed(thread)),
-      onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread), event)});
+      onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread, {inbox: true}), event)});
     const view = savedViews?.activeId || "all";
     state.threadList.render(workingThreads, listHost, {workspace: state.projectCwd || "all", view,
       selectedGroup: view.startsWith("group-") ? view.slice(6) : view === "all" ? null : undefined,
@@ -953,11 +961,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
       onOpen: id => action(() => select(id)),
       onGroupChange: id => action(() => savedViews.openGroup(id)),
       onDismiss: thread => action(() => markThreadHandled(thread)),
-      onRead: thread => action(async () => {
-        await api(threadPath(thread.thread_id), {seen: true, seen_checkpoint_id: thread.checkpoint?.id || 0,
-          seen_completion_id: thread.turn_completion?.id || 0});
-        await refreshList();
-      })});
+      onRead: thread => action(() => markThreadRead(thread))});
     const view = savedViews?.activeId || "all";
     state.workingSet.render(workingThreads, workingHost, {workspace: state.projectCwd || "all", view,
       selectedGroup: view.startsWith("group-") ? view.slice(6) : view === "all" ? null : undefined,
@@ -3712,9 +3716,11 @@ function setupAgentTree() {
     applyDefault() {
       if (!defaultPending || !state.selected || isSessionDraft() || !this.hasAgents(this.root)) return;
       defaultPending = false;
+      // A phone shows the conversation first: the tree is the panel's mode, one tap away
+      // in thread options, but the sheet does not open over the conversation.
+      if (state.mobileChat?.matches) { this.setMode("agents", false); renderStatus(); return; }
       this.setMode("agents");
       setContextCollapsed(false, {persist: false});
-      if (state.mobileChat?.matches) state.mobileChat.open("context");
       renderStatus();
     },
     cancelDefault() { defaultPending = false; },

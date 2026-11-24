@@ -178,3 +178,30 @@ test("updates share the attention queue and read responses remain in their stage
   assert.equal(threadViews.badges([unread], {}).attention, 1);
   assert.equal(threadViews.matches(unread, {show: "attention"}), true);
 });
+
+test("inbox row menus offer Dismiss from Attention and Mark as read only where they apply", async () => {
+  const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js");
+  const item = response({links: [], status: "idle", response_state: "input", unread_result: true,
+    checkpoint: {id: 12, phase: "planning", next_actor: "user", next_action: "Choose"}});
+  const c = cardSetup(item);
+  c.WorkingSet = WorkingSet;
+  vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
+  const labels = (thread, options) => Array.from(c.threadMenuItems(thread, options), entry => entry.label);
+  assert.deepEqual(labels(item, {inbox: true}).slice(0, 2), ["Dismiss from Attention", "Mark as read"]);
+  assert.ok(!labels(item).includes("Dismiss from Attention"), "cards keep their own Dismiss button");
+  assert.ok(!labels(item).includes("Mark as read"));
+  assert.ok(!labels({...item, unread_result: false, unread: false}, {inbox: true}).includes("Mark as read"));
+  assert.ok(!labels({...item, can_handle_response: false}, {inbox: true}).includes("Dismiss from Attention"));
+  for (const live of [{status: "needs input"}, {open_ask: {id: 3}}])
+    assert.ok(!labels({...item, ...live}, {inbox: true}).includes("Dismiss from Attention"), JSON.stringify(live) + " resolves only by answering");
+  assert.deepEqual(labels({...item, attention: "archived"}, {inbox: true}).filter(l => /Dismiss|Mark as read/.test(l)), []);
+  const calls = [];
+  c.api = async (path, body) => { calls.push([path, body]); return {...item, can_handle_response: false}; };
+  c.state.rollUp = null; c.state.threadActions = {notify() {}};
+  const menu = c.threadMenuItems(item, {inbox: true});
+  await menu.find(entry => entry.label === "Dismiss from Attention").run();
+  assert.equal(calls[0][1].handled, true, "Dismiss uses the thread view's handled receipt");
+  assert.equal(calls[0][1].handled_checkpoint_id, 12);
+  await menu.find(entry => entry.label === "Mark as read").run();
+  assert.equal(JSON.stringify(calls.at(-1)), JSON.stringify(["threads/one", {seen: true, seen_checkpoint_id: 12, seen_completion_id: 8}]));
+});
