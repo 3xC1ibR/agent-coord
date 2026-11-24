@@ -1,7 +1,47 @@
 /* OpenUI is loaded only inside isolated frames, and only for agent fences. */
 (function (root) {
   "use strict";
-  const cards = new Map(), records = new Map();
+  const containers = new Map(), records = new Map();
+  let containerSequence = 0;
+  function context(container) {
+    let value = containers.get(container);
+    if (!value) {
+      value = {id: ++containerSequence, cards: new Map(), parking: null};
+      containers.set(container, value);
+    }
+    return value;
+  }
+  function retain(container, card) {
+    const owner = context(container);
+    if (!owner.parking) {
+      owner.parking = container.ownerDocument.createElement("div");
+      owner.parking.hidden = true;
+      container.ownerDocument.body.append(owner.parking);
+    }
+    if (owner.parking.moveBefore && card.isConnected) owner.parking.moveBefore(card, null);
+    else owner.parking.append(card);
+  }
+  function park(container) {
+    for (const card of [...container.children]) if (card.dataset?.openuiKey) retain(container, card);
+  }
+  function release(thread, container = null) {
+    for (const [host, owner] of containers) {
+      if (container && host !== container) continue;
+      for (const [key, card] of owner.cards) {
+        if (thread && card.dataset.openuiThread !== thread) continue;
+        owner.cards.delete(key);
+        card.remove();
+      }
+    }
+    for (const [id, record] of records) if ((!thread || record.options.thread === thread) && (!container || record.container === container)) {
+      dispose(record); records.delete(id);
+    }
+  }
+  function releaseContainer(container) {
+    release(null, container);
+    containers.get(container)?.parking?.remove();
+    containers.delete(container);
+  }
   const MAX_SOURCE = 256 * 1024, MAX_ACTION = 32 * 1024;
   function actionMessage(event) {
     if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid OpenUI response.");
@@ -17,12 +57,12 @@
     let cursor = container.firstChild;
     for (const child of desired) {
       if (child === cursor) cursor = cursor.nextSibling;
-      else if (child.parentNode === container && container.moveBefore) container.moveBefore(child, cursor);
+      else if (child.isConnected && container.isConnected && container.moveBefore) container.moveBefore(child, cursor);
       else container.insertBefore(child, cursor);
     }
   }
   function commit(container, fragment, options) {
-    const live = new Set(), nextCards = new Map();
+    const owner = context(container), cards = owner.cards, live = new Set(), nextCards = new Map();
     const desired = [...fragment.childNodes].map(child => {
       const key = child.dataset?.openuiKey;
       if (!key) return child;
@@ -33,9 +73,10 @@
         if (previousTime && nextTime && previousTime.outerHTML !== nextTime.outerHTML) previousTime.replaceWith(nextTime);
       }
       card.dataset.openuiStreaming = child.dataset.openuiStreaming;
+      card.dataset.openuiThread = options.thread || "";
       nextCards.set(key, card);
       [...card.querySelectorAll(".openui-block")].forEach((block, index) => {
-        const id = key + ":" + (index + 1);
+        const id = owner.id + ":" + key + ":" + (index + 1);
         live.add(id);
         const source = block.querySelector("code").textContent;
         let record = records.get(id);
@@ -43,6 +84,7 @@
           const savedState = record?.source === source ? record.state : null;
           dispose(record);
           record = mount(block, id, source, savedState, options);
+          record.container = container;
           records.set(id, record);
         }
         record.options = options;
@@ -55,8 +97,14 @@
       });
       return card;
     });
-    for (const [id, record] of records) if (!live.has(id)) { dispose(record); records.delete(id); }
-    cards.clear(); for (const [key, card] of nextCards) cards.set(key, card);
+    for (const [key, card] of cards) {
+      if (!nextCards.has(key) && card.parentNode === container) retain(container, card);
+    }
+    for (const [id, record] of records) if (record.container === container && !live.has(id) &&
+        nextCards.has(record.block.closest?.("[data-openui-key]")?.dataset.openuiKey)) {
+      dispose(record); records.delete(id);
+    }
+     for (const [key, card] of nextCards) cards.set(key, card);
     reconcileChildren(container, desired);
   }
   function update(record) {
@@ -86,7 +134,7 @@
     frame.title = "Interactive agent response";
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("referrerpolicy", "no-referrer");
-    frame.src = "/openui-frame.html";
+    frame.src = new URL("/openui-frame.html", doc.location.origin).href;
     frame.onload = () => {
       record.port?.close();
       const channel = new MessageChannel(); record.port = channel.port1;
@@ -114,7 +162,7 @@
     preview.prepend(frame);
     return record;
   }
-  const api = {commit, actionMessage, reconcileChildren, availability};
+  const api = {commit, actionMessage, reconcileChildren, availability, park, release, releaseContainer};
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else {
     root.OpenUIThread = api;

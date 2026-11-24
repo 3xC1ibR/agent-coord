@@ -140,23 +140,30 @@
       }
     });
     const refreshSettings = () => api("activity/settings").then(settings => recorder.setEnabled(settings.enabled)).catch(() => {});
+    recorder.refreshSettings = refreshSettings;
     refreshSettings();
     let ticks = 0;
-    const timer = view.setInterval(() => {
+    const tick = () => {
       recorder.setForeground(foreground());
       recorder.flush();
-      if (++ticks % 15 === 0) refreshSettings();
-    }, 2000);
+      if (++ticks % 15 === 0 && !state.streamHealthy) refreshSettings();
+    };
+    let timer = view.setInterval(tick, 2000);
     const channel = typeof view.BroadcastChannel === "function" ? new view.BroadcastChannel("ribbon-field-activity") : null;
     if (channel) channel.onmessage = ({data}) => {
       if (data?.type === "clear") recorder.clear();
       if (typeof data?.enabled === "boolean") recorder.setEnabled(data.enabled);
     };
-    view.addEventListener("pagehide", () => {
+    view.addEventListener("pagehide", event => {
       recorder.end(); recorder.flush({keepalive: true});
-      view.clearInterval(timer); channel?.close(); stopped = true;
+      view.clearInterval(timer); if (!event.persisted) channel?.close(); stopped = true;
     });
-    view.addEventListener("pageshow", event => { if (event.persisted && stopped) view.location.reload(); });
+    view.addEventListener("pageshow", event => {
+      if (event.persisted && stopped) {
+        stopped = false; refreshSettings(); recorder.windowFocused();
+        timer = view.setInterval(tick, 2000);
+      }
+    });
     return recorder;
   }
   const exports = {VisitRecorder, bind, surfaceOf, SURFACES};

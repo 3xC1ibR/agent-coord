@@ -6,6 +6,9 @@
       Object.assign(this, {timeline, input, composer, canDiscuss, onHold, onError});
       this.document = timeline.ownerDocument;
       this.view = this.document.defaultView;
+      this.listeners = new AbortController();
+      const listen = (target, event, callback, options) => target?.addEventListener(event, callback,
+        {...options, signal: this.listeners.signal});
       this.button = this.document.createElement("button");
       this.button.type = "button"; this.button.className = "quiet response-discuss";
       this.button.textContent = "Discuss"; this.button.setAttribute("aria-label", "Discuss selected response text");
@@ -21,22 +24,23 @@
         this.pointing = true; this.onHold?.();
       });
       const released = () => { this.pointing = false; this.update(); };
-      this.document.addEventListener("pointerup", released);
-      this.document.addEventListener("pointercancel", released);
-      this.document.addEventListener("selectionchange", () => this.update());
-      this.document.addEventListener("keydown", event => {
+      listen(this.document, "pointerup", released);
+      listen(this.document, "pointercancel", released);
+      listen(this.document, "selectionchange", () => this.update());
+      listen(this.document, "keydown", event => {
         if (event.key === "Escape" && !this.button.hidden) {
           this.view.getSelection()?.removeAllRanges(); this.update();
         }
       });
-      this.view.addEventListener("resize", () => this.position());
-      this.document.addEventListener("scroll", () => this.position(), {capture: true, passive: true});
-      this.view.visualViewport?.addEventListener("resize", () => this.position());
+      listen(this.view, "resize", () => this.position());
+      listen(this.document, "scroll", () => this.position(), {capture: true, passive: true});
+      listen(this.view.visualViewport, "resize", () => this.position());
       timeline.addEventListener("click", event => {
         const button = event.target.closest("button[data-copy-block]");
         if (button && timeline.contains(button)) this.copy(button);
       });
     }
+    dispose() { this.listeners.abort(); }
     // Collect desired nodes without detaching live messages (and their ranges).
     static buffer() { return {childNodes: [], append(...nodes) { this.childNodes.push(...nodes); }}; }
     static commit(container, buffer) {

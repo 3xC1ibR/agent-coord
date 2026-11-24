@@ -224,7 +224,7 @@
       await this.refresh();
       clearInterval(this.timer);
       this.timer = setInterval(() => {
-        if (this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
+        if (!this.connected?.() && this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
       }, 5000);
     }
 

@@ -194,8 +194,8 @@ test("legacy backends keep their complete-history path and the conversation cach
   assert.equal(h.entry().completeHistory, true);
   assert.equal(h.calls.at(-1).path, "sessions/one");
   assert.equal(h.calls.at(-1).options.headers?.["X-Agent-Coord-History-View"], undefined);
-  for (let i = 0; i < 6; i++) h.c.conversationEntry("other-" + i);
-  assert.equal(h.c.state.conversations.size, 4); assert.ok(h.c.state.conversations.has("one"));
+  for (let i = 0; i < 68; i++) h.c.conversationEntry("other-" + i);
+  assert.equal(h.c.state.conversations.size, 64); assert.ok(h.c.state.conversations.has("one"));
 });
 
 test("prepending anchors a retained passage instead of the replaced earlier-turn button", async () => {

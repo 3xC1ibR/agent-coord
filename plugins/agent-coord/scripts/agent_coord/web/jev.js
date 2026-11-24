@@ -56,6 +56,7 @@
         if (refreshAgain) { refreshAgain = false; refresh(); }
       }
     }
+    window.agentCoordJev.refreshStatus = refresh;
     let channel;
     try { if (typeof BroadcastChannel !== "undefined") channel = new BroadcastChannel("ribbon-field-jev-settings"); }
     catch { /* Some browser profiles do not permit cross-window messaging. */ }
@@ -64,7 +65,7 @@
     dialog?.addEventListener("close", refresh);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
-    const timer = setInterval(refresh, 30000);
+    const timer = setInterval(() => { if (!window.agentCoordStreamConnected?.()) refresh(); }, 30000);
     function close() {
       closed = true; clearInterval(timer); channel?.close();
       dialog?.removeEventListener("close", refresh);
