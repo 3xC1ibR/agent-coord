@@ -85,6 +85,46 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  interface-acceptance:
+    name: Interface states and interaction latency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend and browser dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm ci --prefix demo --ignore-scripts --omit=dev --no-audit --no-fund
+          demo/node_modules/.bin/playwright install --with-deps chromium
+      - name: Build and verify the interface
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
+      - name: Verify interface states and interaction latency
+        run: |
+          node scripts/validate_interface.mjs --source "$PWD" \
+            --output "$RUNNER_TEMP/interface-acceptance" --check
+      - name: Retain interface measurements and screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interface-acceptance
+          path: ${{ runner.temp }}/interface-acceptance
+          if-no-files-found: ignore
+          retention-days: 30
+
   macos-build:
     name: macOS standalone build (arm64)
     runs-on: macos-15
