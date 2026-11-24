@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import fcntl
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 import test_desktop_runtime  # Add the in-tree runtime to the import path.
+from agent_coord import desktop_runtime, runtime_edge
 from agent_coord.local_http import LocalHTTPServer
 from agent_coord.runtime_cutover import RuntimeListeners
 from agent_coord.ui import LoopbackHTTPServer
@@ -22,6 +28,31 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 
 class RuntimeCutoverTests(unittest.TestCase):
+    def test_fence_waits_briefly_for_an_edge_lease_before_draining(self):
+        with tempfile.TemporaryDirectory() as path:
+            root = Path(path)
+            owner = desktop_runtime.Runtime(root / "runtime.sqlite3", root / "predecessor", -1)
+            sessions = SimpleNamespace(admission=desktop_runtime.AdmissionGate(), lock=threading.RLock(),
+                active={}, projection=SimpleNamespace(error=None), muse=SimpleNamespace())
+            owner.server = SimpleNamespace(browser_sessions=sessions)
+            owner.edge_route = Mock()
+            owner.pending = root / "candidate"
+            (owner.directory / "edge.json").touch()
+            owner.request_update("held-edge-lease", str(owner.pending))
+
+            with runtime_edge.inflight_descriptor(owner.directory) as descriptor:
+                fcntl.flock(descriptor, fcntl.LOCK_SH)
+                self.assertFalse(owner.prepare_handover())
+                self.assertFalse(sessions.admission.paused)
+                owner.edge_route.assert_not_called()
+
+                owner.update_drain_started -= desktop_runtime.UPDATE_ADMISSION_OPPORTUNITY_SECONDS
+                self.assertFalse(owner.prepare_handover())
+                self.assertTrue(sessions.admission.paused)
+                owner.edge_route.assert_called_once_with(ready=False)
+
+            self.assertTrue(owner.prepare_handover())
+
     def test_services_follow_listener_readiness_and_cancel_before_teardown(self):
         control = LocalHTTPServer(("127.0.0.1", 0), StatusHandler)
         self.addCleanup(control.server_close)

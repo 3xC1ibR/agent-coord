@@ -40,6 +40,9 @@ UPDATE_SHUTDOWN_SECONDS = 30
 UPDATE_DRAIN_SECONDS = 20
 # Close new requests before waiting for admitted operations to finish.
 UPDATE_ADMISSION_SECONDS = 30
+# Let a finite operation finish on the predecessor before closing its route.
+# Sustained traffic can postpone the actual fence by at most this interval.
+UPDATE_ADMISSION_OPPORTUNITY_SECONDS = .1
 REVIEW_NOTICE = ("The backend update finished, but work stays paused for review because the previous "
                  "backend could not confirm a clean shutdown. Waiting will not resume it. Inspect running "
                  "tools, then run the runtime maintenance resume command.")
@@ -326,6 +329,13 @@ class AdmissionGate:
         with self.lock:
             self.paused = True
             return self.inflight
+
+    def pause_if_idle(self):
+        with self.lock:
+            if self.inflight:
+                return False
+            self.paused = True
+            return True
 
     def resume(self):
         with self.lock:
@@ -925,10 +935,21 @@ class Runtime:
             # Save the drain intent while the current route is still serving.
             self.update_requested = runtime_update.write(self.directory, self.update_requested,
                 phase="draining", admission_drain_started_at=time.time())
-        self.fence_edge()
-        sessions.admission.pause()
         if start_drain:
             self.update_drain_started = time.monotonic()
+        if (self.update_drain_started is not None and self.edge_admission_closed_at is None
+                and (self.directory / "edge.json").exists()
+                and time.monotonic() - self.update_drain_started < UPDATE_ADMISSION_OPPORTUNITY_SECONDS):
+            # Publish the fence under the exclusive lease, so a new edge
+            # request cannot slip in between choosing the boundary and closing
+            # admission. Both checks are nonwaiting while the old route is up.
+            with runtime_edge.exclusive_admission(self.directory) as idle:
+                if not idle or not sessions.admission.pause_if_idle():
+                    return False
+                self.fence_edge()
+        else:
+            self.fence_edge()
+            sessions.admission.pause()
         blocked = uninterrupted_readiness(sessions)
         if (getattr(self.server, "edge_fenced_generation", None) and "admitted operations" not in blocked
                 and not runtime_edge.drained(self.directory)):

@@ -211,13 +211,20 @@ def inflight_descriptor(directory):
         os.close(fd)
 
 
-def drained(directory):
+@contextmanager
+def exclusive_admission(directory):
     with inflight_descriptor(directory) as fd:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return False
-        return True
+            yield False
+        else:
+            yield True
+
+
+def drained(directory):
+    with exclusive_admission(directory) as acquired:
+        return acquired
 
 
 class EdgeServer(LocalHTTPServer):
