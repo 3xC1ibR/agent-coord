@@ -590,6 +590,12 @@ class CoordinatorProjection:
     def close_channel(self, channel):
         if getattr(self.sessions, "transport_handover", False):
             return
+        if getattr(self.in_event, "active", False):
+            identity = f"{self.client.record['instance']}:{self.in_event.sequence}:{self.in_event.command_index}"
+            self.in_event.command_index += 1
+            self.in_event.commands.append((identity, channel, "close", "{}"))
+            self._mark_closed(channel)
+            return
         self.client.command(channel, "close", {})
         self._mark_closed(channel)
 
@@ -613,8 +619,14 @@ class CoordinatorProjection:
             if channel in self.channels:
                 self.channels[channel]["closed"] = True
                 self.channels[channel]["process"].returncode = 0
-            with self.store._connection() as db:
-                db.execute("UPDATE coordinator_channels SET closed=1 WHERE channel=?", (channel,))
+        if getattr(self.in_event, "active", False):
+            self.sessions.persistence.submit(lambda: self._persist_channel_closed(channel), key=channel)
+        else:
+            self._persist_channel_closed(channel)
+
+    def _persist_channel_closed(self, channel):
+        with self.store._connection() as db:
+            db.execute("UPDATE coordinator_channels SET closed=1 WHERE channel=?", (channel,))
 
     def after_commit(self, callback):
         if getattr(self.in_event, "active", False):
