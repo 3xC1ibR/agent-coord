@@ -1111,13 +1111,21 @@ async function traceBoot(page, fixture, thread = null) {
   const bundle = scripts.find(entry => /^\/dist\/app-[0-9a-f]{20}\.js$/.test(entry.path));
   const evaluations = events.filter(event => ["EvaluateScript", "v8.compile"].includes(event.name) &&
     JSON.stringify(event.args).includes(fixture.base));
-  const start = Math.min(...evaluations.map(event => event.ts));
+  const firstExecution = evaluations.sort((left, right) => left.ts - right.ts)[0];
+  const start = firstExecution?.ts;
   const stop = ready.ts;
   assert(Number.isFinite(start) && start <= stop, "No browser trace execution for first-party workspace JavaScript.");
   const tasks = events.filter(event => event.ph === "X" && ["RunTask", "ThreadControllerImpl::RunTask"].includes(event.name));
   assert(tasks.length, "No renderer main-thread task spans in trace.");
+  const cpuDuration = (selected, until = ready) => {
+    if (!Number.isFinite(firstExecution.tts) || !Number.isFinite(until?.tts)) return null;
+    const intervals = selected.filter(event => Number.isFinite(event.tts) && Number.isFinite(event.tdur))
+      .map(event => [event.tts, event.tts + event.tdur]);
+    return intervals.length ? elapsedUnion(intervals, firstExecution.tts, until.tts) / 1000 : null;
+  };
   const timings = {
     mainThreadBootMs: elapsedUnion(tasks.map(event => [event.ts, event.ts + event.dur]), start, stop) / 1000,
+    mainThreadBootCpuMs: cpuDuration(tasks),
     wallFromFirstScriptToReadyMs: (stop - start) / 1000,
     taskSpans: tasks.length, bundle: bundle?.path || null,
     scriptRequests: scripts, httpRequests: resources.filter(entry => entry.path.startsWith("/api/browser/")),
@@ -1148,20 +1156,23 @@ async function traceBoot(page, fixture, thread = null) {
   timings.diagnostic = {
     traceFile,
     rendererWorkToRenderingOpportunityMs: duration(tasks, deadline),
+    rendererCpuToRenderingOpportunityMs: cpuDuration(tasks, rendered),
     wallToRenderingOpportunityMs: (deadline - start) / 1000,
     workspaceMainThreadCompileMs: duration(work(/compile/i).filter(selectedScript)),
     workspaceBackgroundParseMs: data.filter(event => event.ph === "X" &&
       event.name === "v8.parseOnBackground" && selectedScript(event))
       .reduce((milliseconds, event) => milliseconds + event.dur / 1000, 0),
     workspaceEvaluateMs: duration(work(/^EvaluateScript$/).filter(selectedScript)),
+    workspaceEvaluateCpuMs: cpuDuration(work(/^EvaluateScript$/).filter(selectedScript)),
     tracedLayoutAndStyleMs: duration(layout),
+    tracedLayoutAndStyleCpuMs: cpuDuration(layout),
     tracedPaintAndLayersMs: duration(paint, deadline),
     identifiableOpenUIFrameWorkMs: duration(spans.filter(event => openUIFrames.has(frameOf(event))), deadline),
     firstOpenUIFrameCommitMs: openUICommit ? (openUICommit.ts - start) / 1000 : null,
     paintEntries: await page.evaluate(() => performance.getEntriesByType("paint").map(entry => ({
       name: entry.name, startMs: entry.startTime,
     }))),
-    method: "Category spans overlap and are reported independently. OpenUI work counts trace events on the primary renderer thread explicitly attributed to an OpenUI child frame. Background parsing can precede the first main-thread script and overlap network transfer. The rendering opportunity is a task queued from requestAnimationFrame after the original readiness mark.",
+    method: "Category spans overlap and are reported independently. CPU uses trace thread-clock spans clipped at the same start and end marks as elapsed renderer work. OpenUI work counts trace events on the primary renderer thread explicitly attributed to an OpenUI child frame. Background parsing can precede the first main-thread script and overlap network transfer. The rendering opportunity is a task queued from requestAnimationFrame after the original readiness mark.",
   };
   if (thread) timings.method = timings.method.replace("visible inventory", "visible expected transcript and usable composer");
   return timings;
