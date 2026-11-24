@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import quote, urlencode
@@ -20,6 +19,7 @@ from agent_coord.remote_access import RemoteAccess
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import _handler
 from test_remote_access import FakeTailscale
+from workspace_http_fixture import minimal_browser_sessions
 
 
 class HTMLFileTests(unittest.TestCase):
@@ -85,7 +85,7 @@ class HTMLPreviewHTTPTests(unittest.TestCase):
         self.cookie = cookie.split(";")[0]
         self.addCleanup(self.remote.close)
         # No provider runtime is created or resumed by these read-only routes.
-        sessions = SimpleNamespace(cwd=str(self.workspace))
+        sessions = minimal_browser_sessions(self.store, self.workspace)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(self.store, None, None, sessions, remote_access=self.remote, provider_limits=object()))
         worker = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
         worker.start()

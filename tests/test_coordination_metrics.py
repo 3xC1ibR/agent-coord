@@ -8,7 +8,6 @@ import sys
 import tempfile
 import threading
 import time
-from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from http.server import ThreadingHTTPServer
@@ -20,6 +19,7 @@ from agent_coord.coordination_metrics import CoordinationMetrics, MAX_SNAPSHOT_B
 from agent_coord.desktop_runtime import AdmissionGate
 from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import _handler
+from workspace_http_fixture import minimal_browser_sessions
 
 
 class MetricsServiceTests(unittest.TestCase):
@@ -151,7 +151,7 @@ class MetricsHTTPTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = CoordinationStore(Path(temp.name) / "state.sqlite3")
-        self.sessions = SimpleNamespace(store=self.store, cwd=temp.name, admission=AdmissionGate(), inventory_changed=Mock())
+        self.sessions = minimal_browser_sessions(self.store, temp.name, admission=AdmissionGate(), inventory_changed=Mock())
         self.metrics = CoordinationMetrics(self.store.database_path, self.sessions.cwd)
         self.addCleanup(self.metrics.close)
         self.refresh = patch.object(self.metrics, "refresh", return_value={"status": {"state": "running"}})
