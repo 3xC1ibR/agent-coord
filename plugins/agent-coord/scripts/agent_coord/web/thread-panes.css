@@ -71,6 +71,83 @@ body.pane-document { display: block; height: 100dvh; }
 .pane-document .error { max-width: calc(100% - 24px); left: var(--space-3); right: var(--space-3); bottom: var(--space-3); }
 
 /* In-document conversation panes share the workspace and keep their own scroll. */
-section.conversation-pane-frame.pane-document { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+section.conversation-pane-frame.pane-document {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  container: conversation-pane / inline-size;
+}
 section.conversation-pane-frame.pane-document > .timeline { flex: 1; min-height: 0; overflow: auto; }
-section.conversation-pane-frame.pane-document > .composer { flex: 0 1 auto; min-height: 0; }
+.conversation-pane-frame > .pane-tools {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: 0 var(--space-2) var(--space-1);
+}
+.pane-tools > button {
+  min-width: 0;
+  min-height: var(--control-sm);
+  padding: var(--space-1) var(--space-2);
+  border-color: transparent;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.conversation-pane-frame > [data-pane-composer] {
+  display: grid;
+  grid-template-columns: var(--control-md) minmax(0, 1fr) var(--control-md);
+  align-items: end;
+  flex: none;
+  min-width: 0;
+  gap: var(--space-1);
+  margin: 0 var(--space-2) var(--space-2);
+  padding: var(--space-1);
+}
+[data-pane-composer] > .image-attachments {
+  grid-column: 1 / -1;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: 0 0 var(--space-1);
+}
+[data-pane-composer] > .image-attachments > button {
+  flex: none;
+  max-width: 100%;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+[data-pane-composer] > .composer-icon {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: var(--control-md);
+  padding: 0;
+  font-size: var(--text-xl);
+  line-height: 1;
+}
+[data-pane-composer] > textarea {
+  min-height: var(--control-md);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  line-height: 1.5;
+}
+[data-pane-composer] > textarea:focus-visible,
+[data-pane-composer] > .image-attachments > button:focus-visible {
+  outline: var(--stroke-strong) solid var(--accent);
+  outline-offset: calc(-1 * var(--stroke-strong));
+}
+@media (pointer: coarse) {
+  .conversation-pane-frame > [data-pane-composer] {
+    grid-template-columns: var(--hit-target) minmax(0, 1fr) var(--hit-target);
+  }
+  .pane-tools > button, [data-pane-composer] > .composer-icon,
+  [data-pane-composer] > .image-attachments > button, [data-pane-composer] > textarea {
+    min-height: var(--hit-target);
+  }
+  [data-pane-composer] > .image-attachments > button { min-width: var(--hit-target); }
+  [data-pane-composer] > textarea { font-size: var(--text-lg); }
+}
+@container conversation-pane (max-width: 180px) {
+  .conversation-pane-frame > [data-pane-composer] { grid-template-columns: 1fr 1fr; }
+  [data-pane-composer] > textarea { grid-column: 1 / -1; grid-row: 1; }
+  [data-pane-composer]:has(> .image-attachments:not([hidden])) > textarea { grid-row: 2; }
+}
