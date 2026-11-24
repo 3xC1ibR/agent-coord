@@ -1668,7 +1668,9 @@ class BrowserSessions:
             from .asks import AskStore
             with self.store.reading(), self.store._connection() as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
-                owners = notification_policy.available_owners(db, self.store)
+                context = thread.get("notification_context") or {}
+                owners = notification_policy.available_owners(db, self.store, thread_ids=(
+                    context.get("owner_thread_id"), thread.get("created_by_thread_id")))
                 open_ask = AskStore.open_blocking(db, [thread_id]).get(thread_id)
                 wake_pause = (db.execute(WAKE_PAUSES + " AND w.thread_id = ?", (thread_id,)).fetchone()
                               if has_table(db, "browser_inbox_wake") else None)
