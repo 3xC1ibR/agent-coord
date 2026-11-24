@@ -299,6 +299,8 @@ class TranscriptStore:
                 output.flush()
                 os.fsync(output.fileno())
             self._sync_directory(directory)
+            self._sync_directory(self.root)
+            self._sync_directory(self.root.parent)
 
     def replay_live(self, thread_id, *, after_seq=0):
         path = self.directory(thread_id) / "live.jsonl"
