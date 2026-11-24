@@ -659,6 +659,7 @@ def _handler(
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
+                                          "conversationHistoryPages": 1,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -820,6 +821,25 @@ def _handler(
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
+                parts = route.split("/")
+                if len(parts) != 5 or parts[2] != "turns" or not parts[1] or not parts[3]:
+                    raise CoordinationError("Choose a session and a turn.")
+                self._json(HTTPStatus.OK, {"turn": browser_sessions.read_history_turn(unquote(parts[1]), unquote(parts[3]))})
+            elif route.startswith("sessions/") and ("before_seq" in query or "limit" in query):
+                if "/" in route[9:] or not route[9:]:
+                    raise CoordinationError("Choose a session for transcript pagination.")
+                try:
+                    before = int(query["before_seq"][0]) if "before_seq" in query else None
+                    limit = int(query.get("limit", ["40"])[0])
+                    if len(query.get("before_seq", [])) > 1 or len(query.get("limit", [])) > 1:
+                        raise ValueError
+                    if not 1 <= limit <= 200 or before is not None and not 0 <= before < 2**63:
+                        raise ValueError
+                except ValueError as exc:
+                    raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
+                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit)
+                self._json(HTTPStatus.OK, {"thread": thread})
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
