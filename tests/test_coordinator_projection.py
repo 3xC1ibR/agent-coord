@@ -2,6 +2,7 @@
 import hashlib
 import json
 import copy
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -108,6 +109,38 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(unpack(json.loads(json.dumps(pack(value)))), value)
         with self.assertRaises(TypeError):
             pack(object())
+
+    def test_sampled_claude_watchdog_does_not_block_codex_command_or_restore(self):
+        from agent_coord.claude_progress import TranscriptProgress
+        native = "00000000-0000-0000-0000-000000000001"
+        config = Path(self.temporary.name) / "claude"
+        transcript = config / "projects" / "project" / (native + ".jsonl")
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text('{}\n')
+        watchdog = self.sessions.watchdog
+        observed = watchdog._new("claude-turn")
+        observed.update(tools={"active-tool"}, classification="long_running_tool",
+                        alert_pending=True, next_alert_at=self.store.clock() + 60)
+        watchdog.observed["claude-thread"] = observed
+        retained = copy.deepcopy(observed)
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(config)}), \
+                patch("agent_coord.turn_watchdog.native_id", return_value=native):
+            latest, _ = watchdog._sample_claude("claude-thread", observed, lambda: {})
+            self.assertEqual(latest, transcript.stat().st_mtime)
+            sampler = observed["transcripts"]
+            self.assertIsInstance(sampler, TranscriptProgress)
+            self.projection.checkpoint()
+            self.assertIs(observed["transcripts"], sampler)
+            self.assertIsInstance(self.projection.state()["watchdog"]["claude-thread"]["transcripts"],
+                                  TranscriptProgress)
+            self.projection.write("codex", {"id": 9, "method": "turn/start", "params": {}})
+            self.assertEqual(len(self.client.commands), 1)
+            self.projection.load()
+            restored = watchdog.observed["claude-thread"]
+            self.assertEqual(restored, retained)
+            self.assertEqual(watchdog._sample_claude("claude-thread", restored, lambda: {})[0], latest)
+            self.assertIsInstance(restored["transcripts"], TranscriptProgress)
+            self.assertIsNot(restored["transcripts"], sampler)
 
     def test_inline_checkpoint_skips_archive_manifests_and_switches_losslessly_at_the_limit(self):
         from agent_coord import history_persistence as storage

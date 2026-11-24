@@ -132,6 +132,11 @@ class CoordinatorProjection:
         claude = {name: copy.deepcopy(getattr(sessions.claude, name)) for name in CLAUDE_FIELDS if name != "completed"}
         claude["completed"] = {identity: copy.deepcopy(turn) for identity, turn in sessions.claude.completed.items()
                                if identity not in published_completions}
+        # Transcript samplers cache process-local paths and file observations.
+        # Recreate them after handover while retaining progress and alert state.
+        watchdog = {identity: {name: None if durable and name == "transcripts" else copy.deepcopy(value)
+                               for name, value in observed.items()}
+                    for identity, observed in sessions.watchdog.observed.items()}
         return {"version": VERSION,
             "browser": browser,
             "events": [] if durable else list(sessions.events),
@@ -148,7 +153,7 @@ class CoordinatorProjection:
                                 "role": entry.get("role", "main"),
                                 "returncode": entry["process"].returncode} for name, entry in self.channels.items()},
             "permissions": copy.deepcopy(sessions.execution.permissions),
-            "watchdog": copy.deepcopy(sessions.watchdog.observed),
+            "watchdog": watchdog,
             "queue_owner": sessions.queue.owner, "schedule_start": sessions.schedules.started_at}
 
     def restore(self, state):
