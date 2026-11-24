@@ -99,8 +99,34 @@
   }
   function bind({window: view, document: doc, state, api}) {
     if (state.paneMode) return view.parent.agentCoordActivity;
+    // WebKit rejects keepalive fetches registered by a departing document.
+    // Its replacement drains the small, idempotent visit batch after checking
+    // the current activity preference. Each document owns a separate record.
+    const agent = view.navigator?.userAgent || "";
+    const webkit = /AppleWebKit/.test(agent) && (!/Chrome|Chromium|Edg\//.test(agent) || /iP(?:ad|hone|od)/.test(agent));
+    const prefix = "ribbon-field.pending-visits:" + (state.config?.conversationCacheScope || "local") + ":";
+    let storage;
+    try { if (webkit) storage = view.localStorage; } catch { /* Restricted profiles use the normal transport. */ }
+    const backup = storage && prefix + state.sourceWindowId + ":" + root.crypto.randomUUID();
     const recorder = new VisitRecorder({windowId: state.sourceWindowId,
       send: (events, options) => api("activity/events", {events}, options)});
+    let recovering;
+    const recover = enabled => {
+      if (!storage || recovering) return;
+      recovering = (async () => {
+        const keys = Array.from({length:storage.length}, (_, index) => storage.key(index)).filter(key=>key?.startsWith(prefix));
+        for (const key of keys) {
+          const saved = storage.getItem(key);
+          if (!saved) continue;
+          if (enabled) {
+            const events = JSON.parse(saved);
+            for (let start=0; start<events.length; start+=40)
+              await recorder.send(events.slice(start,start+40), {});
+          }
+          if (storage.getItem(key) === saved) storage.removeItem(key);
+        }
+      })().catch(() => {}).finally(() => { recovering = null; });
+    };
     view.agentCoordActivity = recorder;
     const foreground = () => !doc.hidden && doc.hasFocus() && !doc.querySelector("dialog[open]");
     const selected = () => view.agentCoordPanes?.active ? view.agentCoordPanes.selected : state.selected;
@@ -122,7 +148,7 @@
     recorder.windowBlurred = () => view.setTimeout(() => {
       // Focusing a child iframe blurs window, but the top document still has focus.
       if (doc.hidden || !doc.hasFocus()) wasAway = true;
-      if (!foreground()) { recorder.setForeground(false); recorder.flush(); }
+      if (!stopped && !foreground()) { recorder.setForeground(false); recorder.flush(); }
     }, 0);
     recorder.windowFocused = () => {
       recorder.setForeground(foreground());
@@ -132,6 +158,7 @@
     view.addEventListener("blur", recorder.windowBlurred);
     view.addEventListener("focus", recorder.windowFocused);
     doc.addEventListener("visibilitychange", () => {
+      if (stopped) return;
       if (doc.hidden) { wasAway = true; recorder.setForeground(false); recorder.flush(); }
       else {
         recorder.setForeground(foreground());
@@ -139,7 +166,7 @@
         else recorder.select(selected(), "restore");
       }
     });
-    const refreshSettings = () => api("activity/settings").then(settings => recorder.setEnabled(settings.enabled)).catch(() => {});
+    const refreshSettings = () => api("activity/settings").then(settings => { recorder.setEnabled(settings.enabled); recover(settings.enabled); }).catch(() => {});
     recorder.refreshSettings = refreshSettings;
     refreshSettings();
     let ticks = 0;
@@ -151,11 +178,18 @@
     let timer = view.setInterval(tick, 2000);
     const channel = typeof view.BroadcastChannel === "function" ? new view.BroadcastChannel("ribbon-field-activity") : null;
     if (channel) channel.onmessage = ({data}) => {
-      if (data?.type === "clear") recorder.clear();
-      if (typeof data?.enabled === "boolean") recorder.setEnabled(data.enabled);
+      if (data?.type === "clear") { recorder.clear(); recover(false); }
+      if (typeof data?.enabled === "boolean") { recorder.setEnabled(data.enabled); recover(data.enabled); }
     };
     view.addEventListener("pagehide", event => {
-      recorder.end(); recorder.flush({keepalive: true});
+      recorder.end(); stopped = true;
+      let saved = false;
+      try {
+        if (storage && recorder.queue.length) {
+          storage.setItem(backup, JSON.stringify(recorder.queue)); recorder.queue = []; saved = true;
+        }
+      } catch { /* A full or restricted store falls back to keepalive. */ }
+      if (!saved) recorder.flush({keepalive: true});
       view.clearInterval(timer); if (!event.persisted) channel?.close(); stopped = true;
     });
     view.addEventListener("pageshow", event => {

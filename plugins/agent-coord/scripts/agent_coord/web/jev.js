@@ -152,11 +152,8 @@
     card.querySelector("[data-jev-setup]").onclick = () => dismiss(true);
     card.querySelector("[data-jev-skip]").onclick = () => dismiss(false);
   }
-  window.agentCoordJev = {mountSettings: controls, mountStatus, onboard};
-  if (!document.body.classList.contains("settings-page")) {
-    fetch("/api/browser/config", {cache: "no-store"}).then(response => {
-      if (!response.ok) throw Error("Settings unavailable");
-      return response.json();
-    }).then(config => { mountStatus(config); return onboard(config); }).catch(() => {});
-  }
+  window.agentCoordJev = {mountSettings: controls, mountStatus, onboard, start(config) {
+    mountStatus(config);
+    onboard(config).catch(() => {});
+  }};
 })();

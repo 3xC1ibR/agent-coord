@@ -6,9 +6,12 @@
       Object.assign(this, {timeline, input, composer, canDiscuss, onHold, onError});
       this.document = timeline.ownerDocument;
       this.view = this.document.defaultView;
-      this.listeners = new AbortController();
-      const listen = (target, event, callback, options) => target?.addEventListener(event, callback,
-        {...options, signal: this.listeners.signal});
+      this.listeners = [];
+      const listen = (target, event, callback, options) => {
+        if (!target) return;
+        target.addEventListener(event, callback, options);
+        this.listeners.push(() => target.removeEventListener(event, callback, options));
+      };
       this.button = this.document.createElement("button");
       this.button.type = "button"; this.button.className = "quiet response-discuss";
       this.button.textContent = "Discuss"; this.button.setAttribute("aria-label", "Discuss selected response text");
@@ -40,7 +43,7 @@
         if (button && timeline.contains(button)) this.copy(button);
       });
     }
-    dispose() { this.listeners.abort(); }
+    dispose() { for (const remove of this.listeners.splice(0)) remove(); }
     // Collect desired nodes without detaching live messages (and their ranges).
     static buffer() { return {childNodes: [], append(...nodes) { this.childNodes.push(...nodes); }}; }
     static commit(container, buffer) {

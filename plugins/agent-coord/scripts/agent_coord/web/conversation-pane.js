@@ -21,6 +21,7 @@ class ConversationPane {
     this.input.rows = 1; this.input.placeholder = "Message agent…";
     this.input.setAttribute("aria-label", "Message " + record.thread.title);
     this.composer.append(this.input);
+    this.setupAttachments();
     const send = node("button", "↑", "primary composer-icon");
     send.type = "submit"; send.setAttribute("aria-label", "Send message");
     this.composer.append(send);
@@ -47,8 +48,63 @@ class ConversationPane {
     };
     host.addEventListener("focusin", () => { if (shell.selected !== this.id) shell.focus(this.id, false); });
     host.addEventListener("pointerdown", () => { if (shell.selected !== this.id) shell.focus(this.id, false); });
-    this.restoreDraft(record.initialDraft || shell.getDraft(this.id));
+    const draft = record.initialDraft || shell.getDraft(this.id);
+    this.restoreDraft(draft);
+    if (workspace.durableDrafts && !draft?.text && !draft?.images?.length) {
+      const revision = this.draftRevision || 0;
+      workspace.durableDrafts.read(this.id).then(stored => {
+        if (!this.disposed && stored && revision === (this.draftRevision || 0)) this.restoreDraft(stored);
+      }).catch(showError);
+    }
     this.refresh().catch(showError);
+  }
+
+  setupAttachments() {
+    const chooser = node("input");
+    chooser.type = "file"; chooser.accept = "image/png,image/jpeg,image/webp,image/gif";
+    chooser.multiple = true; chooser.hidden = true;
+    const attach = this.attachButton = node("button", "+", "quiet composer-icon");
+    attach.type = "button"; attach.setAttribute("aria-label", "Attach image");
+    attach.onclick = () => chooser.click();
+    this.imageList = node("div", null, "image-attachments");
+    this.imageList.hidden = true;
+    this.images = new ChatImageAttachments({document, getThread: () => this.id,
+      canAttach: () => !this.disposed && !this.composer.hidden && !this.input.disabled,
+      onError: showError, onChange: () => {
+        this.draftRevision = (this.draftRevision || 0) + 1;
+        const images = this.images.snapshot();
+        if (this.workspace.durableDrafts && !this.images.pending() && state.clearingSubmission !== this.id)
+          writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {images})).catch(showError);
+        if (!this.disposed) { this.showImages(); this.shell.onDraft?.(this.id, this.exportDraft()); }
+      }});
+    this.images.drafts = this.workspace.attachments.drafts;
+    chooser.onchange = () => { this.images.add([...chooser.files]).catch(showError); chooser.value = ""; };
+    this.composer.prepend(this.imageList, chooser, attach);
+    for (const event of ["dragenter", "dragover", "drop"]) this.host.addEventListener(event, input => {
+      if (!Array.from(input.dataTransfer.types).includes("Files")) return;
+      input.preventDefault(); input.stopPropagation();
+      if (event === "drop") this.images.add(input.dataTransfer.files).catch(showError);
+    });
+    this.input.addEventListener("paste", event => {
+      if (event.clipboardData.files.length) {
+        event.preventDefault(); this.images.add(event.clipboardData.files).catch(showError);
+      }
+    });
+  }
+
+  showImages() {
+    const items = this.images.items();
+    this.attachButton.disabled = this.input.disabled;
+    this.imageList.hidden = !items.length;
+    if (this.renderedImages?.length === items.length &&
+        items.every((item, index) => item === this.renderedImages[index].item && item.url === this.renderedImages[index].url)) return;
+    this.renderedImages = items.map(item => ({item, url: item.url}));
+    this.imageList.replaceChildren(...items.map(item => {
+      const remove = node("button", item.name + " ×", "quiet"); remove.type = "button";
+      remove.setAttribute("aria-label", "Remove " + item.name);
+      remove.onclick = () => this.images.remove(this.id, item);
+      return remove;
+    }));
   }
 
   render() {
@@ -57,6 +113,7 @@ class ConversationPane {
     if (!detail) { this.timeline.textContent = "Opening conversation…"; this.input.disabled = true; return; }
     this.composer.hidden = !detail.work_thread.browser_session || detail.work_thread.attention === "archived";
     this.input.disabled = !!this.workspace.transferLocks?.has(this.id);
+    this.showImages();
     renderConversationTimeline(this);
     renderConversationRequests(this);
     this.markSeen();
@@ -64,7 +121,8 @@ class ConversationPane {
 
   async refresh() {
     this.render();
-    await refreshDetail({threadId: this.id, markSeen: false, background: true});
+    const fresh = await refreshDetail({threadId: this.id, markSeen: false, background: true});
+    if (fresh === false && !this.disposed) this.scheduleRefresh();
     this.render();
   }
 
@@ -78,15 +136,17 @@ class ConversationPane {
   }
 
   scheduleRefresh() {
-    clearTimeout(this.refreshTimer);
-    this.refreshTimer = setTimeout(() => this.refresh().catch(showError), 100);
+    if (this.refreshTimer) return;
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null; this.refresh().catch(showError);
+    }, 100);
   }
 
   async submit(text, clear = true, quiet = false) {
     const detail = this.view.detail, draft = this.exportDraft();
     if (!detail?.work_thread.browser_session || detail.work_thread.attention === "archived" || this.input.disabled) return;
     const images = clear ? draft.images : [], mentions = clear ? draft.mentions : [];
-    if (!text.trim() && !images.length) return;
+    if (this.images.pending() || !text.trim() && !images.length) return;
     const body = {message: text, windowId: this.workspace.sourceWindowId};
     if (quiet) body.quiet = true;
     if (mentions.length) body.mentions = mentions;
@@ -107,14 +167,18 @@ class ConversationPane {
     const seen = {seen: true, seen_checkpoint_id: work.checkpoint?.id || 0, seen_completion_id: work.turn_completion?.id || 0};
     const signature = JSON.stringify(seen);
     if (this.seen === signature) return;
+    if (!work.unread_result && seen.seen_checkpoint_id <= (work.seen_checkpoint_id || 0) &&
+        seen.seen_completion_id <= (work.seen_completion_id || 0)) return;
     this.seen = signature;
     api(threadPath(this.id), seen, {headers: {Prefer: "return=minimal"}}).catch(error => { this.seen = null; showError(error); });
   }
 
   saveDraft() {
+    this.draftRevision = (this.draftRevision || 0) + 1;
     const draft = this.exportDraft();
     this.shell.onDraft?.(this.id, draft);
-    this.workspace.durableDrafts?.write(this.id, {text: draft.text, mentions: draft.mentions}).catch(showError);
+    if (this.workspace.durableDrafts && state.clearingSubmission !== this.id)
+      writeComposerRecord(this.id, () => this.workspace.durableDrafts.write(this.id, {text: draft.text, mentions: draft.mentions})).catch(showError);
   }
   exportDraft() {
     return {text: this.input.value, images: this.workspace.attachments.items(this.id),
@@ -127,6 +191,7 @@ class ConversationPane {
     this.workspace.attachments.drafts.set(this.id, draft.images || []);
     this.workspace.mentions?.restore(this.id, this.input.value, draft.mentions || []);
     this.workspace.drafts.set(this.id, this.input.value);
+    this.showImages();
     if (Number.isFinite(draft.scroll)) this.view.timelineScroll.restore(draft.scroll);
   }
   earlierControl(count) {
@@ -134,7 +199,15 @@ class ConversationPane {
     button.onclick = () => action(async () => {
       const entry = conversationEntry(this.id), before = entry.detail.thread.beforeSeq;
       if (state.config?.conversationHistoryPages && entry.detail.thread.earlierTurns) {
-        const page = historyPage(await api(sessionPath(this.id) + "?before_seq=" + before + "&limit=40"), this.id, before);
+        const result = await api(sessionPath(this.id) + "?before_seq=" + before + "&limit=40");
+        const page = historyPage(result, this.id, before);
+        if (this.disposed || entry.detail.thread.beforeSeq !== before) return;
+        const scroller = this.view.timelineScroll.scroller(), top = scroller.getBoundingClientRect().top;
+        const anchor = [...this.timeline.children].find(row=>row.dataset.viewportKey && !row.hidden && row.getBoundingClientRect().bottom > top);
+        if (anchor && this.visual.viewport) this.visual.viewport.anchorKey = anchor.dataset.viewportKey;
+        this.view.timelineScroll.hold();
+        entry.nodes = null; entry.pageBytes = (entry.pageBytes || 0) + (result.snapshotBytes || 0);
+        entry.retainedBytes = (entry.retainedBytes || 0) + (result.snapshotBytes || 0);
         entry.detail.thread = mergeHistoryWindow(entry, page, true);
         entry.historyLoaded = true;
       } else if (entry.detail.thread.earlierTurns) {
@@ -156,18 +229,31 @@ class ConversationPane {
       }
       const preview = JSON.stringify(item);
       const result = await api(sessionPath(this.id) + "/turns/" + encodeURIComponent(turn.id) + "/full");
+      if (this.disposed || result.turn?.id !== turn.id || state.conversations.get(this.id) !== entry) return;
       const current = entry.detail.thread.turns.find(t => t.id === turn.id);
       const index = current?.items.findIndex(i => i.id === item.id);
       const full = result.turn?.items?.find(i => i.id === item.id);
       if (!full || !(index >= 0) || JSON.stringify(current.items[index]) !== preview) return;
       (entry.expandedOutput ||= new Map()).set(JSON.stringify([turn.id, item.id]), {preview, item: full});
+      entry.nodes = null; entry.historyLoaded = true;
+      entry.expandedBytes = (entry.expandedBytes || 0) + (result.snapshotBytes || 0);
+      entry.retainedBytes = (entry.retainedBytes || 0) + (result.snapshotBytes || 0);
       current.items[index] = full; this.view.timelineScroll.hold(); this.render();
     }, button);
     return button;
   }
   focusMessage(id) {
     const element = this.timeline.querySelector("#agent-message-" + CSS.escape(String(id)));
-    if (!element) { this.view.messageTarget = {thread: this.id, id}; return; }
+    if (!element) {
+      if (this.view.messageTarget?.id === id) return;
+      const entry = conversationEntry(this.id);
+      this.view.messageTarget = entry.pendingMessageTarget = {thread: this.id, id};
+      this.visual.allTurns = true;
+      this.refresh().catch(showError).finally(() => {
+        if (entry.pendingMessageTarget?.id === id) delete entry.pendingMessageTarget;
+      });
+      return;
+    }
     this.view.messageTarget = null; element.scrollIntoView({block: "center"}); element.focus({preventScroll: true});
   }
   focus() { (this.composer.hidden ? this.timeline : this.input).focus({preventScroll: true}); }

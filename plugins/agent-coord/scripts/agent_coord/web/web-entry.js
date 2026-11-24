@@ -1,4 +1,5 @@
 // Workspace classic scripts share one lexical environment. Keep dependency order.
+import "./browser-compatibility.js";
 import "./theme.js";
 import "./provider-usage.js";
 import "./activity.js";

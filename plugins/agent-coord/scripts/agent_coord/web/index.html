@@ -14,7 +14,33 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/app-icons/icon-192.png">
   <title>Ribbon Field · Threads</title>
   <link rel="stylesheet" href="/dist/app.css">
-  <link rel="preload" as="script" href="/dist/app.js">
+  <script id="workspace-startup">
+    (() => {
+      const status = document.documentElement.dataset;
+      status.startup = "loading";
+      let attempts = 0;
+      document.addEventListener("load", event => {
+        if (event.target.id === "workspace-program") status.startup = "loaded";
+      }, true);
+      document.addEventListener("error", event => {
+        if (event.target.id !== "workspace-program") return;
+        const source = event.target.src;
+        event.target.remove();
+        if (++attempts <= 2) {
+          setTimeout(() => {
+            const script = document.createElement("script");
+            script.id = "workspace-program"; script.src = source; document.head.append(script);
+          }, 150 * attempts);
+        } else {
+          status.startup = "failed";
+          const notice = document.getElementById("error");
+          notice.querySelector("span").textContent = "Could not load Ribbon Field. Check your connection and reload.";
+          notice.hidden = false;
+        }
+      }, true);
+    })();
+  </script>
+  <script id="workspace-program" src="/dist/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to workspace</a>
@@ -340,27 +366,6 @@
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
   <dialog id="html-preview-dialog" class="html-preview-dialog" aria-label="HTML output"><iframe id="html-preview-window" title="HTML output" referrerpolicy="no-referrer"></iframe></dialog>
-  <script id="workspace-startup">
-    (() => {
-      const status = document.documentElement.dataset;
-      status.startup = "loading";
-      const source = document.querySelector('link[as="script"]').href;
-      function load(attempt) {
-        const script = document.createElement("script");
-        script.src = source;
-        script.onload = () => { status.startup = "loaded"; };
-        script.onerror = () => {
-          script.remove();
-          if (attempt < 2) { setTimeout(() => load(attempt + 1), 150 * (attempt + 1)); return; }
-          status.startup = "failed";
-          const notice = document.getElementById("error");
-          notice.querySelector("span").textContent = "Could not load Ribbon Field. Check your connection and reload.";
-          notice.hidden = false;
-        };
-        document.head.append(script);
-      }
-      load(0);
-    })();
-  </script>
+
 </body>
 </html>

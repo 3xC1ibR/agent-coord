@@ -9,7 +9,13 @@
       this.dialog = this.node("dialog", "", "sidecar-dialog");
       this.dialog.setAttribute("aria-labelledby", "sidecar-heading");
       this.document.body.append(this.dialog);
-      this.timer = setInterval(() => { if (this.thread && !this.connected?.() && !this.document.hidden) this.refresh().catch(onError); }, 5000);
+      this.setEventsConnected(!!this.connected?.());
+    }
+    setEventsConnected(connected) {
+      clearInterval(this.timer);
+      this.timer = connected ? null : setInterval(() => {
+        if (this.thread && !this.document.hidden) this.refresh().catch(this.onError);
+      }, 5000);
     }
     node(tag, text, className) {
       const element = this.document.createElement(tag);
