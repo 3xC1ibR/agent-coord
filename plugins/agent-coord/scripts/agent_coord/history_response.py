@@ -3,6 +3,15 @@ from .transcript_store import TranscriptStore, encode
 
 
 def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
+    """Run serialized opening under the same admission gate as normal reads."""
+    with sessions.admission.enter() as allowed:
+        if not allowed:
+            from .codex_app_server import BrowserBusyError
+            raise BrowserBusyError(sessions.admission.message("Runtime maintenance is pausing new work. Try again shortly."))
+        return _read_snapshot_json(sessions, thread_id, recent=recent, controls=controls)
+
+
+def _read_snapshot_json(sessions, thread_id, *, recent, controls):
     """Preserve normal snapshot projection, with a bounded saved-history reader.
 
     Resident histories, lifecycle recovery, reviews and retained legacy data use
@@ -20,8 +29,8 @@ def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
         value = TranscriptStore(sessions.store).read_window_projection(identity)
         if value is None:
             return None
-        projection, body = value
-        prepared = projection, dict(projection), body
+        projection, turns = value
+        prepared = projection, turns
         return projection
 
     with sessions.store.reading():
@@ -35,7 +44,7 @@ def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
             result = sessions._read_external_snapshot(sessions.work_thread(thread_id), recent=True,
                                                        saved_history_reader=saved_history_reader)
         if prepared is not None:
-            projection, original, body = prepared
+            projection, turns = prepared
             if result["thread"] is not projection or result.get("reviews"):
                 # A review appeared after the initial check or a concurrent
                 # projection invalidated this history. Rebuild with full items.
@@ -47,8 +56,7 @@ def read_snapshot_json(sessions, thread_id, *, recent=False, controls=False):
             work["close_when_done"] = ThreadControl(sessions.store).status(work["thread_id"])
     if prepared is None:
         return encode(result)
-    extra = {key: value for key, value in projection.items() if key not in original}
-    if extra:
-        body = body[:-1] + b"," + encode(extra)[1:]
+    metadata = encode({key: value for key, value in projection.items() if key != "turns"})[:-1]
+    body = metadata + (b"," if metadata != b"{" else b"") + b'"turns":' + turns + b"}"
     header = encode({key: value for key, value in result.items() if key != "thread"})[:-1]
     return header + b',"thread":' + body + b"}"

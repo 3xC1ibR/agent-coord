@@ -109,6 +109,48 @@ class HistoryResponseTests(unittest.TestCase):
         with self.assertRaises(CoordinationError):
             self.serialized()
 
+    def test_repeated_publications_do_not_readmit_schema_ddl(self):
+        from agent_coord.transcript_store import ensure_schema
+        transcripts = TranscriptStore(self.store)
+        transcripts.save(self.identity, self.history)
+        with patch("agent_coord.transcript_store.ensure_schema", wraps=ensure_schema) as initialize:
+            # A fresh TranscriptStore shares the validated schema hint, but
+            # schema changes invalidate it even with the same store object.
+            TranscriptStore(self.store).save(self.identity, self.history)
+            initialize.assert_not_called()
+            with self.store._connection() as db:
+                db.execute("CREATE TABLE fixture_schema_revision(value)")
+            TranscriptStore(self.store).save(self.identity, self.history)
+            initialize.assert_called_once()
+
+    def test_runtime_admission_pause_rejects_serialized_opening(self):
+        from agent_coord.codex_app_server import BrowserBusyError
+        self.sessions.admission.pause()
+        with self.assertRaises(BrowserBusyError):
+            self.serialized()
+        self.sessions.admission.resume()
+
+    def test_reply_lookup_does_not_scan_other_exchanges(self):
+        from agent_coord.message_timeline import _TIMELINE_ROWS
+        with self.store._connection() as db:
+            db.execute("""INSERT INTO messages(sender_session_id,recipient_session_id,body,created_at,thread_id,classification)
+                VALUES (?,?,'first',1,'selected','informational')""", (self.identity, self.identity))
+            identity = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+            db.executemany("""INSERT INTO messages(sender_session_id,recipient_session_id,body,created_at,thread_id,classification)
+                VALUES (?,?,'unrelated',1,?,'informational')""",
+                [(self.identity, self.identity, "unrelated-" + str(i)) for i in range(4000)])
+        # Bound VM work, not wall time, so host contention cannot excuse a
+        # full scan. The source query exceeds this bound on the same fixture.
+        import sqlite3
+        db = sqlite3.connect(self.store.database_path)
+        try:
+            db.set_progress_handler(lambda: 1, 10000)
+            row = db.execute(_TIMELINE_ROWS + " WHERE m.id=?", (identity,)).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIsNone(row[-1])
+        finally:
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

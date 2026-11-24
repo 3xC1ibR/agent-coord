@@ -65,6 +65,21 @@ class TranscriptStore:
     def directory(self, thread_id):
         return self.root / hashlib.sha256(thread_id.encode()).hexdigest()
 
+    def _ensure_schema(self):
+        """Admit schema creation once per file identity and schema revision."""
+        identity = os.stat(self.store.database_path)
+        with self.store.reading(), self.store._connection() as db:
+            version = db.execute("PRAGMA schema_version").fetchone()[0]
+        key = identity.st_dev, identity.st_ino, version
+        if getattr(self.store, "_transcript_schema_revision", None) == key:
+            return
+        with self.publication_guard(), self.store.database_operation("transcript.schema", priority="background"), self.store._connection() as db:
+            ensure_schema(db)
+            version = db.execute("PRAGMA schema_version").fetchone()[0]
+        # Publish the hint only after commit. Failure leaves initialization
+        # retryable; a replaced file or subsequent DDL invalidates the hint.
+        self.store._transcript_schema_revision = identity.st_dev, identity.st_ino, version
+
     @contextmanager
     def _locked(self, thread_id, *, filename="writer.lock"):
         directory = self.directory(thread_id)
@@ -112,8 +127,7 @@ class TranscriptStore:
             prepared[seq] = (turn.get("id"), short, full, hashlib.sha256(full).hexdigest(), len(turn.get("items") or []))
         metadata = encode(metadata).decode()
         with self._locked(thread_id) as directory:
-            with self.publication_guard(), self.store._connection() as db:
-                ensure_schema(db)
+            self._ensure_schema()
             with self.store.reading(), self.store._connection() as db:
                 old = db.execute("SELECT generation, active, checkpoint, source_instance, turn_count, item_count, metadata FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
                 previous = {}
@@ -261,7 +275,7 @@ class TranscriptStore:
                 # Receipt projection needs visible identities, not item bodies.
                 # Both are from the same publication and SQLite read snapshot.
                 result["turns"] = [{"id": entry[2]} for entry in entries]
-                return result, body
+                return result, b"[" + b",".join(raw_turns) + b"]"
             return body
         if with_checkpoint:
             return {"generation": row[1], "checkpoint": row[7], "source_instance": row[8] if len(row) > 8 else None, "history": result}
