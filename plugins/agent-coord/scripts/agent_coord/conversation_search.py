@@ -502,17 +502,29 @@ def _stage_document_steps(store, documents):
         yield
 
 
+def _active_turn_positions(prepared):
+    return {position[0] for position, document in prepared.documents.items()
+            if len(position) == 1 and document.value is not None
+            and document.value.get("metadata", {}).get("status") == "inProgress"}
+
+
 def seed_prepared_history_steps(store, prepared):
     """Seed immutable prose during saving, before publishing the history root.
 
-    Only item documents with a materialized value need consideration. Reused
-    compact documents were seeded by their earlier save; search independently
-    handles cache misses from older runtimes. Every yield is outside DB scopes.
+    Materialized settled items and negative headers can be seeded immediately.
+    Snapshot indexing handles compact or previously deferred documents; active
+    prose stays on the exact fallback. Every yield is outside DB scopes.
     """
     _ensure_document_cache(store)
     yield
+    active = getattr(prepared, "active_turn_positions", None)
+    if active is None:
+        active = _active_turn_positions(prepared)
+    # Excluded tool output still receives its small negative cache header;
+    # deferral must not make interactive search decode that output again.
     documents = (document for position, document in prepared.documents.items()
-                 if len(position) == 2 and document.value is not None)
+                 if len(position) == 2 and document.value is not None
+                 and (position[0] not in active or document.value.get("type") not in {"userMessage", "agentMessage"}))
     while batch := list(islice(documents, _DOCUMENT_STAGE_ROWS)):
         available = {_document_key(document.references): document.value for document in batch}
         with store.reading(), store._connection() as db:
@@ -1062,16 +1074,84 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
     return statuses, matches, settled
 
 
+def _seed_settled_history_steps(store, serialized):
+    """Seed settled turns and negative headers without staging changing prose.
+
+    These are immutable document identities, not a published thread revision.
+    Missing/current prose remains visible through the exact snapshot fallback.
+    Each staging yield releases writer admission so other histories can progress.
+    """
+    from .history_persistence import MARKER, _documents
+
+    _ensure_document_cache(store)
+    history = json.loads(serialized)
+    if isinstance(history, dict) and history.get(MARKER) == 1 and history.get("layout") == "turns":
+        with store.reading(), store._connection() as db:
+            db.execute("BEGIN")
+            root = _documents(db, [history["root"]])[0]
+            turns = _documents(db, root["turns"])
+            references = {_document_key(reference): reference for turn in turns
+                          for reference in turn.get("items", [])}
+            active = {_document_key(reference) for turn in turns
+                      if turn["metadata"].get("status") == "inProgress"
+                      for reference in turn.get("items", [])}
+            active.difference_update(_document_key(reference) for turn in turns
+                                     if turn["metadata"].get("status") != "inProgress"
+                                     for reference in turn.get("items", []))
+            cached = _cached_documents(db, references, metadata=False)
+        yield
+        missing = sorted(((key, reference) for key, reference in references.items() if key not in cached),
+                         key=lambda entry: entry[0] in active)
+        seeded = set(cached) - active
+        for offset in range(0, len(missing), _STAGE_ROWS):
+            batch = missing[offset:offset + _STAGE_ROWS]
+            with store.reading(), store._connection() as db:
+                items = _documents(db, [reference for _, reference in batch])
+            yield
+            # Older snapshots may lack even negative tool-output headers.
+            # Inspect a cache miss, but never stage its changing prose body.
+            documents = [(key, item) for (key, _), item in zip(batch, items)
+                         if key not in active or item.get("type") not in {"userMessage", "agentMessage"}]
+            yield from _stage_document_steps(store, (_document_rows(key, item) for key, item in documents))
+            seeded.update(key for key, _ in documents)
+        identities = seeded
+    else:
+        # Legacy inline snapshots have no item references. Use the existing
+        # content-addressed prose keys, excluding turns still being changed.
+        settled = {**history, "turns": [turn for turn in history.get("turns", [])
+                   if isinstance(turn, dict) and turn.get("status") != "inProgress"]}
+        prose = {"inline-v1:" + role + ":" + hashlib.sha256(text.encode("utf-8")).hexdigest():
+                 (role, text, folded) for _, _, role, _, text, folded in messages(settled)}
+        with store.reading(), store._connection() as db:
+            cached = _cached_documents(db, prose, metadata=False)
+        yield
+        yield from _stage_document_steps(store, (
+            ((key, None, role, None, text[:6000], len(text)), _prose_chunks(key, text, folded))
+            for key, (role, text, folded) in prose.items() if key not in cached))
+        identities = prose
+    from .conversation_substrings import index_document_steps
+    yield from index_document_steps(store, identities)
+
+
 def index_search_snapshot(store, identities, schedule_index):
-    """Seed immutable documents even for active threads; publish only idle revisions."""
+    """Seed settled prose during active turns; publish only idle revisions."""
     for identity in identities:
         with store.reading(), store._connection() as db:
-            pending = db.execute(f"""SELECT COALESCE(s.turn_active, 0) FROM ({_PENDING}) p
-                LEFT JOIN sessions s ON s.session_id=p.thread_id WHERE p.thread_id=?""", (identity,)).fetchone()
+            pending = db.execute(f"""SELECT COALESCE(s.turn_active, 0), h.history_json FROM ({_PENDING}) p
+                LEFT JOIN sessions s ON s.session_id=p.thread_id
+                LEFT JOIN browser_history h ON h.thread_id=p.thread_id WHERE p.thread_id=?""", (identity,)).fetchone()
         if pending is None:
             continue
-        prepared = prepare_messages(store, identity)
-        if not pending[0]:
+        if pending[0]:
+            if pending[1] is not None:
+                try:
+                    yield from _seed_settled_history_steps(store, pending[1])
+                except (ValueError, TypeError, AttributeError, KeyError):
+                    # An unavailable active snapshot remains on the exact
+                    # read path; do not publish an incomplete replacement.
+                    pass
+        else:
+            prepared = prepare_messages(store, identity)
             publish_messages(store, prepared, schedule_index=schedule_index)
         yield
     _cleanup_messages(store)

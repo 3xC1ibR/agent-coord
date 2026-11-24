@@ -777,7 +777,7 @@ class ConversationSearchTests(unittest.TestCase):
     def test_dirty_search_handles_missing_immutable_prose_cache_and_new_revisions(self):
         from agent_coord import history_persistence as storage
         self.create("thread")
-        history = {"turns": [{"items": [
+        history = {"turns": [{"status": "inProgress", "items": [
             {"type": "commandExecution", "output": "excluded " * 40000},
             {"id": "message", "type": "agentMessage", "text": "original evidence"}]}]}
         previous = self.save_chunked("thread", history)
@@ -886,6 +886,131 @@ class ConversationSearchTests(unittest.TestCase):
             _, entries, size = conversation_search._TURN_CACHES[self.store]
             self.assertLessEqual(len(entries), 2)
             self.assertLessEqual(size, 2000)
+
+    def test_active_snapshot_defers_changing_prose_and_indexes_settled_turns(self):
+        from agent_coord import history_persistence as storage
+        self.create("active")
+        self.create("settled", "Independent settled evidence")
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='active'")
+        conversation_search.ensure_message_schema(self.store)
+        previous = None
+        for revision in range(3):
+            history = {"turns": [
+                {"id": "finished", "status": "completed", "items": [
+                    {"id": "saved", "type": "agentMessage", "text": "Retained settled evidence"}]},
+                {"id": "working", "status": "inProgress", "items": [
+                    {"id": "growing", "type": "agentMessage",
+                     "text": "x" * (1024 * 1024) + f" activeversion{revision}"}]}]}
+            prepared = self.save_chunked("active", history, previous=previous)
+            scheduled = []
+            with patch.object(conversation_search, "_document_rows", wraps=conversation_search._document_rows) as staged:
+                for _ in conversation_search.index_search_snapshot(self.store, ["active", "settled"], scheduled.append):
+                    self.assertIsNone(self.store._writer.active_operation)
+            keys = [call.args[0] for call in staged.call_args_list]
+            self.assertNotIn(conversation_search._document_key(prepared.documents[(1, 0)].references), keys,
+                             "Background indexing staged a still-changing active item")
+            for job in scheduled:
+                list(job())
+            with self.store.reading(), self.store._connection() as db:
+                self.assertIsNotNone(db.execute("SELECT 1 FROM conversation_search_heads WHERE thread_id='settled'").fetchone())
+                self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_heads WHERE thread_id='active'").fetchone())
+                self.assertLess(db.execute("SELECT COALESCE(SUM(length(text)),0) FROM conversation_search_document_text").fetchone()[0], 1000)
+            self.assertEqual([item["thread_id"] for item in search_threads(
+                self.store, f"activeversion{revision}", snapshot_dirty=True)["items"]], ["active"])
+            if revision:
+                self.assertEqual(search_threads(self.store, f"activeversion{revision - 1}", snapshot_dirty=True)["items"], [])
+            previous = storage.compact_history(prepared)
+        # A terminal revision may now seed and publish the complete final item.
+        history["turns"][-1]["status"] = "completed"
+        self.save_chunked("active", history, previous=previous)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=0 WHERE session_id='active'")
+        reopened = CoordinationStore(self.store.database_path)
+        scheduled = []
+        list(conversation_search.index_search_snapshot(reopened, ["active"], scheduled.append))
+        self.assertEqual([item["thread_id"] for item in search_threads(
+            reopened, "activeversion2", snapshot_dirty=True)["items"]], ["active"])
+        with reopened.reading(), reopened._connection() as db:
+            self.assertIsNotNone(db.execute("SELECT 1 FROM conversation_search_heads WHERE thread_id='active'").fetchone())
+
+    def test_save_time_seeding_defers_active_turn_and_preserves_settled_prose(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        previous = None
+        for revision in range(3):
+            history = {"turns": [
+                {"id": "done", "status": "completed", "items": [
+                    {"id": "saved", "type": "agentMessage", "text": "Settled prose"}]},
+                {"id": "active", "status": "inProgress", "items": [
+                    {"id": "changing", "type": "agentMessage", "text": "z" * 1000000 + str(revision)}]}]}
+            prepared = self.save_chunked("thread", history, previous=previous, seed=True)
+            with self.store.reading(), self.store._connection() as db:
+                self.assertEqual(db.execute("SELECT SUM(length(text)) FROM conversation_search_document_text").fetchone()[0], len("Settled prose"))
+                self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_documents WHERE document=?",
+                    (conversation_search._document_key(prepared.documents[(1, 0)].references),)).fetchone())
+            previous = storage.compact_history(prepared)
+
+    def test_save_time_projection_preserves_active_turn_exclusion(self):
+        from agent_coord.codex_app_server import BrowserSessions
+        from agent_coord import history_persistence as storage
+        history = {"turns": [
+            {"status": "completed", "items": [{"type": "agentMessage", "text": "Settled message"}]},
+            {"status": "inProgress", "items": [{"type": "agentMessage", "text": "x" * 1000000}]}]}
+        prepared = storage.prepare_history(history)
+        scheduled = []
+        sessions = SimpleNamespace(store=self.store, persistence=SimpleNamespace(
+            submit=lambda callback, **options: scheduled.append(callback)))
+        BrowserSessions._seed_history_search(sessions, "thread", prepared)
+        self.assertEqual(len(scheduled), 1)
+        for callback in scheduled:
+            list(callback())
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT SUM(length(text)) FROM conversation_search_document_text").fetchone()[0],
+                             len("Settled message"))
+
+    def test_active_snapshot_does_not_index_previously_cached_changing_prose(self):
+        self.create("thread")
+        item = {"id": "changing", "type": "agentMessage", "text": "Changing prose " * 10000}
+        prepared = self.save_chunked("thread", {"turns": [{"status": "inProgress", "items": [item]}]})
+        conversation_search.ensure_message_schema(self.store)
+        key = conversation_search._document_key(prepared.documents[(0, 0)].references)
+        list(conversation_search._stage_document_steps(self.store, [conversation_search._document_rows(key, item)]))
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        list(conversation_search.index_search_snapshot(self.store, ["thread"], lambda callback: None))
+        self.assertEqual(conversation_search.search_metrics(self.store).get("substring_stage", {}).get("bytes", 0), 0)
+
+    def test_active_reference_does_not_defer_an_identical_settled_document(self):
+        self.create("thread")
+        item = {"id": "shared", "type": "agentMessage", "text": "Identical settled prose" * 10000}
+        prepared = self.save_chunked("thread", {"turns": [
+            {"id": "settled", "status": "completed", "items": [item]},
+            {"id": "active", "status": "inProgress", "items": [item]}]})
+        self.assertEqual(prepared.documents[(0, 0)].references, prepared.documents[(1, 0)].references)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        conversation_search.ensure_message_schema(self.store)
+        list(conversation_search.index_search_snapshot(self.store, ["thread"], lambda callback: None))
+        with self.store.reading(), self.store._connection() as db:
+            self.assertIsNotNone(db.execute("SELECT 1 FROM conversation_search_documents WHERE document=?",
+                (conversation_search._document_key(prepared.documents[(0, 0)].references),)).fetchone())
+
+    def test_active_inline_snapshot_seeds_only_settled_prose(self):
+        self.create("thread")
+        history = {"turns": [
+            {"status": "completed", "items": [{"type": "agentMessage", "text": "Settled message"}]},
+            {"status": "inProgress", "items": [{"type": "agentMessage", "text": "y" * 1000000 + " currentneedle"}]}]}
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+            db.execute("INSERT INTO browser_history VALUES ('thread', ?)", (json.dumps(history),))
+        conversation_search.ensure_message_schema(self.store)
+        list(conversation_search.index_search_snapshot(self.store, ["thread"], lambda callback: None))
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT SUM(length(text)) FROM conversation_search_document_text").fetchone()[0],
+                             len("Settled message"))
+        self.assertEqual([item["thread_id"] for item in search_threads(
+            self.store, "currentneedle", snapshot_dirty=True)["items"]], ["thread"])
 
     def test_interrupted_document_seeding_has_no_complete_header_and_resumes(self):
         from agent_coord import history_persistence as storage

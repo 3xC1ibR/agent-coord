@@ -1110,14 +1110,15 @@ class BrowserSessions:
     def _seed_history_search(self, thread_id, prepared):
         from dataclasses import replace
         from types import SimpleNamespace
-        from .conversation_search import seed_prepared_history_steps
+        from .conversation_search import _active_turn_positions, seed_prepared_history_steps
         # Keep only new item values/references, never encoded archive payloads.
         # A derived search cache cannot delay this conversation's save barrier.
         documents = {position: replace(document, chunks={})
                      for position, document in prepared.documents.items()
                      if len(position) == 2 and not document.committed and document.value is not None}
         if documents:
-            projection = SimpleNamespace(documents=documents)
+            projection = SimpleNamespace(documents=documents,
+                                         active_turn_positions=_active_turn_positions(prepared))
             self.persistence.submit(lambda: seed_prepared_history_steps(self.store, projection),
                                     key=("history_search", thread_id), required=False)
 
