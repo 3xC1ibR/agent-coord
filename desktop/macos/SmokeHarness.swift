@@ -1969,9 +1969,22 @@ extension AppDelegate {
         } else {
             for item in windows where !item.isSettings && item.launchRoute != "/monitor" {
                 try await smokeReady(item)
-                for _ in 0..<200 {
+                // The native restoration callback has its own 20-second
+                // deadline. Observe its result even under concurrent startup.
+                for _ in 0..<420 {
                     if !item.restoringWorkspace && item.restoredWorkspace == nil { break }
                     try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                if item.restoringWorkspace || item.restoredWorkspace != nil {
+                    smoke.results["restore_workspace_diagnostic"] = [
+                        "windowID": item.id, "folderSlot": item.folderSlot, "route": item.launchRoute,
+                        "navigationReady": item.navigationReady, "attempted": item.restorationAttempted,
+                        "restoring": item.restoringWorkspace, "hasSnapshot": item.restoredWorkspace != nil,
+                        "web": (try? await smokeJS("""
+                            return {selected:state.selected, page:document.readyState,
+                                error:document.querySelector('#error:not([hidden])')?.innerText || ''};
+                            """, in: item.webView)) ?? NSNull()
+                    ]
                 }
                 try smokeCheck("restore_workspace_finished", !item.restoringWorkspace && item.restoredWorkspace == nil)
             }
