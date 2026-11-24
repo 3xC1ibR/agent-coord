@@ -205,7 +205,7 @@ def seed(root, workspace, sessions, state):
             asks["streaming"] = ask(supervisor, "Which live reading should the inspection record retain?")
         if state == "long-error":
             append_failed_turn("failed")
-            ask(failed, "Which signed tolerance correction should be carried forward into the "
+            asks["longError"] = ask(failed, "Which signed tolerance correction should be carried forward into the "
                 "manufacturing release, maintenance guide and calibration certificate?", blocking=True,
                 options=["Hold for drawing revision", "Apply the existing engineering waiver"])
             dispatch_receipt(dispatcher, "inspection-routing-failure", "failed",

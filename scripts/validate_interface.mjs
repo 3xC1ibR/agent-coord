@@ -541,7 +541,10 @@ async function mobileTiledComposers(page, fixture) {
 async function mobileLongAsk(page, fixture) {
   await openConversation(page, fixture, fixture.threads.failed);
   const strip = page.locator("#thread-asks");
-  const choice = strip.getByRole("button", {name: "Apply the existing engineering waiver", exact: true});
+  const option = "Apply the existing engineering waiver";
+  const askId = fixture.asks.longError;
+  const row = strip.locator(`.ask-row[data-id="${askId}"]`);
+  const choice = row.getByRole("button", {name: option, exact: true});
   await choice.waitFor({state: "visible"});
   const measure = button => {
     const strip = button.closest("#thread-asks"), composer = document.getElementById("composer");
@@ -569,9 +572,16 @@ async function mobileLongAsk(page, fixture) {
   assert(after.buttonHeight >= 44 && after.buttonWidth >= 44, JSON.stringify(after));
   assert.equal(after.composerFont, "16px");
   assert.equal(after.answerFont, "16px");
-  await choice.click({trial: true});
   await page.screenshot({path: join(output, "mobile-long-ask-choice-after-scroll.png")});
-  return {before, after};
+  const accepted = page.waitForResponse(response => response.request().method() === "POST" &&
+    new URL(response.url()).pathname === `/api/browser/asks/${askId}`);
+  void accepted.catch(() => {});
+  await choice.tap();
+  const response = await accepted;
+  assert(response.ok());
+  assert.deepEqual(response.request().postDataJSON().option, option);
+  await row.waitFor({state: "hidden"});
+  return {before, after, resolutionStatus: response.status()};
 }
 
 async function familyNavigation(page, fixture) {
