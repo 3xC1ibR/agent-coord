@@ -279,3 +279,15 @@ test("canonical deltas received during snapshot refresh are retained exactly onc
   assert.equal(items[0].summary[0], "analysis"); assert.equal(items[1].visibleOutput, "output");
   assert.deepEqual(Array.from(items, item => item.id), ["thinking", "tool"]);
 });
+
+test("the first canonical tool delta preserves an existing native result prefix", () => {
+  for (const [initial, expected] of [[{result: "Native prefix\n"}, "Native prefix\nsuffix"],
+    [{result: {text: "structured result"}}, "suffix"], [{result: "Earlier result", visibleOutput: ""}, "suffix"]]) {
+    const h = setup(), send = streaming(h);
+    send("item/started", {item: {id: "tool", type: "mcpToolCall", ...initial}});
+    send("item/mcpToolCall/outputDelta", {itemId: "tool", delta: "suffix"});
+    send("item/mcpToolCall/outputDelta", {itemId: "tool", delta: " continued"});
+    assert.equal(h.c.state.detail.thread.turns.at(-1).items[0].visibleOutput, expected + " continued");
+    assert.equal(h.c.state.detail.thread.turns.at(-1).items.length, 1);
+  }
+});

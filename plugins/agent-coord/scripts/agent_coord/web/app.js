@@ -2917,7 +2917,10 @@ function applyEvent(event) {
     if (!item && method === "item/agentMessage/delta") { item = {id: params.itemId, type: "agentMessage", text: ""}; turn.items.push(item); }
     if (item && method === "item/agentMessage/delta") item.text = (item.text || "") + params.delta;
     if (item && method === "item/commandExecution/outputDelta") item.aggregatedOutput = (item.aggregatedOutput || "") + params.delta;
-    if (item && method === "item/mcpToolCall/outputDelta") item.visibleOutput = (item.visibleOutput || "") + params.delta;
+    if (item && method === "item/mcpToolCall/outputDelta") {
+      const output = typeof item.visibleOutput === "string" ? item.visibleOutput : typeof item.result === "string" ? item.result : "";
+      item.visibleOutput = output + params.delta;
+    }
     if (item && method === "item/reasoning/summaryTextDelta" && Number.isSafeInteger(params.summaryIndex) && params.summaryIndex >= 0) {
       const summary = item.summary ||= [], index = params.summaryIndex;
       if (summary[index] && typeof summary[index] === "object") summary[index].text = (summary[index].text || "") + params.delta;
