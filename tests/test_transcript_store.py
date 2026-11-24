@@ -148,6 +148,25 @@ class TranscriptStoreTests(unittest.TestCase):
             owned_copy(self.store.database_path, unrelated)
         self.assertEqual(unrelated.read_bytes(), b"unrelated")
 
+    def test_external_indexed_pages_are_query_only_and_workspace_scoped(self):
+        from types import SimpleNamespace
+        from agent_coord.codex_app_server import BrowserSessions
+        from agent_coord.store import CoordinationError
+        self.store.register(session_id="thread", client="codex", cwd=str(self.store.database_path.parent))
+        self.transcripts.migrate(activate=True)
+        browser = object.__new__(BrowserSessions)
+        browser.store = self.store
+        browser.cwd = str(self.store.database_path.parent)
+        browser.reviews = SimpleNamespace(public_history=lambda identity, history: history)
+        self.assertEqual(browser.read_history_window("thread", turn_id="20", limit=5)["turns"][-1]["id"], "20")
+        self.assertEqual(browser.read_history_turn("thread", "20"), self.history["turns"][20])
+        self.assertIsNone(browser.read_history_window("thread", turn_id="missing"))
+        browser.cwd = str(self.store.database_path.parent / "elsewhere")
+        with self.assertRaises(CoordinationError):
+            browser.read_history_window("thread")
+        with self.assertRaises(CoordinationError):
+            browser.read_history_turn("thread", "20")
+
     def test_source_instance_fence_allows_only_expected_reset(self):
         self.transcripts.save("thread", self.history, activate=True, checkpoint=10, source_instance="first")
         self.transcripts.save("thread", self.history, checkpoint=1, source_instance="second", expected_source_instance="first")

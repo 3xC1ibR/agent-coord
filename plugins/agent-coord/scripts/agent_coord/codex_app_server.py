@@ -2530,12 +2530,22 @@ class BrowserSessions:
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
+    def _authorize_history(self, thread_id):
+        """Use overview visibility without provider access or a browser row."""
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("""SELECT s.cwd FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
+                WHERE t.thread_id=? AND NOT EXISTS (SELECT 1 FROM delegations d
+                JOIN work_threads parent ON parent.thread_id=d.parent_session_id WHERE d.child_session_id=t.thread_id)""",
+                (thread_id,)).fetchone()
+        if row is None or not matches_workspace(row[0], self.cwd):
+            raise CoordinationError("Work thread not found in this workspace.")
+
     def read_history_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
         """Read an indexed page, falling back for untouched legacy histories."""
         from .transcript_store import TranscriptStore
         if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
             raise CoordinationError("Invalid transcript window")
-        self._record(thread_id)
+        self._authorize_history(thread_id)
         window = TranscriptStore(self.store).read_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
         if window is not None:
             return self.reviews.public_history(thread_id, window)
@@ -2557,7 +2567,7 @@ class BrowserSessions:
 
     def read_history_turn(self, thread_id, turn_id):
         from .transcript_store import TranscriptStore
-        self._record(thread_id)
+        self._authorize_history(thread_id)
         turn = TranscriptStore(self.store).read_full_turn(thread_id, turn_id)
         if turn is None:
             saved = read_history(self.store, thread_id) or {}
@@ -2570,8 +2580,14 @@ class BrowserSessions:
     def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
-        thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
-        if work_thread["client"] == "codex":
+        self._authorize_history(thread_id)
+        from .transcript_store import TranscriptStore
+        transcripts = TranscriptStore(self.store)
+        thread = transcripts.read_window(thread_id) if recent else transcripts.read_full(thread_id)
+        indexed = thread is not None
+        if thread is None:
+            thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
+        if not indexed and work_thread["client"] == "codex":
             try:
                 # The HTTP observer stays query-only. Its serialized provider
                 # reader owns the durable transport command and receipt.
@@ -2583,8 +2599,9 @@ class BrowserSessions:
                 thread["historyUnavailable"] = False
             except (CoordinationError, OSError) as exc:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
-        if recent:
+        if recent and not indexed:
             thread = recent_view(thread)
+        thread["historyPagination"] = indexed
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),

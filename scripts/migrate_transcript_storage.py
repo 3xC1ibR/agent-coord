@@ -56,7 +56,9 @@ def compact(destination):
         with closing(sqlite3.connect(temporary)) as candidate:
             source.backup(candidate)
             missing = candidate.execute("""SELECT count(*) FROM browser_history h LEFT JOIN transcript_generations g
-                ON g.thread_id=h.thread_id WHERE g.active IS NOT 1 OR g.source_root IS NULL OR
+                ON g.thread_id=h.thread_id LEFT JOIN transcript_migration_verification v ON v.thread_id=h.thread_id
+                WHERE g.active IS NOT 1 OR g.source_root IS NULL OR v.generation IS NOT g.generation
+                OR v.source_revision IS NOT g.source_root OR
                 g.source_root != 'legacy:' || COALESCE((SELECT revision FROM transcript_legacy_revisions r WHERE r.thread_id=h.thread_id),0)""").fetchone()[0]
             if missing:
                 raise ValueError("Compaction requires activated, unchanged, verified legacy roots")

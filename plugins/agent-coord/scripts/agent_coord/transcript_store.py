@@ -354,7 +354,11 @@ class TranscriptStore:
                 with self.store._connection() as db:
                     if legacy_revision(db, identity) != revision:
                         raise ValueError("Legacy history changed before activation")
-                    db.execute("UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?", (identity, revision))
+                    changed = db.execute("""UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?
+                        AND generation=(SELECT generation FROM transcript_migration_verification WHERE thread_id=?)""",
+                        (identity, revision, identity)).rowcount
+                    if changed != 1:
+                        raise ValueError("Transcript changed before verified activation")
             reports.append({"thread_id": identity, "turns": verified[0], "items": verified[1]})
             if on_progress is not None:
                 on_progress(reports[-1])
