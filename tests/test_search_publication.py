@@ -79,6 +79,9 @@ class SearchPublicationTests(unittest.TestCase):
             self.assertTrue(prepare_search_publication(self.store, stopped=stopped, owner_guard=lambda: True))
             self.assertEqual(verify.call_count, 1)
         self.assertTrue(self.index.active)
+        with self.index.connection() as db:
+            self.assertEqual(db.execute("SELECT status FROM search_threads WHERE thread_id='example'").fetchone()[0],
+                             "unavailable")
         self.store.threads.update("example", title="After activation")
         self.worker.process_batch()
         with self.index.connection() as db:

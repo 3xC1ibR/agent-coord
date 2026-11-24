@@ -54,7 +54,7 @@ def _search_history(store, thread_id):
     transcripts = TranscriptStore(store)
     page = transcripts.read_window(thread_id, limit=200)
     if page is None:
-        return read_history(store, thread_id) or {"turns": [], "historyUnavailable": True}
+        return read_history(store, thread_id)
     pages = [page["turns"]]
     while page.get("beforeSeq"):
         page = transcripts.read_window(thread_id, before_seq=page["beforeSeq"], limit=200)
