@@ -13,7 +13,7 @@ import os
 import uuid
 import shutil
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 from .history_window import recent_view
 
@@ -56,20 +56,21 @@ def legacy_revision(db, thread_id):
 
 
 class TranscriptStore:
-    def __init__(self, store, *, minimum_free_bytes=0):
+    def __init__(self, store, *, minimum_free_bytes=0, publication_guard=None):
         self.store = store
         self.minimum_free_bytes = minimum_free_bytes
+        self.publication_guard = publication_guard or nullcontext
         self.root = Path(str(store.database_path) + ".transcripts")
 
     def directory(self, thread_id):
         return self.root / hashlib.sha256(thread_id.encode()).hexdigest()
 
     @contextmanager
-    def _locked(self, thread_id):
+    def _locked(self, thread_id, *, filename="writer.lock"):
         directory = self.directory(thread_id)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.mkdir(mode=0o700, exist_ok=True)
-        with os.fdopen(os.open(directory / "writer.lock", os.O_CREAT | os.O_RDWR, 0o600), "a+b") as lock:
+        with os.fdopen(os.open(directory / filename, os.O_CREAT | os.O_RDWR, 0o600), "a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield directory
 
@@ -111,7 +112,7 @@ class TranscriptStore:
             prepared[seq] = (turn.get("id"), short, full, hashlib.sha256(full).hexdigest(), len(turn.get("items") or []))
         metadata = encode(metadata).decode()
         with self._locked(thread_id) as directory:
-            with self.store._connection() as db:
+            with self.publication_guard(), self.store._connection() as db:
                 ensure_schema(db)
             with self.store.reading(), self.store._connection() as db:
                 old = db.execute("SELECT generation, active, checkpoint, source_instance, turn_count, item_count, metadata FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
@@ -162,7 +163,7 @@ class TranscriptStore:
             self._sync_directory(self.root.parent)
             generation = (old[0] if old and not changed and turn_count == old[4] and metadata == old[6]
                           else uuid.uuid4().hex)
-            with self.store.database_operation("transcript.publish", priority="background"), self.store._connection() as db:
+            with self.publication_guard(), self.store.database_operation("transcript.publish", priority="background"), self.store._connection() as db:
                 if source_root is not None:
                     row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
                     if not row or row[0] != source_root:
@@ -288,7 +289,7 @@ class TranscriptStore:
         Frames must carry the transport sequence. Consumers discard sequences
         through their published checkpoint, making interrupted replay idempotent.
         """
-        with self._locked(thread_id) as directory:
+        with self._locked(thread_id, filename="journal.lock") as directory:
             path = directory / "live.jsonl"
             with os.fdopen(os.open(path, os.O_CREAT | os.O_RDWR, 0o600), "r+b") as output:
                 end = output.seek(0, os.SEEK_END)
@@ -329,20 +330,22 @@ class TranscriptStore:
 
     def deactivate(self):
         """Revert to retained legacy roots only while they remain equivalent."""
-        with self.store._connection() as db:
+        with self.publication_guard(), self.store._connection() as db:
             rows = db.execute("SELECT thread_id, source_root FROM transcript_generations WHERE active=1").fetchall()
             for identity, revision in rows:
                 if revision is None or legacy_revision(db, identity) != revision:
                     raise ValueError("Rollback requires an equivalent retained legacy history")
             db.execute("UPDATE transcript_generations SET active=0")
 
-    def migrate(self, *, activate=False, on_progress=None, force_verify=False):
+    def migrate(self, *, activate=False, on_progress=None, force_verify=False, thread_ids=None):
         """Copy, verify exact content, then optionally activate each stable root."""
         from .history_persistence import decode_history
         with self.store.reading(), self.store._connection() as db:
-            identities = [r[0] for r in db.execute("SELECT thread_id FROM browser_history ORDER BY thread_id")]
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone()
+            identities = (list(thread_ids) if thread_ids is not None else
+                          [r[0] for r in db.execute("SELECT thread_id FROM browser_history ORDER BY thread_id")] if exists else [])
         reports = []
-        with self.store._connection() as db:
+        with self.publication_guard(), self.store._connection() as db:
             ensure_schema(db)
         for identity in identities:
             with self.store.reading(), self.store._connection() as db:
@@ -353,20 +356,23 @@ class TranscriptStore:
                     WHERE v.thread_id=? AND v.generation=g.generation AND v.source_revision=? AND g.source_root=?""",
                     (identity, revision, revision)).fetchone()
                 if verified is None:
-                    source = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0]
+                    source_row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()
+                    if source_row is None:
+                        continue
+                    source = source_row[0]
                     history = decode_history(source, db=db)
             if verified is None:
                 generation = self.save(identity, history, source_root=source)
                 if self.read_full(identity, require_active=False) != history:
                     raise ValueError("Transcript migration content mismatch: " + identity)
                 verified = (len(history.get("turns") or []), sum(len(t.get("items") or []) for t in history.get("turns") or []))
-                with self.store._connection() as db:
+                with self.publication_guard(), self.store._connection() as db:
                     db.execute("""INSERT INTO transcript_migration_verification VALUES (?,?,?,?,?)
                         ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation,
                         source_revision=excluded.source_revision, turn_count=excluded.turn_count,item_count=excluded.item_count""",
                         (identity, generation, revision, *verified))
             if activate:
-                with self.store._connection() as db:
+                with self.publication_guard(), self.store._connection() as db:
                     if legacy_revision(db, identity) != revision:
                         raise ValueError("Legacy history changed before activation")
                     changed = db.execute("""UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?
