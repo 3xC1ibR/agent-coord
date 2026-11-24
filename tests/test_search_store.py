@@ -208,6 +208,24 @@ class SearchStoreTests(unittest.TestCase):
         self.assertEqual({key: actual[key] for key in expected}, expected)
         self.assertEqual(len(actual['messages']), 200)
 
+    def test_native_exact_page_matches_complete_order_with_filters(self):
+        records = [self.record(f'thread-{i:02}',
+                   'database writer ' + ('extra text ' * (i % 7)),
+                   title='Database analysis' if i % 3 else 'Unrelated title',
+                   role='user' if i % 2 else 'assistant') for i in range(30)]
+        self.activate(records)
+        for filters in ({}, {'my_messages': True}, {'source': 'context'},
+                        {'thread_ids': [r['thread_id'] for r in records[::3]]}):
+            expected = search_threads(self.store, 'database', limit=50, **filters)
+            actual, cursor = [], None
+            while True:
+                page = search_threads(self.store, 'database', limit=4, cursor=cursor, **filters)
+                actual.extend((row['thread_id'], row['score'], row['message_count']) for row in page['items'])
+                cursor = page['next_cursor']
+                if cursor is None:
+                    break
+            self.assertEqual(actual, [(row['thread_id'], row['score'], row['message_count']) for row in expected['items']])
+
     def test_literal_nul_does_not_become_fts_syntax(self):
         self.activate([self.record('a', 'prefix\0needle'), self.record('b', 'prefix needle')])
         self.assertEqual([r['thread_id'] for r in search_threads(self.store, 'prefix\0needle')['items']], ['a'])

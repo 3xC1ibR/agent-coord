@@ -77,11 +77,16 @@ def measure(source, count, turns, repetitions, explain=False):
                     independent = cursor.connection.cursor(factory=sqlite3.Cursor)
                     try:
                         plan = independent.execute('EXPLAIN QUERY PLAN ' + sql, parameters).fetchall()
-                        plans.append({'nodes': [tuple(row) for row in plan],
-                                      'fts_scans': sum('SCAN f VIRTUAL TABLE INDEX' in row[3] for row in plan)})
+                        entry = {'nodes': [tuple(row) for row in plan],
+                                 'fts_scans': sum('SCAN f VIRTUAL TABLE INDEX' in row[3] and ':=' not in row[3] for row in plan)}
+                        plans.append(entry)
                     finally:
                         independent.close()
-                return execute(cursor, sql, parameters)
+                started_statement = time.perf_counter()
+                result = execute(cursor, sql, parameters)
+                if 'entry' in locals():
+                    entry['execution_ms'] = (time.perf_counter()-started_statement)*1000
+                return result
             if explain:
                 with patch.object(_StoreCursor, 'execute', inspect):
                     search_threads(store, 'database writer')
@@ -91,7 +96,7 @@ def measure(source, count, turns, repetitions, explain=False):
                     before = time.perf_counter()
                     search_threads(store, query)
                     values.append((time.perf_counter()-before)*1000)
-                timings[query] = distribution(values)
+                timings[query] = {**distribution(values), 'first_ms': values[0]}
             revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
             fingerprint = hashlib.sha256((Path(__file__).read_bytes() +
                 (Path(__file__).parents[1] / 'plugins/agent-coord/scripts/agent_coord/search_store.py').read_bytes() +

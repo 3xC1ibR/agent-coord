@@ -401,8 +401,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     folded_rows = with_dirty(folded_rows)
             if use_context:
                 # Sources first, then the casefolded text that the search compares.
-                overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
-                           for row in json.loads(db.execute(_MISSING_CONTEXT.replace("conversation_search_context", context_table)).fetchone()[0])}
+                missing_context = (external is None or db.execute("""SELECT EXISTS(
+                    SELECT 1 FROM work_threads t WHERE NOT EXISTS
+                    (SELECT 1 FROM isolated_search.search_threads h WHERE h.thread_id=t.thread_id))""").fetchone()[0])
+                if missing_context:
+                    overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
+                               for row in json.loads(db.execute(_MISSING_CONTEXT.replace("conversation_search_context", context_table)).fetchone()[0])}
             params["overlay"] = json.dumps(overlay)
             fields = {name: f"CASE WHEN y.thread_id IS NULL THEN IFNULL(x.{name}, '') ELSE y.{name} END"
                       for name in ("title", "summary", "request", "artifacts")}
@@ -445,9 +449,21 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             # once so each branch reuses the same filtered thread identifiers.
             eligible_page = (f"{below % 'low' if after else '1'} AND (NOT EXISTS (SELECT 1 FROM floor) "
                              "OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))")
+            page_cte = f"""floor AS (SELECT low,last_work_at,thread_id FROM bounded
+                {f"WHERE {below % 'low'} AND {below % 'high'}" if after else ""}
+                ORDER BY low DESC,last_work_at DESC,thread_id DESC LIMIT 1 OFFSET :floor)"""
+            page_rows = "bounded WHERE " + eligible_page
+            if external is not None:
+                # Every native score is settled, so an exact SQL page replaces
+                # the legacy uncertain-score floor and repeated bound searches.
+                params["native_limit"] = limit + 1
+                page_cte = f"""selected AS MATERIALIZED (SELECT * FROM bounded
+                    WHERE {below % 'low' if after else '1'}
+                    ORDER BY low DESC,last_work_at DESC,thread_id DESC LIMIT :native_limit)"""
+                page_rows = "selected"
             native_hits = (f"""(SELECT json_group_array(json_array(m.native_id,m.native_relevance))
                 FROM candidate_messages m WHERE {message_where} AND m.thread_id IN
-                    (SELECT thread_id FROM bounded WHERE {eligible_page}))"""
+                    (SELECT thread_id FROM {page_rows}))"""
                 if external is not None else "'[]'")
             candidates, coverage, native_matches = db.execute(f"""WITH scope AS MATERIALIZED (
                     SELECT t.thread_id, t.created_at, t.turn_started_at FROM work_threads t
@@ -473,15 +489,10 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                           LEFT JOIN turn_completions done ON done.id =
                               (SELECT MAX(id) FROM turn_completions WHERE thread_id = s.thread_id))
                     WHERE {match}),
-                -- A key below the cursor that `limit + 1` candidates certainly reach.
-                -- A candidate whose ceiling is under it cannot be on this page.
-                floor AS (SELECT low, last_work_at, thread_id FROM bounded
-                    {f"WHERE {below % 'low'} AND {below % 'high'}" if after else ""}
-                    ORDER BY low DESC, last_work_at DESC, thread_id DESC LIMIT 1 OFFSET :floor)
+                {page_cte}
                 SELECT (SELECT json_group_array(json_array(thread_id, weights, title, summary, request,
                             context_match, certain, uncertain, low, high, {_number('last_work_at')}))
-                        FROM bounded WHERE {below % 'low' if after else '1'} AND (NOT EXISTS (SELECT 1 FROM floor)
-                            OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))),
+                        FROM {page_rows}),
                        -- Coverage describes the searched inventory, before the keyword filter.
                        (SELECT json_array(COUNT(*), SUM(h.status = 'saved'), SUM(h.status = 'partial'))
                         FROM scope s LEFT JOIN {history_rows} h ON h.thread_id = s.thread_id),

@@ -124,6 +124,8 @@ def read_snapshot(database_path, *, now=None, cwd=None):
                      FROM (SELECT * FROM isolated_search.search_turns t WHERE t.thread_id=h.thread_id
                            ORDER BY turn_seq DESC LIMIT 200)) AS messages
                 FROM isolated_search.search_threads h JOIN eligible e ON e.thread_id=h.thread_id""", params):
+                if row['status'] == 'unavailable':
+                    continue
                 found = json.loads(row['messages'])
                 found.reverse()
                 for message in found:
