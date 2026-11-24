@@ -89,20 +89,22 @@ def runtime_directory(database):
     return path
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, durable=True):
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex)
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w") as stream:
             json.dump(value, stream)
             stream.flush()
-            os.fsync(stream.fileno())
+            if durable:
+                os.fsync(stream.fileno())
         os.replace(temporary, path)
-        parent = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
+        if durable:
+            parent = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -610,7 +612,7 @@ def adopt_predecessor(record, request_id, payload):
     # the authenticated current payload, then stage the newly authorized one.
     control(record, "attach", payload=record["payload"])
     intent = {"id": request_id, "phase": "accepted", "source_instance": record["instance"],
-              "target": payload, "previous": record["payload"],
+              "target": payload, "previous": record["payload"], "database": record["database"],
               "notice": "Waiting for existing provider work to finish before adopting the retained runtime."}
     atomic_json(directory / "edge-adoption.json", intent)
     edge = runtime_edge.read_address(directory)
@@ -743,6 +745,8 @@ class Runtime:
         self.supervisor_exit_fd = None
         self.supervisor_retirement = None
         self.edge_browser_token = secrets.token_urlsafe(32)
+        self.edge_admission_closed_at = None
+        self.edge_admission_drained_at = None
 
     def ensure_supervisor(self, *, retire=None):
         """Adopt a legacy direct launch only after its durable commit.
@@ -808,11 +812,15 @@ class Runtime:
 
     def fence_edge(self):
         if (self.directory / "edge.json").exists():
+            if self.edge_admission_closed_at is None:
+                self.edge_admission_closed_at = time.monotonic()
             self.server.edge_fenced_generation = self.instance
             self.edge_route(ready=False)
 
     def reopen_edge(self):
         self.server.edge_fenced_generation = None
+        self.edge_admission_closed_at = None
+        self.edge_admission_drained_at = None
         self.edge_route()
 
     @staticmethod
@@ -937,6 +945,8 @@ class Runtime:
                 sessions.queue.wake()
                 sessions.dispatch.wake()
             return False
+        if self.edge_admission_closed_at is not None and self.edge_admission_drained_at is None:
+            self.edge_admission_drained_at = time.monotonic()
         return True
 
     def wait_for_provider_work(self, sessions, blocked):
@@ -976,7 +986,7 @@ class Runtime:
         ready = self.directory / "edge-candidate-ready.json"
         if not self.warm_requested or self.warm_requested[0] != identity:
             self.warm_requested = (identity, time.monotonic())
-            atomic_json(request, identity)
+            atomic_json(request, identity, durable=False)
         response = read_json(ready) if ready.exists() else {}
         if all(response.get(key) == value for key, value in identity.items()):
             return False, response.get("error")
@@ -1109,21 +1119,30 @@ class Runtime:
                 raise RuntimeError("Candidate activation was not committed.")
             self.trial = False
             self.maintenance = bool(update.get("requires_review"))
-            supervisor_path = self.directory / "supervisor.json"
-            supervisor = read_json(supervisor_path) if supervisor_path.exists() else {}
-            if (self.supervised and update.get("uninterrupted") and not supervisor.get("stable_prewarm")
-                    and supervisor.get("pid") == os.getppid() and supervisor.get("payload") == update["previous"]):
-                # The build-98 supervisor owns its child until it exits.
-                # Its established clean-exit protocol can transfer supervision
-                # without transferring database access early or stopping work.
-                self.ensure_supervisor(retire=supervisor["pid"])
-                self.upgrading = True
-                self.stopping.set()
+            if self.replace_legacy_supervisor(update):
                 return
             if self.maintenance:
                 self.hold_for_review()
             else:
                 self.resume_work()
+
+    def replace_legacy_supervisor(self, update):
+        if (not self.supervised or not update or update["phase"] != "committed"
+                or not update.get("uninterrupted") or update["target"] != str(self.payload)
+                or update.get("cancelled")):
+            return False
+        path = self.directory / "supervisor.json"
+        supervisor = read_json(path) if path.exists() else {}
+        if (supervisor.get("stable_prewarm") or supervisor.get("pid") != os.getppid()
+                or supervisor.get("payload") not in {update["previous"], update["target"]}):
+            return False
+        # The old supervisor can publish the successor PID before it resumes.
+        # Its established clean-exit protocol can transfer supervision while
+        # the replacement still holds admissions closed.
+        self.ensure_supervisor(retire=supervisor["pid"])
+        self.upgrading = True
+        self.stopping.set()
+        return True
 
     def hold_for_review(self):
         self.error = "Backend updated; work remains paused because shutdown was incomplete. Inspect running tools before resuming."
@@ -1323,7 +1342,9 @@ class Runtime:
                 pass
         controller = LocalHTTPServer(("127.0.0.1", 0), Handler)
         controller.daemon_threads = True
-        record = {**self.status(), "control_url": f"http://127.0.0.1:{controller.server_port}/", "control_token": self.token}
+        record = {**self.identity(), "status": "preparing" if self.trial else "serving",
+                  "url": f"http://127.0.0.1:{self.server.server_port}/",
+                  "control_url": f"http://127.0.0.1:{controller.server_port}/", "control_token": self.token}
         atomic_json(self.directory / "discovery.json", record)
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: self.stopping.set())
@@ -1362,6 +1383,7 @@ class Runtime:
             # transaction's boot choice. Never pin future boots to an old update.
             from . import runtime_update
             update = runtime_update.read(self.directory)
+            self.replace_legacy_supervisor(update)
             if update and update["phase"] in runtime_update.TERMINAL:
                 expected = update["target"] if update["phase"] == "committed" else update["previous"]
                 if update.get("superseded_by") or str(self.payload) != expected:
@@ -1390,7 +1412,8 @@ class Runtime:
         candidate = None
         recovery = None
         try:
-            while not self.stopping.wait(.05 if self.warm_requested else .2):
+            while not self.stopping.wait(.005 if self.update_drain_started is not None else
+                                         .05 if self.warm_requested else .2):
                 with self.mutex:
                     if not self.pending or self.maintenance:
                         continue
@@ -1460,7 +1483,10 @@ class Runtime:
                                 "source_instance": self.instance, "created_at": time.time()}
                             runtime_update.write(self.directory, update, phase="stopping", uninterrupted=True,
                                                  queue_owner=sessions.queue.owner,
-                                                 schedule_start=sessions.schedules.started_at)
+                                                 schedule_start=sessions.schedules.started_at,
+                                                 edge_admission_closed_at=self.edge_admission_closed_at,
+                                                 edge_admission_drained_at=self.edge_admission_drained_at,
+                                                 edge_projection_saved_at=time.monotonic())
                             sessions.transport_handover = True
                         except Exception as exc:
                             self.error = str(exc)
@@ -1894,11 +1920,25 @@ def stop_candidate(candidate):
 
 def supervise_child(child, current, database, directory, owner_fd):
     """Preload the next process without letting it acquire database ownership."""
+    from . import runtime_edge
     warm, identity, confirmed = None, None, False
+    next_edge_check = 0
     request = directory / "edge-candidate.json"
     response = directory / "edge-candidate-ready.json"
     try:
         while child.poll() is None:
+            now = time.monotonic()
+            if now >= next_edge_check:
+                next_edge_check = now + 1
+                try:
+                    edge = runtime_edge.read_address(directory)
+                    if edge:
+                        try:
+                            os.kill(edge["pid"], 0)
+                        except ProcessLookupError:
+                            runtime_edge.ensure(database, current)
+                except (OSError, RuntimeError, ValueError) as error:
+                    print(f"Stable origin monitor: {error}", file=sys.stderr)
             desired = read_json(request) if request.exists() else {}
             if desired and desired != identity:
                 discovery = read_json(directory / "discovery.json")
@@ -1915,19 +1955,19 @@ def supervise_child(child, current, database, directory, owner_fd):
                         warm = launch_coordinator(database, directory, Path(desired["candidate"]),
                                                   owner_fd, trial=True, warm=True)
                     except OSError as error:
-                        atomic_json(response, {**identity, "error": str(error)})
+                        atomic_json(response, {**identity, "error": str(error)}, durable=False)
             if warm and not confirmed:
                 readable, _, _ = select.select([warm[1]], [], [], .02)
                 if readable:
                     if os.read(warm[1], 32) == b"warm\n":
                         confirmed = True
-                        atomic_json(response, identity)
+                        atomic_json(response, identity, durable=False)
                     else:
                         stop_candidate(warm)
                         warm = None
-                        atomic_json(response, {**identity, "error": "The candidate failed to preload."})
+                        atomic_json(response, {**identity, "error": "The candidate failed to preload."}, durable=False)
             else:
-                time.sleep(.02)
+                time.sleep(.005 if confirmed else .02)
         if child.returncode == 75 and warm and confirmed:
             update = read_json(directory / "update.json")
             if identity == {"source": update["source_instance"], "candidate": update["target"]}:
@@ -1942,7 +1982,7 @@ def supervise_child(child, current, database, directory, owner_fd):
 def snapshot_or_rollback(database, directory, update):
     from . import runtime_update
     try:
-        return runtime_update.snapshot(str(database), directory, update)
+        return runtime_update.snapshot(str(database), directory, {**update, "edge_source_exited_at": time.monotonic()})
     except (RuntimeError, OSError, sqlite3.Error) as error:
         # The closed predecessor's production state has not been replaced.
         runtime_update.write(directory, update, phase="rolled-back",
@@ -1984,6 +2024,13 @@ def supervise(database, payload, owner_fd, *, start_paused=False, source_exit_fd
                     os.kill(retire_supervisor, 0)
                 except ProcessLookupError:
                     break
+                if sys.platform.startswith("linux"):
+                    try:
+                        stat = Path(f"/proc/{retire_supervisor}/stat").read_text()
+                    except FileNotFoundError:
+                        break
+                    if stat.rsplit(")", 1)[-1].strip().split()[0] == "Z":
+                        break
                 if time.monotonic() >= deadline:
                     raise RuntimeError("The previous runtime supervisor did not confirm exit.")
                 time.sleep(.02)
@@ -2033,7 +2080,8 @@ def supervise(database, payload, owner_fd, *, start_paused=False, source_exit_fd
                     if latest.get("cancelled"):
                         ready = False
                     else:
-                        transition = runtime_update.write(directory, transition, phase="committed")
+                        transition = runtime_update.write(directory, transition, phase="committed",
+                                                          edge_candidate_ready_at=time.monotonic())
                         try:
                             os.write(commit_write, b"commit\n")
                         except BrokenPipeError:
@@ -2246,16 +2294,20 @@ def main(argv=None):
                 result.update(previous)
             print(json.dumps(result), flush=True)
             return 0
-        if (args.runtime_command == "activate-update" and args.runtime_stable_origin
-                and record.get("stable_origin") != 1
-                and not (gateway.status(args.db, {}) if args.runtime_interaction_continuity else {}).get("interaction_url")):
-            launcher = lock_file(directory / "launch.lock", blocking=True)
-            try:
-                result = adopt_predecessor(record, **values)
-            finally:
-                os.close(launcher)
-        elif args.runtime_command == "activate-update" and args.runtime_interaction_continuity and not (
-                args.runtime_stable_origin and record.get("stable_origin") == 1):
+        if args.runtime_command == "activate-update" and args.runtime_stable_origin:
+            from . import runtime_gateway_lifecycle
+            previous = runtime_gateway_lifecycle.status(args.db, {})
+            if previous.get("interaction_url") and not previous.get("interaction_settled"):
+                raise RuntimeError("Wait for the preceding update to settle its accepted input.")
+            if record.get("stable_origin") == 1:
+                result = control(record, "activate-update", **values)
+            else:
+                launcher = lock_file(directory / "launch.lock", blocking=True)
+                try:
+                    result = adopt_predecessor(record, **values)
+                finally:
+                    os.close(launcher)
+        elif args.runtime_command == "activate-update" and args.runtime_interaction_continuity:
             result = gateway.activate(record, **values)
         else:
             result = control(record, args.runtime_command, **values)
@@ -2283,9 +2335,13 @@ def main(argv=None):
                 parser.error("Candidate preloading requires a supervised coordinator trial")
             # Import application code only. No store, broker claim, scheduler,
             # search publisher or application server exists before ownership.
-            from . import ui
-            from . import runtime_coordinator_transport
+            from . import (
+                coordinator_projection, dispatch_runtime, event_subscriptions, execution_state,
+                external_work, launch_metrics, reviews, runtime_coordinator_transport,
+                session_control, sidecars, submission_receipts, turn_watchdog, ui,
+            )
             try:
+                schema_fingerprint()
                 database = Path(args.db).expanduser().resolve()
                 # Verify and populate the page cache under read-only SQLite.
                 # Close the observation before fencing, so it cannot pin WAL.

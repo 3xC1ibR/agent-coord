@@ -24,6 +24,7 @@ WAIT_SECONDS = 2.0
 CONNECT_SECONDS = .2
 REQUEST_SECONDS = 30
 HEALTH = "/_runtime/health"
+READY = "/_runtime/ready"
 OBSERVER_HEADER = "X-Ribbon-Runtime-Observer"
 FENCED_HEADER = "X-Ribbon-Admission-Fenced"
 TOKEN_HEADER = "X-Agent-Coord-Token"
@@ -118,7 +119,7 @@ def adoption_status(directory, status):
     update = status.get("update") or {}
     if (update.get("source_instance") == adoption["source_instance"]
             and update.get("target") == adoption["target"]):
-        return {**status, "update": {**update, "coordinator_update_id": update["id"], "id": adoption["id"]}}
+        return {**status, "update": {**adoption, **update, "coordinator_update_id": update["id"], "id": adoption["id"]}}
     if status.get("instance") == adoption["source_instance"] and status.get("pending") == adoption["target"]:
         return {**status, "update": adoption}
     return status
@@ -159,7 +160,9 @@ def _publish_route(directory, status, browser_token, ready, predecessor):
     elif ready and current and current["status"]["instance"] == generation and "handover_ms" in current:
         route["handover_ms"] = current["handover_ms"]
     if current != route:
-        atomic_json(directory / "edge-route.json", route)
+        # Routing is a live observation. Boot and rollback recover from the
+        # durable update transaction and publish a fresh serving generation.
+        atomic_json(directory / "edge-route.json", route, durable=False)
 
 
 def publish_predecessor(directory, status):
@@ -230,7 +233,13 @@ class EdgeServer(LocalHTTPServer):
         self.observer = previous.get("observer") or secrets.token_urlsafe(32)
 
     def route(self):
-        return private_json(self.directory / "edge-route.json")
+        route = private_json(self.directory / "edge-route.json")
+        if route and route["ready"] and (pid := route["status"].get("pid")) is not None:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return {**route, "ready": False}
+        return route
 
     def health(self):
         from .runtime_update import TERMINAL, read
@@ -292,13 +301,15 @@ class EdgeHandler(BaseHTTPRequestHandler):
                     or not valid_target):
                 self.respond(403, {"error": "Invalid local runtime origin."})
                 return
-            if path == HEALTH:
+            if path in {HEALTH, READY}:
                 provided = self.headers.get_all(OBSERVER_HEADER, [])
                 if (self.command != "GET" or origins or len(provided) != 1
                         or not secrets.compare_digest(provided[0].encode("latin-1"), self.server.observer.encode())):
                     self.respond(403, {"error": "Runtime observation requires authorization."})
                     return
-                self.respond(200, self.server.health())
+                status = self.server.health()
+                ready = status["status"] == "serving" and not status.get("paused")
+                self.respond(503 if path == READY and not ready else 200, status)
                 return
             if path.startswith("/_runtime"):
                 self.respond(404, {"error": "Unknown runtime route."})

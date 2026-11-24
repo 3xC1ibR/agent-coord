@@ -82,7 +82,7 @@ def snapshot(database, directory, update):
     atomic_json(directory / "update-backup.json", {
         "id": update["id"], "schema": read_json(schema) if schema.exists() else None})
     return write(directory, update, phase="prepared", backup=True,
-                 backup_method="clonefile" if cloned else "sqlite-backup")
+                 backup_method="clonefile" if cloned else "sqlite-backup", edge_snapshot_finished_at=time.monotonic())
 
 
 def restore(database, directory, update):

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -133,6 +134,14 @@ class EdgeProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(health)["instance"], FIRST)
         self.assertEqual(self.received, [])
 
+    def test_readiness_observation_respects_the_coordinator_fence(self):
+        observer = {runtime_edge.OBSERVER_HEADER: self.edge.observer}
+        self.assertEqual(request(self.address, runtime_edge.READY)[0], 403)
+        self.assertEqual(request(self.address, runtime_edge.READY, headers=observer)[0], 200)
+        self.route(self.first, FIRST, ready=False)
+        self.assertEqual(request(self.address, runtime_edge.READY, headers=observer)[0], 503)
+        self.assertEqual(request(self.address, runtime_edge.HEALTH, headers=observer)[0], 200)
+
     def test_fenced_post_can_move_to_successor_but_a_lost_reply_is_never_replayed(self):
         self.refuse = True
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -243,6 +252,7 @@ class CoordinatorEdgeTests(unittest.TestCase):
         provider = int((fixture.root / "provider.pid").read_text())
         edge = runtime_edge.read_address(runtime.runtime_directory(fixture.database))
         cutovers = []
+        components = []
         sent_messages, send_latency = [], []
         for build in range(2, 5):
             resources = fixture.root / f"Build {build}/Resources"
@@ -291,6 +301,13 @@ class CoordinatorEdgeTests(unittest.TestCase):
             self.assertEqual(health["edge_instance"], edge["instance"])
             self.assertEqual(health["update"]["phase"], "committed")
             cutovers.append(health["edge_handover_ms"])
+            state = health["update"]
+            timestamps = [state[key] for key in ("edge_admission_closed_at", "edge_admission_drained_at",
+                "edge_projection_saved_at", "edge_source_exited_at", "edge_snapshot_finished_at",
+                "edge_candidate_ready_at")]
+            intervals = [round((end - start) * 1000, 2) for start, end in zip(timestamps, timestamps[1:])]
+            components.append(dict(zip(("drain_ms", "projection_ms", "source_exit_ms", "snapshot_ms",
+                                        "candidate_ready_ms"), intervals)))
             self.assertEqual(failures, [], f"Cutover durations so far: {cutovers}")
             self.assertEqual(fixture.api(address, "api/browser/config")["token"], token)
             current = runtime.control(runtime.discover(fixture.database), "status")
@@ -310,7 +327,29 @@ class CoordinatorEdgeTests(unittest.TestCase):
         send_p99 = send_latency[int(.99 * len(send_latency))]
         if report := os.environ.get("RIBBON_EDGE_REPORT"):
             Path(report).write_text(json.dumps({"cutover_ms": cutovers, "accepted": len(sent_messages),
-                "send_p99_ms": send_p99}, indent=2) + "\n")
+                "send_p99_ms": send_p99, "phases": components}, indent=2) + "\n")
         if os.environ.get("RIBBON_REQUIRE_EDGE_BUDGET") == "1":
             self.assertLess(max(cutovers), 250, f"Coordinator handover milliseconds: {cutovers}")
             self.assertLess(send_p99, 150, "Send latency includes waiting for coordinator admission")
+
+    def test_supervisor_restores_a_lost_listener_at_its_original_origin(self):
+        fixture = self.fixture
+        first = self.launch(fixture.resources)
+        directory = runtime.runtime_directory(fixture.database)
+        edge = runtime_edge.read_address(directory)
+        token = fixture.api(edge["url"], "api/browser/config")["token"]
+        os.kill(edge["pid"], signal.SIGTERM)
+        def resumed():
+            record = runtime_edge.read_address(directory)
+            if record["instance"] != edge["instance"]:
+                try:
+                    observed = runtime_edge.probe(record)
+                except (OSError, HTTPException):
+                    return None
+                if observed and observed.get("status") == "serving":
+                    return record
+            return None
+        replacement = fixture.wait(resumed, timeout=10)
+        self.assertEqual(replacement["url"], first["edge_url"])
+        self.assertEqual(replacement["observer"], first["edge_observer"])
+        self.assertEqual(fixture.api(replacement["url"], "api/browser/config")["token"], token)
