@@ -1650,6 +1650,8 @@ def make_ui_server(
     server.coordination_metrics = coordination_metrics
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions, provider_limits)
+    from .snapshot_cache import prepare_snapshot_cache
+    prepare_snapshot_cache(store)
     sessions.admission.wrap(server.thread_control, "process_once", automatic=True)
     sessions.admission.wrap(server.app_control, "process_once", automatic=True)
     server.runtime_admission_ready = True
