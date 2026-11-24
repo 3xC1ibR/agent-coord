@@ -53,11 +53,19 @@ class MuseConnection(ACPConnection):
         self.notifications = queue.Queue()
         self.dispatcher = None
         try:
-            super().__init__(self.notifications.put, command=command, cwd=options["cwd"], env=env)
+            super().__init__(self.notifications.put, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="muse", thread_id=options.get("threadId"))
         except Exception:
             if self.configuration:
                 self.configuration.cleanup()
             raise
+        if self.channel:
+            # Broker callbacks must apply synchronously with the journal cursor.
+            self.callback = callback
+            if self.configuration:
+                self.resource_path = self.configuration.name
+                self.configuration._finalizer.detach()
+            return
         def dispatch():
             while True:
                 message = self.notifications.get()
@@ -95,11 +103,17 @@ class MuseConnection(ACPConnection):
         if self.closed:
             return
         super().close()
-        self.notifications.put(None)
+        if not self.closed:
+            return
+        if self.notifications:
+            self.notifications.put(None)
         if self.dispatcher and self.dispatcher is not threading.current_thread():
             self.dispatcher.join(timeout=3)
         if self.configuration:
             self.configuration.cleanup()
+        elif getattr(self, "resource_path", None):
+            import shutil
+            shutil.rmtree(self.resource_path, ignore_errors=True)
 
 
 class MuseRPC:
@@ -709,6 +723,10 @@ class MuseRPC:
                     self._emit("item/completed", thread_id, turnId=turn["id"], item=copy.deepcopy(item))
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.connections):
             self._shutdown(thread_id)

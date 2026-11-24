@@ -18,6 +18,7 @@ import time
 import uuid
 import zlib
 
+from . import acp_state
 from .browser_persistence import capture_writes
 from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import restore_projected_history, saved_turn_status
@@ -94,6 +95,8 @@ class CoordinatorProjection:
         # inversions during an approval answer or steering write.
         self.lock = sessions.lock
         sessions.claude.lock = sessions.lock
+        for provider in acp_state.PROVIDER_FIELDS:
+            getattr(sessions, provider).lock = sessions.lock
         self.cursor = 0
         self.stopped = threading.Event()
         self.command_delivered = threading.Event()
@@ -141,6 +144,7 @@ class CoordinatorProjection:
             "browser": browser,
             "events": [] if durable else list(sessions.events),
             "claude": claude,
+            "acp": acp_state.capture(sessions),
             "codex": {"next_id": sessions.rpc.next_id, "ready": sessions.rpc.ready,
                       "initialized_response": getattr(sessions.rpc, "initialized_response", False),
                       "pending_methods": copy.deepcopy(getattr(sessions.rpc, "pending_methods", {}))},
@@ -160,6 +164,7 @@ class CoordinatorProjection:
         if state["version"] != VERSION:
             raise TransportError("Coordinator projection version is incompatible.")
         sessions = self.sessions
+        acp_state.restore(sessions, state.get("acp", {}))
         self.rollback_history_versions.clear()
         for name, value in state["browser"].items():
             if name != "sequence":
@@ -255,7 +260,9 @@ class CoordinatorProjection:
                 adapter.channel = channel
                 adapter.process = self.attach(channel, entry["pid"], adapter._message, provider="codex")
                 adapter.process.returncode = entry.get("returncode")
-            else:
+            elif entry["provider"] in acp_state.PROVIDER_FIELDS:
+                acp_state.attach(self, entry["provider"], entry["thread_id"], channel, entry["pid"], state.get("acp", {}))
+            elif entry["provider"] == "claude":
                 from .claude_code import ClaudeConnection
                 identity = entry["thread_id"]
                 connection = ClaudeConnection.attach(self.store,
@@ -267,14 +274,24 @@ class CoordinatorProjection:
                        (self.sessions.queue.owner, state["queue_owner"]))
         self.sessions.schedules.started_at = state["schedule_start"]
 
-    def attach(self, channel, pid, callback, *, provider, thread_id=None):
+    def owns_provider(self, thread_id, provider):
+        adapter = getattr(self.sessions, provider, None)
+        connection = getattr(adapter, "connections", {}).get(thread_id)
+        channel = getattr(connection, "channel", None)
+        entry = self.channels.get(channel)
+        return bool(entry and entry["provider"] == provider and entry.get("thread_id") == thread_id
+                    and not entry.get("closed") and entry["process"].poll() is None
+                    and connection.process is entry["process"])
+
+    def attach(self, channel, pid, callback, *, provider, thread_id=None, stderr_callback=None, stdout_callback=None):
         process = ProcessHandle(pid)
         role = "history" if provider == "codex" and getattr(callback, "__self__", None) is not self.sessions.rpc else "main"
         self.channels[channel] = {"process": process, "callback": callback, "provider": provider,
-                                  "thread_id": thread_id, "role": role, "closed": False}
+                                  "thread_id": thread_id, "role": role, "closed": False,
+                                  "stderr_callback": stderr_callback, "stdout_callback": stdout_callback}
         return process
 
-    def open(self, channel, args, env, cwd, callback, *, provider, thread_id=None):
+    def open(self, channel, args, env, cwd, callback, *, provider, thread_id=None, stderr_callback=None, stdout_callback=None):
         identity = "open:" + channel
         value = {"args": args, "env": env, "cwd": cwd}
         role = "history" if provider == "codex" and getattr(callback, "__self__", None) is not self.sessions.rpc else "main"
@@ -290,7 +307,8 @@ class CoordinatorProjection:
                            (identity, channel, "open", value_json))
             self.remember_histories(prepared, completions)
         result = self.deliver(identity, channel, "open", value)
-        return self.attach(channel, result["pid"], callback, provider=provider, thread_id=thread_id)
+        return self.attach(channel, result["pid"], callback, provider=provider, thread_id=thread_id,
+                           stderr_callback=stderr_callback, stdout_callback=stdout_callback)
 
     def prepare_checkpoint(self, *, inline=False):
         from .history_persistence import prepare_projected_history, stage_history
@@ -666,12 +684,19 @@ class CoordinatorProjection:
                         self.in_event.command_index = 0
                         if entry.get("closed"):
                             continue
-                        if event["stream"] == "stdout" and isinstance(message, dict):
+                        consumed = False
+                        if event["stream"] == "stderr" and entry.get("stderr_callback"):
+                            entry["stderr_callback"](event["data"])
+                        elif event["stream"] == "stdout" and entry.get("stdout_callback"):
+                            consumed = entry["stdout_callback"](event["data"])
+                        if event["stream"] == "stdout" and isinstance(message, dict) and not consumed:
                             entry["callback"](message)
                         elif event["stream"] == "eof":
                             entry["process"].returncode = 1
                             if entry["provider"] == "codex":
                                 entry["callback"]({"method": "bridge/disconnected", "params": {}})
+                            elif entry["provider"] in acp_state.PROVIDER_FIELDS:
+                                entry["callback"]({"method": "disconnected", "params": {"error": "Provider transport closed."}})
                             else:
                                 entry["callback"]({"type": "disconnected", "error": "Provider transport closed."})
                         # A native waiter becomes eligible only after its response
