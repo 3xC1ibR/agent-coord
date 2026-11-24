@@ -469,7 +469,7 @@ async function mobileLayout(page, fixture) {
 }
 
 async function familyNavigation(page, fixture) {
-  const {supervisor, lead, specialist, sibling, remote} = fixture.threads;
+  const {supervisor, lead, specialist, sibling} = fixture.threads;
   await browserOpen(page, fixture);
   await openFromList(page, fixture, supervisor);
   const tab = page.locator(`#conversation-tabs [data-thread-tab="${supervisor.id}"]`);
@@ -494,12 +494,28 @@ async function familyNavigation(page, fixture) {
   assert.equal(await tab.innerText(), title);
   await breadcrumb.locator(`.agent-breadcrumb-step[data-agent-thread="${supervisor.id}"]`).click();
   await readyConversation(page, supervisor);
+  return {root: supervisor.id, children: [lead.id, specialist.id, sibling.id]};
+}
+
+async function crossRepository(page, fixture) {
+  const {supervisor, remote, other} = fixture.threads;
+  await openConversation(page, fixture, supervisor);
+  await openFromList(page, fixture, other);
+  await selectTab(page, supervisor);
+  await readyConversation(page, supervisor);
+  const workspace = await workspaceSelection(page);
+  const visibleTabs = '#conversation-tabs [data-thread-tab]:visible';
+  const original = await page.locator(visibleTabs).evaluateAll(tabs => tabs.map(tab => tab.dataset.threadTab));
   const link = page.locator(`#timeline a[href^="agentcoord:"]`).filter({hasText: remote.title});
   await link.click();
   await readyConversation(page, remote);
   assert.equal(await workspaceSelection(page), workspace);
-  assert.equal(await tab.innerText(), title);
-  return {root: supervisor.id, children: [lead.id, specialist.id, sibling.id], outsideRepository: remote.id};
+  const current = await page.locator(visibleTabs).evaluateAll(tabs => tabs.map(tab => tab.dataset.threadTab));
+  assert(original.every(id => current.includes(id)));
+  const {body} = await getBrowserAPI(fixture, "threads/" + remote.id);
+  assert.equal(body.project_id, fixture.project);
+  assert.equal(body.cwd, remote.cwd);
+  return {original, current, outsideRepository: remote.id, workspace};
 }
 
 async function attentionReceipts(page, fixture, key, clear, expectedResponse) {
@@ -548,7 +564,7 @@ async function optimisticOrdering(page, fixture) {
     signals.push({path: new URL(request.url()).pathname, body: request.postDataJSON()});
     await hold;
     if (message.endsWith("reject")) {
-      await route.fulfill({status: 503, contentType: "application/json",
+      await route.fulfill({status: 400, contentType: "application/json",
         body: JSON.stringify({error: "Synthetic acceptance was rejected."})});
     } else await route.continue();
   });
@@ -567,7 +583,7 @@ async function optimisticOrdering(page, fixture) {
   }
   for (let attempt = 0; acknowledgements.length < 3 && attempt < 80; attempt++) await delay(50);
   assert.equal(acknowledgements.length, 3, JSON.stringify(acknowledgements));
-  assert(acknowledgements.find(item => item.text.endsWith("reject"))?.status === 503);
+  assert(acknowledgements.find(item => item.text.endsWith("reject"))?.status === 400);
   assert(acknowledgements.filter(item => !item.text.endsWith("reject")).every(item => item.status < 300));
   await selectTab(page, first);
   await expectContains(page.locator("#timeline"), marker + "first");
@@ -928,8 +944,10 @@ async function interactions(browser, fixture, report) {
     desktop(page => attentionReceipts(page, fixture, "blocking", false, "input")));
   await recordCheck(report, "failed turn stays in Attention after reading", () =>
     desktop(page => attentionReceipts(page, fixture, "failed", false, "failed")));
-  await recordCheck(report, "immutable family tab, inline breadcrumb and cross-repo open", () =>
+  await recordCheck(report, "immutable family tab and inline breadcrumb", () =>
     desktop(page => familyNavigation(page, fixture)));
+  await recordCheck(report, "cross-repository open retains the active workspace and existing tabs", () =>
+    desktop(page => crossRepository(page, fixture)));
   await recordCheck(report, "per-thread optimistic delivery while acceptance is delayed or rejected", () =>
     desktop(page => optimisticOrdering(page, fixture)));
   await recordCheck(report, "per-thread unsent drafts and image survive reload", () =>
