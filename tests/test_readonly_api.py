@@ -152,7 +152,7 @@ class ReadOnlyHTTPTests(unittest.TestCase):
         cases = (
             (self.sessions, "work_thread_inventory_response", "/api/browser/threads", None),
             (self.sessions, "work_thread", "/api/browser/threads/" + self.identity, None),
-            (self.sessions, "read", "/api/browser/sessions/" + self.identity, {"X-Agent-Coord-History-View": "recent"}),
+            (self.sessions, "_read_snapshot", "/api/browser/sessions/" + self.identity, {"X-Agent-Coord-History-View": "recent"}),
             (self.sessions, "read", "/api/browser/sessions/" + self.identity, None),
             (observer_queries, "matches_workspace", "/api/browser/threads/metadata?id=" + self.identity, None),
         )
