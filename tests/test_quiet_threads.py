@@ -44,8 +44,8 @@ class QuietThreadTests(unittest.TestCase):
         self.addCleanup(self.sessions.close)
         self.thread = self.sessions.create({"name": "Question writer"})["session"]["thread_id"]
 
-    def turn(self, status="completed", checkpoint=None):
-        self.sessions.send(self.thread, {"message": "Write today's questions."})
+    def turn(self, status="completed", checkpoint=None, **submission):
+        self.sessions.submit(self.thread, {"message": "Write today's questions.", **submission})
         self.assertTrue(self.sessions.persistence.flush())
         if checkpoint:
             self.store.threads.checkpoint(self.thread, checkpoint)
@@ -76,6 +76,35 @@ class QuietThreadTests(unittest.TestCase):
         self.assertFalse(thread["needs_attention"])
         # The result itself remains readable; only presentation is quiet.
         self.assertEqual(self.store.threads.completions_after(0)["events"][0]["id"], completion)
+
+    def test_quiet_input_affects_only_its_turn_and_leaves_failures_visible(self):
+        clean = self.turn(quiet=True, requestId="quiet")
+        self.assertFalse(self.sessions.completion_notification_allowed(clean))
+        self.assertFalse(self.sessions.work_thread(self.thread)["needs_attention"])
+        self.assertFalse(self.sessions.work_thread(self.thread)["quiet"])
+        self.assertEqual(self.sessions.submit(self.thread, {
+            "message": "Write today's questions.", "quiet": True, "requestId": "quiet"})["turn"]["id"], "turn-0")
+        ordinary = self.turn(requestId="ordinary")
+        self.assertTrue(self.sessions.completion_notification_allowed(ordinary))
+        failed = self.turn(status="failed", quiet=True)
+        self.assertTrue(self.sessions.completion_notification_allowed(failed))
+
+    def test_queued_quiet_input_retains_the_marker_through_dispatch(self):
+        self.sessions.submit(self.thread, {"message": "First."})
+        self.assertTrue(self.sessions.persistence.flush())
+        queued = self.sessions.submit(self.thread, {"message": "Later.", "quiet": True, "requestId": "queued"}, queued=True)
+        self.assertTrue(queued["queued"])
+        self.assertTrue(self.sessions.queue.list(self.thread)[0]["quiet"])
+        self.sessions.rpc.fast_turn = True
+        first = self.sessions.rpc.threads[self.thread]["turns"][-1]
+        first["status"] = "completed"
+        self.sessions._event({"method": "turn/completed", "params": {"threadId": self.thread, "turn": first}})
+        self.assertTrue(self.sessions.persistence.flush())
+        self.sessions.queue._dispatch(self.thread)
+        self.assertTrue(self.sessions.persistence.flush())
+        work = self.sessions.work_thread(self.thread)
+        self.assertFalse(work["needs_attention"])
+        self.assertTrue(work["notification_context"]["quiet"])
 
     def test_failure_and_user_request_still_notify_and_need_attention(self):
         self.quiet()

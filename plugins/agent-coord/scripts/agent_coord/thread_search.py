@@ -662,6 +662,7 @@ def search_browser_threads(store, sessions, query):
     only when the current view filters on derived attention or stage.
     """
     from .thread_inventory import listed_threads
+    from .workspaces import workspace_members
     scope = query.get("scope", ["all"])[0]
     if scope not in {"all", "all_projects", "current"}:
         raise CoordinationError("Search scope must be all, all_projects, or current.")
@@ -678,18 +679,17 @@ def search_browser_threads(store, sessions, query):
             threads = [t for t in threads if (t["work_phase"] or "new") == phase]
     else:
         with store.reading(), store._connection() as db:
-            threads = listed_threads(store.threads, db, sessions.cwd)
+            threads = listed_threads(store.threads, db, sessions.cwd,
+                                     include_family=bool(query.get("project_cwd", [""])[0] and not query.get("project", [""])[0]))
         if scope == "current":
             threads = [t for t in threads if t["attention"] == placement]
     if scope == "current":
-        for field in ("repository", "project"):
-            selected = query.get(field, [""])[0]
-            if selected:
-                threads = [t for t in threads if t[field + "_id"] == (None if selected == "__none__" else selected)]
-    if scope != "all_projects" and "project_cwd" in query:
-        directory = query["project_cwd"][0]
-        directory = str(Path(directory).expanduser().resolve()) if directory else ""
-        threads = [t for t in threads if t["project_cwd"] == directory]
+        repository = query.get("repository", [""])[0]
+        if repository:
+            threads = [t for t in threads if t["repository_id"] == (None if repository == "__none__" else repository)]
+    filters = {key: val for key, val in query.items() if key == "directory_root"
+               or key in {"project_cwd", "project"} and scope != "all_projects"}
+    threads = list(filter(workspace_members(filters), threads))
     return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
                           my_messages=query.get("my_messages") == ["true"], snapshot_dirty=True,
                           schedule_index=partial(sessions.persistence.submit, key="conversation-substring-index", required=False),

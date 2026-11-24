@@ -73,6 +73,8 @@ class ReviewRuntime:
                     draft_hash TEXT, result_json TEXT, completed_at REAL,
                     PRIMARY KEY(run_id,stage));
                 CREATE INDEX IF NOT EXISTS review_actors ON review_steps(actor_id,turn_id);
+                CREATE INDEX IF NOT EXISTS review_owner ON review_runs(owner_id,created_at);
+                CREATE INDEX IF NOT EXISTS review_critic ON review_runs(critic_id,created_at);
                 CREATE UNIQUE INDEX IF NOT EXISTS review_owner_active ON review_runs(owner_id)
                     WHERE state IN ('creating','active');
             """)
@@ -95,10 +97,21 @@ class ReviewRuntime:
         run["max_turns"] = 4
         return run
 
-    def list(self, thread_id):
+    def list(self, thread_id, *, limit=None):
         with self.store.reading(), self.store._connection() as db:
-            return [self.describe(db, r) for r in db.execute(
-                "SELECT * FROM review_runs WHERE owner_id=? OR critic_id=? ORDER BY created_at", (thread_id, thread_id))]
+            if limit is None:
+                rows = db.execute("""SELECT * FROM review_runs WHERE owner_id=? OR critic_id=?
+                    ORDER BY created_at""", (thread_id, thread_id))
+            else:
+                rows = reversed(db.execute("""SELECT * FROM review_runs WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, created_at FROM (SELECT id, created_at FROM review_runs
+                            WHERE owner_id=? ORDER BY created_at DESC LIMIT ?)
+                        UNION SELECT id, created_at FROM (SELECT id, created_at FROM review_runs
+                            WHERE critic_id=? ORDER BY created_at DESC LIMIT ?)
+                        ORDER BY created_at DESC LIMIT ?)) ORDER BY created_at DESC""",
+                    (thread_id, limit, thread_id, limit, limit)).fetchall())
+            return [self.describe(db, row) for row in rows]
 
     def submit(self, thread_id, body):
         """Persist the user request before creating a critic or queueing work."""
@@ -282,8 +295,8 @@ class ReviewRuntime:
             public["reviewStage"] = step["stage"]
         return public, True
 
-    def public_history(self, thread_id, thread):
-        runs = self.list(thread_id)
+    def public_history(self, thread_id, thread, *, runs=None):
+        runs = self.list(thread_id) if runs is None else runs
         if not runs:
             return thread
         reviewed = {s["turn_id"] for run in runs for s in run["steps"] if s["actor_id"] == thread_id}

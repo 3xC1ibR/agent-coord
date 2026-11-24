@@ -367,7 +367,7 @@ class AskStore:
         return item
 
     def overview(self, *, status: str | None = "open", since: float | None = None,
-                 session_id: str | None = None) -> list[dict[str, Any]]:
+                 session_id: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         """Asks across every thread with display fields and stale, overdue and snoozed states.
 
         Open asks list blocking first, oldest first. Other selections list the
@@ -381,7 +381,10 @@ class AskStore:
             clauses.append("a.session_id = ?"); params.append(session_id)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         order = (" ORDER BY a.blocking DESC, a.created_at, a.id" if status == "open"
-                 else f" ORDER BY a.updated_at DESC, a.id DESC LIMIT {MAX_LISTED}")
+                 else " ORDER BY a.updated_at DESC, a.id DESC")
+        if limit is not None or status != "open":
+            order += " LIMIT ?"
+            params.append(limit if limit is not None else MAX_LISTED)
         now = self.store.clock()
         with self.store.reading(), self.store._connection() as db:
             rows = db.execute(_DISPLAY_QUERY + where + order, params).fetchall()
@@ -566,13 +569,13 @@ class AskStore:
         return _record(row)
 
     def resolve(self, ask_id: Any, resolution: Any, *, option: Any = None, answer: Any = None,
-                note: Any = None) -> dict[str, Any]:
+                note: Any = None, allow_typed=True) -> dict[str, Any]:
         """Record the user's resolution and deliver it as an ordinary inbox message."""
         current = self.get(ask_id)
         if current["status"] != "open":
             raise CoordinationError(f"Ask {ask_id} is already {current['status']}.")
         allowed = allowed_resolutions(current["kind"])
-        if resolution not in allowed:
+        if resolution not in allowed and not (allow_typed and resolution == ANSWERED and answer is not None and option is None):
             raise CoordinationError(f"Ask {ask_id} is {'an' if current['kind'][0] == 'a' else 'a'} {current['kind']}; "
                                     "resolve it with " + ", ".join(allowed[:-1]) + f" or {allowed[-1]}.")
         remark = _text(note, "Note", MAX_NOTE, required=False)
@@ -592,7 +595,7 @@ class AskStore:
                 raise CoordinationError("An answer or option applies to an answered decision; use note for other resolutions.")
             body = resolution_body(current, resolution, remark)
         now = self.store.clock()
-        with self.store._connection() as db:
+        with self.store.database_operation("asks.resolve", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT status FROM asks WHERE id = ?", (ask_id,)).fetchone()
             if row["status"] != "open":
@@ -613,7 +616,7 @@ class AskStore:
         """Answer a decision; the form used before kinds existed."""
         if (answer is None) == (option is None):
             raise CoordinationError("Provide exactly one of answer (free text) or option.")
-        return self.resolve(ask_id, ANSWERED, answer=answer, option=option)
+        return self.resolve(ask_id, ANSWERED, answer=answer, option=option, allow_typed=False)
 
     def snooze(self, ask_id: Any, until: Any) -> dict[str, Any]:
         """Hide an open ask from the open list until a time; None shows it again.

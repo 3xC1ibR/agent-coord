@@ -110,7 +110,7 @@ class AskKindTests(AskFixture):
             with self.assertRaises(CoordinationError, msg=repr(value)):
                 timestamp(value, "Due time")
 
-    def test_each_kind_accepts_its_resolutions_and_dismissal_only(self):
+    def test_each_kind_accepts_its_resolutions_dismissal_and_typed_answers(self):
         every = {resolution for values in RESOLUTIONS.values() for resolution in values} | {"dismissed"}
         for kind in KINDS:
             fields = {"unblocks": "The next step."} if kind in ("action", "request") else {}
@@ -120,7 +120,7 @@ class AskKindTests(AskFixture):
                     ask = self.asks.create("asker", f"{kind} {resolution}", blocking=True, kind=kind, **fields)
                     self.assertEqual(self.asks.show(ask["id"])["resolutions"], list(allowed))
                     extra = {"answer": "Yes"} if resolution == "answered" else {}
-                    if resolution not in allowed:
+                    if resolution not in allowed and resolution != "answered":
                         with self.assertRaisesRegex(CoordinationError, f"is an? {kind}; resolve it with"):
                             self.asks.resolve(ask["id"], resolution, **extra)
                         self.assertEqual(self.asks.get(ask["id"])["status"], "open")
@@ -133,6 +133,14 @@ class AskKindTests(AskFixture):
                     self.assertEqual(resolved["answered_at"], resolved["resolved_at"] if resolution == "answered" else None)
                     with self.assertRaisesRegex(CoordinationError, "already resolved"):
                         self.asks.resolve(ask["id"], resolution, **extra)
+
+    def test_typed_approval_answer_records_text_without_granting_approval(self):
+        ask = self.asks.create("asker", "Can I use the new account?", kind="approval", blocking=True)
+        result = self.asks.resolve(ask["id"], "answered", answer="Wait until the existing account expires.")
+        self.assertEqual((result["status"], result["resolution"]), ("resolved", "answered"))
+        body = self.inbox()[-1]["body"]
+        self.assertIn("Answer: Wait until the existing account expires.", body)
+        self.assertNotIn("approved", body)
 
     def test_resolution_message_states_kind_resolution_and_note(self):
         action = self.action(context="Stripe needs it.")

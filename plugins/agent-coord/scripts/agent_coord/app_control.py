@@ -66,6 +66,14 @@ class AppControl:
                 WHERE operation = 'sidecar' AND status NOT IN ('completed', 'cancelled')
                 AND json_extract(payload_json, '$.target_id') = ?""", (thread_id,))]
 
+    def sidecar_statuses(self, thread_id, *, limit):
+        """Project unresolved requests without running lease recovery."""
+        with self.store.reading(), self.store._connection() as db:
+            rows = db.execute("""SELECT * FROM app_control_requests INDEXED BY app_control_sidecar_requests
+                WHERE operation = 'sidecar' AND status NOT IN ('completed', 'cancelled')
+                AND json_extract(payload_json, '$.target_id') = ? LIMIT ?""", (thread_id, limit)).fetchall()
+        return [self._public_status(row) for row in rows]
+
     def settings(self, thread_id):
         session = self.store.get_session(thread_id)
         with self.store.reading(), self.store._connection() as db:
@@ -270,17 +278,21 @@ class AppControl:
                 row = db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone()
             if not row:
                 raise CoordinationError("App request not found.")
-            result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
-            if result["status"] in {"queued_resume", "queued_interrupt", "queued_wake_resume", "queued_sidecar", "queued_session", "queued_schedule"}:
-                result["status"] = "queued"
-            result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
-            if result["status"] == "queued":
-                result["message"] = "Queued for Ribbon Field. The app must be running in this workspace; settings and project moves wait for idle."
-                if row["operation"] == "resume":
-                    result["message"] = "Recovery queued for an updated Ribbon Field runtime in this workspace. No failed prompt has been replayed."
             if row["status"] in TERMINAL or time.monotonic() >= deadline:
-                return result
+                return self._public_status(row)
             time.sleep(min(.1, max(0, deadline - time.monotonic())))
+
+    @staticmethod
+    def _public_status(row):
+        result = {key: row[key] for key in ("request_id", "operation", "status", "thread_id", "error")}
+        if result["status"] in {"queued_resume", "queued_interrupt", "queued_wake_resume", "queued_sidecar", "queued_session", "queued_schedule"}:
+            result["status"] = "queued"
+        result["result"] = json.loads(row["result_json"]) if row["result_json"] else None
+        if result["status"] == "queued":
+            result["message"] = "Queued for Ribbon Field. The app must be running in this workspace; settings and project moves wait for idle."
+            if row["operation"] == "resume":
+                result["message"] = "Recovery queued for an updated Ribbon Field runtime in this workspace. No failed prompt has been replayed."
+        return result
 
     def cancel(self, request_id):
         with self.store._connection() as db:

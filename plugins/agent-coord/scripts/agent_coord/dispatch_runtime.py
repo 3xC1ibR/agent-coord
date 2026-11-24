@@ -142,9 +142,13 @@ class DispatchRuntime:
             raise CoordinationError("Routing request not found.")
         return self.receipt(row)
 
-    def receipts(self, thread_id):
+    def receipts(self, thread_id, *, limit=None):
         with self.store.reading(), self.store._connection() as db:
-            rows = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? ORDER BY id", (thread_id,)).fetchall()
+            if limit is None:
+                rows = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? ORDER BY id", (thread_id,)).fetchall()
+            else:
+                rows = reversed(db.execute("""SELECT * FROM dispatch_requests WHERE dispatcher_id=?
+                    ORDER BY id DESC LIMIT ?""", (thread_id, limit)).fetchall())
             result = [self.receipt(row) for row in rows]
             for item in result:
                 if item["target_id"]:

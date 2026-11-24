@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
+from .conversation_open import open_route_thread
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
@@ -55,6 +56,7 @@ SORT_KEYS = {"created", "last_activity", "name"}
 _CLIENT_DISCONNECT_ERRNOS = {errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE}
 _WEB_ROOT = Path(__file__).with_name("web")
 _WORKSPACE_ASSET = re.compile(rb'(?:src|href)="/([a-zA-Z0-9_-]+\.(?:js|css))"')
+_BUILT_WORKSPACE_ASSET = re.compile(r"/dist/app-([a-f0-9]{20})\.(js|css)")
 
 
 @lru_cache(maxsize=192)
@@ -63,6 +65,10 @@ def _asset_digest(path, file_identity):
 
 
 def _workspace_html():
+    built = _WEB_ROOT / "dist" / "index.html"
+    if built.is_file():
+        return built.read_bytes()
+
     def versioned(match):
         path = _WEB_ROOT / match[1].decode("ascii")
         stat = path.stat()
@@ -70,6 +76,20 @@ def _workspace_html():
         return match[0][:-1] + b"?v=" + digest + b'"'
 
     return _WORKSPACE_ASSET.sub(versioned, (_WEB_ROOT / "index.html").read_bytes())
+
+
+def workspace_bundle_asset(path):
+    match = _BUILT_WORKSPACE_ASSET.fullmatch(path)
+    if match is None:
+        return None
+    asset = _WEB_ROOT / path[1:]
+    if not asset.is_file() or not asset.resolve().is_relative_to(_WEB_ROOT.resolve()):
+        return None
+    body = asset.read_bytes()
+    if hashlib.sha256(body).hexdigest()[:20] != match[1]:
+        return None
+    content_type = "text/javascript" if match[2] == "js" else "text/css"
+    return body, content_type + "; charset=utf-8"
 
 
 _MAX_BODY_BYTES = 128 * 1024
@@ -332,6 +352,8 @@ def _handler(
     coordination_metrics: CoordinationMetrics | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
+    if browser_sessions is not None:
+        browser_sessions.conversation_open.initialize_catalog()
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
@@ -357,6 +379,8 @@ def _handler(
                 operation = "thread_detail"
             elif method == "GET" and path.startswith("/api/browser/sessions/"):
                 operation = "conversation_read"
+            elif method == "GET" and open_route_thread(path.removeprefix("/api/browser/")) is not None:
+                operation = "conversation_open"
             self._metric_operation = operation
             self._metric_started = time.monotonic()
 
@@ -457,6 +481,14 @@ def _handler(
             if not self._authorized():
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device using a fresh link from your Mac."})
                 return
+            if parsed.path.startswith("/dist/"):
+                asset = workspace_bundle_asset(parsed.path)
+                if asset is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                else:
+                    body, content_type = asset
+                    self._send(HTTPStatus.OK, content_type, body, cache_control="private, max-age=31536000, immutable")
+                return
             if parsed.path == "/html-preview":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "html-preview.html").read_bytes())
                 return
@@ -483,7 +515,7 @@ def _handler(
             if parsed.path == "/push-notifications.js":
                 self._static_asset(parsed)
                 return
-            if parsed.path in {"/openui.js", "/openui.css"}:
+            if parsed.path in {"/openui.js", "/openui.css", "/tokens.css"}:
                 self._static_asset(parsed)
                 return
             if parsed.path == "/api/remote/status":
@@ -583,9 +615,10 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
-        def _stream_events(self, sequence, completion_sequence):
+        def _stream_events(self, sequence, completion_sequence, metadata_sequence=None):
             broadcaster = self.server.notification_broadcast
             with broadcaster.subscribe(completion_sequence) as client:
+                next_catalog_poll = 0.0
                 while not browser_sessions.closed:
                     batch = browser_sessions.events_after(sequence, timeout=1)
                     if browser_sessions.closed or not self._authorized():
@@ -598,6 +631,12 @@ def _handler(
                         batch["events"].extend(notifications["events"])
                         batch.update((key, value) for key, value in notifications.items() if key != "events")
                         completion_sequence = batch["completionSeq"]
+                    if metadata_sequence is not None and time.monotonic() >= next_catalog_poll:
+                        next_catalog_poll = time.monotonic() + .5
+                        changes = browser_sessions.conversation_open.catalog_changes(metadata_sequence)
+                        if changes is not None:
+                            metadata_sequence = changes["revision"]
+                            batch["events"].append({"method": "browser/conversationInvalidated", "params": changes})
                     self._event_batch(batch)
 
         def _event_batch(self, batch: dict) -> None:
@@ -643,11 +682,12 @@ def _handler(
         def _check_thread_workspace(self, thread_id):
             # Sidebar panels need the saved workspace boundary. Building a
             # live thread card here waits on unrelated provider checkpoints.
-            require_thread_workspaces(store, [thread_id], browser_sessions.cwd)
+            require_thread_workspaces(store, [thread_id], browser_sessions.cwd, exclude_managed=True)
 
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
             query = parse_qs(parsed.query, keep_blank_values=True)
+            open_thread = open_route_thread(route)
             if route == "config":
                 # The page fetches its conversation snapshots after config.
                 # Subscribe from here to cover events arriving during startup.
@@ -663,6 +703,14 @@ def _handler(
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
                                           "conversationHistoryPages": 1,
+                                          "conversationOpen": 1,
+                                          "conversationRevisionEpoch": browser_sessions.conversation_open.epoch,
+                                          "conversationMetadataEvents": 1,
+                                          "conversationMetadataCursor": browser_sessions.conversation_open.catalog_cursor(),
+                                          **({} if self._remote_request() else {
+                                              "conversationCacheScope": browser_sessions.conversation_open.cache_scope}),
+                                          "ordinarySubmissionReceipts": 1,
+                                          "quietSubmissions": 1,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -683,9 +731,8 @@ def _handler(
                         raise CoordinationError("Choose a conversation and HTML file to preview.")
                     thread_id, file_path = query["thread"][0], query["path"][0]
                 # Read saved metadata only. Opening output must not resume an agent.
+                self._check_thread_workspace(thread_id)
                 thread = store.threads.get(thread_id, history=False)
-                if not matches_workspace(thread["cwd"], browser_sessions.cwd):
-                    raise CoordinationError("Work thread not found in this workspace.")
                 result = read_html(thread["cwd"], file_path)
                 if content:
                     self._send(HTTPStatus.OK, "text/html; charset=utf-8", result["html"].encode("utf-8"))
@@ -762,8 +809,15 @@ def _handler(
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
+                archived = query.get("archived") == ["true"]
+                if query.keys() & {"project", "project_cwd", "directory_root"}:
+                    from .workspaces import workspace_members
+                    includes = workspace_members(query)
+                    data = [thread for thread in browser_sessions.list_work_threads(archived=archived) if includes(thread)]
+                    self._json(HTTPStatus.OK, {"data": data})
+                    return
                 with store.reading():
-                    body, tag = browser_sessions.work_thread_inventory_response(archived=query.get("archived") == ["true"])
+                    body, tag = browser_sessions.work_thread_inventory_response(archived=archived)
                 # A window that already holds this list skips the transfer and
                 # its own parse and render.
                 if self.headers.get("If-None-Match") == tag:
@@ -793,6 +847,7 @@ def _handler(
                 self._json(HTTPStatus.OK, close_status)
             elif route.startswith("threads/") and route.endswith("/agent-tree"):
                 from .agent_tree import agent_tree
+                self._check_thread_workspace(unquote(route[8:-11]))
                 self._json(HTTPStatus.OK, agent_tree(browser_sessions, unquote(route[8:-11])))
             elif route.startswith("threads/") and route.endswith("/close-plan"):
                 from .subagent_close import close_plan
@@ -820,10 +875,15 @@ def _handler(
             elif route.startswith("threads/"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:])
+                self._check_thread_workspace(thread_id)
                 with store.reading():
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif open_thread is not None:
+                if query:
+                    raise CoordinationError("Conversation open does not accept query parameters.")
+                self._json(HTTPStatus.OK, browser_sessions.conversation_open.read(unquote(open_thread)))
             elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
                 parts = route.split("/")
                 if len(parts) != 5 or parts[2] != "turns" or not parts[1] or not parts[3]:
@@ -855,6 +915,11 @@ def _handler(
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
+                if view == "recent" and self.headers.get("X-Agent-Coord-Conversation-Revisions") == "1":
+                    result = browser_sessions.conversation_open.read(unquote(route[9:]), detail_only=True)
+                    if not result["legacyDetailRequired"]:
+                        self._json(HTTPStatus.OK, result)
+                        return
                 with store.reading():
                     result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
                     if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
@@ -870,7 +935,9 @@ def _handler(
                     sequence = int(cursor[0])
                     completion_sequence = int(cursor[1] if len(cursor) == 2 else
                                               query.get("completion_after", [store.threads.completion_cursor()])[0])
-                    if not all(0 <= value <= 9_223_372_036_854_775_807 for value in (sequence, completion_sequence)):
+                    metadata_sequence = int(query["metadata_after"][0]) if "metadata_after" in query else None
+                    if not all(0 <= value <= 9_223_372_036_854_775_807 for value in
+                               (sequence, completion_sequence, metadata_sequence) if value is not None):
                         raise ValueError("Cursor out of range.")
                 except ValueError as exc:
                     raise CoordinationError("Invalid event cursor.") from exc
@@ -882,7 +949,7 @@ def _handler(
                 try:
                     self.wfile.write(b"retry: 1500\n\n")
                     self.wfile.flush()
-                    self._stream_events(sequence, completion_sequence)
+                    self._stream_events(sequence, completion_sequence, metadata_sequence)
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                         raise

@@ -60,6 +60,7 @@ class Sidecars:
                     assignment_json TEXT NOT NULL, finding TEXT NOT NULL DEFAULT '',
                     last_review_at REAL, created_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS sidecars_target ON sidecar_watches(target_id);
+                CREATE INDEX IF NOT EXISTS sidecars_agent ON sidecar_watches(sidecar_id);
                 CREATE TABLE IF NOT EXISTS sidecar_reviews (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, watch_id TEXT NOT NULL REFERENCES sidecar_watches(id),
                     evidence_json TEXT NOT NULL, message_id INTEGER, report_json TEXT,
@@ -173,10 +174,11 @@ class Sidecars:
                 raise CoordinationError("This watch belongs to another agent.")
             return self.describe(db, row)
 
-    def list(self, target):
-        with self.store._connection() as db:
+    def list(self, target, *, limit=None):
+        with self.store.reading(), self.store._connection() as db:
             self._app(db, target)
-            rows = db.execute("SELECT * FROM sidecar_watches WHERE target_id=? OR sidecar_id=? ORDER BY created_at DESC", (target, target)).fetchall()
+            rows = db.execute("""SELECT * FROM sidecar_watches WHERE target_id=? OR sidecar_id=?
+                ORDER BY created_at DESC LIMIT ?""", (target, target, -1 if limit is None else limit)).fetchall()
             return [self.describe(db, dict(row)) for row in rows]
 
     def attach(self, sessions, request, on_created):

@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'plugins/agent-coord/scripts'))
 from agent_coord.store import CoordinationStore
 from agent_coord import supervision, stall_notifications as stalls
+from test_codex_app_server import BrowserSessions, FakeCodex
 
 
 class StallNotificationsTests(unittest.TestCase):
@@ -197,6 +198,33 @@ class StallNotificationsTests(unittest.TestCase):
         policy = notification_policy.decide(thread, owners={'parent'})
         self.assertTrue(policy['notify'])
         self.assertEqual(policy['owner_thread_id'], 'child')
+
+    def test_dismissing_exact_stall_is_durable_and_does_not_hide_a_new_episode(self):
+        self.at(1200)
+        alert = self.record()
+        self.at(1800)
+        self.record()
+        browser = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
+        self.addCleanup(browser.close)
+        before = browser.work_thread("child", history=False)
+        incident = alert["incident_id"]
+        self.assertTrue(before["needs_attention"])
+        self.assertTrue(before["can_handle_response"])
+        dismissed = browser.update_work_thread("child", {"dismiss_stall_id": incident})
+        self.assertFalse(dismissed["needs_attention"])
+        self.assertTrue(dismissed["stall_incident"]["dismissed"])
+        self.assertEqual(stalls.notifications(self.store), [])
+        reopened = CoordinationStore(self.store.database_path, clock=lambda: self.now)
+        self.assertTrue(stalls.dismissed(reopened, incident))
+
+        new_progress = self.now
+        stalls.record_progress(self.store, "child", "turn", progress_at=new_progress)
+        self.now += 600
+        next_alert = self.record(progress_at=new_progress)
+        self.assertNotEqual(next_alert["incident_id"], incident)
+        after = browser.update_work_thread("child", {"dismiss_stall_id": incident})
+        self.assertTrue(after["needs_attention"])
+        self.assertEqual(after["stall_incident"]["id"], next_alert["incident_id"])
 
 
     def test_legacy_once_only_receipt_does_not_suppress_new_schedule(self):

@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
@@ -62,13 +63,73 @@ class ThreadHandlingTests(unittest.TestCase):
         self.assertTrue(saved["pinned"])
         self.assertEqual(saved["handled_completion_id"], before["turn_completion"]["id"])
 
-    def test_reading_a_finished_recommendation_does_not_handle_it(self):
+    def test_reading_without_displayed_cursors_does_not_handle_an_informational_reply(self):
         self.result()
         read = self.sessions.update_work_thread("terminal", {"seen": True})
         self.assertFalse(read["unread"])
         self.assertTrue(read["needs_attention"])
         self.assertTrue(read["can_handle_response"])
         self.assertEqual(read["handled_completion_id"], 0)
+
+    @staticmethod
+    def seen_receipt(thread):
+        return {"seen": True, "seen_checkpoint_id": (thread["checkpoint"] or {}).get("id", 0),
+                "seen_completion_id": (thread["turn_completion"] or {}).get("id", 0)}
+
+    def test_reading_displayed_informational_reply_advances_both_cursors(self):
+        reply = self.result()
+        self.assertTrue(reply["needs_attention"])
+        self.assertEqual(self.sessions.update_work_thread("terminal", self.seen_receipt(reply), prefer_minimal=True),
+                         {"seen": True})
+        read = self.sessions.work_thread("terminal")
+        self.assertFalse(read["unread"])
+        self.assertFalse(read["needs_attention"])
+        for field in ("checkpoint", "completion"):
+            self.assertGreater(read[f"handled_{field}_id"], 0)
+            self.assertEqual(read[f"seen_{field}_id"], read[f"handled_{field}_id"])
+        reopened = CoordinationStore(self.store.database_path)
+        self.assertFalse(reopened.threads.get("terminal")["unhandled_response"])
+
+    def test_read_receipt_for_first_reply_leaves_a_late_reply_unread_and_unhandled(self):
+        first = self.result()
+        original = self.store.threads.update
+
+        latest = {}
+
+        def update_after_second_result(*args, **kwargs):
+            latest.update(self.result("newer"))
+            return original(*args, **kwargs)
+
+        with patch.object(self.store.threads, "update", side_effect=update_after_second_result):
+            after = self.sessions.update_work_thread("terminal", self.seen_receipt(first))
+        self.assertTrue(after["unread"])
+        self.assertTrue(after["needs_attention"])
+        self.assertEqual(after["seen_completion_id"], first["turn_completion"]["id"])
+        self.assertEqual(after["handled_completion_id"], latest["handled_completion_id"])
+        self.assertGreater(latest["turn_completion"]["id"], after["handled_completion_id"])
+
+    def test_blocking_ask_arriving_before_receipt_commit_stays_in_attention(self):
+        first = self.result()
+        original = self.store.threads.update
+
+        def update_after_blocker(*args, **kwargs):
+            self.store.asks.create("terminal", "Which account should I use?", blocking=True)
+            return original(*args, **kwargs)
+
+        with patch.object(self.store.threads, "update", side_effect=update_after_blocker):
+            after = self.sessions.update_work_thread("terminal", self.seen_receipt(first))
+        self.assertFalse(after["unread"])
+        self.assertTrue(after["needs_attention"])
+        self.assertTrue(after["open_ask"]["blocking"])
+        self.assertEqual(after["handled_completion_id"], 0)
+
+    def test_saved_blocker_or_failed_turn_stays_in_attention_when_read(self):
+        for turn, actor, status in (("blocked", "user", "completed"), ("failed", "nobody", "failed")):
+            with self.subTest(turn=turn):
+                result = self.result(turn, actor=actor, status=status)
+                after = self.sessions.update_work_thread("terminal", self.seen_receipt(result))
+                self.assertTrue(after["needs_attention"])
+                self.assertEqual(after["handled_completion_id"], result["handled_completion_id"])
 
     def test_delayed_and_duplicate_receipts_never_handle_a_newer_response(self):
         first = self.result()

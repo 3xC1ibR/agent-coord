@@ -38,17 +38,22 @@ class BrowserMessageQueue:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_id INTEGER")
             if "dispatch_reviewed" not in columns:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_reviewed INTEGER NOT NULL DEFAULT 0")
+            if "quiet" not in columns:
+                db.execute("ALTER TABLE browser_message_queue ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS browser_queue_dispatch ON browser_message_queue(dispatch_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS browser_queue_thread ON browser_message_queue(thread_id, created_at)")
 
-    def list(self, thread_id):
+    def list(self, thread_id, *, limit=None):
         self.sessions._record(thread_id)
-        with self.sessions.store._connection() as db:
-            rows = db.execute("SELECT * FROM browser_message_queue WHERE thread_id = ? ORDER BY created_at, rowid", (thread_id,)).fetchall()
+        with self.sessions.store.reading(), self.sessions.store._connection() as db:
+            rows = db.execute("""SELECT * FROM browser_message_queue WHERE thread_id = ?
+                ORDER BY created_at, rowid LIMIT ?""", (thread_id, -1 if limit is None else limit)).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["images"] = json.loads(item.pop("images_json"))
             item["mentions"] = json.loads(item.pop("mentions_json"))
+            item["quiet"] = bool(item["quiet"])
             if item.pop("owner") != self.owner:
                 item.update(state="paused", error="The server restarted. Review this message before resuming the queue.")
             result.append(item)
@@ -90,9 +95,10 @@ class BrowserMessageQueue:
                         return {"queued": bool(existing), "id": existing[0] if existing else None}
                 cancel_pending(db, thread_id, self.sessions.store.clock())
                 db.execute("""INSERT INTO browser_message_queue
-                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json, dispatch_id)
-                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?)""",
-                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window, json.dumps(mentions), dispatch_id))
+                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json, dispatch_id, quiet)
+                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window,
+                            json.dumps(mentions), dispatch_id, int(body.get("quiet", False))))
                 if dispatch_id is not None:
                     self.sessions.dispatch.transition(db, dispatch_id, "queued", target_id=thread_id, error=None)
             self.sessions._publish("browser/changed", {"threadId": thread_id})
@@ -192,7 +198,8 @@ class BrowserMessageQueue:
                 if dispatch_id is not None:
                     sessions.dispatch.update(dispatch_id, "sending")
                 result = sessions.send(thread_id, {"message": item["message"], "images": item["images"],
-                                          "windowId": item["window_id"], "mentions": item["mentions"]}, start_only=True)
+                                          "windowId": item["window_id"], "mentions": item["mentions"],
+                                          "quiet": item["quiet"]}, start_only=True)
             except Exception as exc:
                 # Keep the message and images for review after transport failures.
                 with sessions.store._connection() as db:

@@ -56,7 +56,7 @@ def _timeline_rows(db, session_id):
         after = identities[-1]
 
 
-def message_timeline(store, session_id, cwd=None):
+def message_timeline(store, session_id, cwd=None, *, limit=None):
     session = store.get_session(session_id)
     if not matches_workspace(session["cwd"], cwd):
         raise CoordinationError("Conversation not found in this workspace.")
@@ -64,18 +64,29 @@ def message_timeline(store, session_id, cwd=None):
         # Reply linkage, titles, creation receipts, and every batch belong to
         # one observation, even if another connection publishes during a read.
         db.execute("BEGIN")
+        targets = []
+        if limit is None:
+            rows = _timeline_rows(db, session_id)
+        else:
+            rows = read_rows(db, _TIMELINE_ROWS + """ WHERE m.id IN (
+                SELECT id FROM (SELECT id FROM messages WHERE sender_session_id=? ORDER BY id DESC LIMIT ?)
+                UNION SELECT id FROM (SELECT id FROM messages WHERE recipient_session_id=? ORDER BY id DESC LIMIT ?)
+                ORDER BY id DESC LIMIT ?) ORDER BY m.id""", (session_id, limit, session_id, limit, limit))
+            targets = list({row["recipient_session_id"] for row in rows if row["sender_session_id"] == session_id})
         creations = {}
-        if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
+        if (limit is None or targets) and db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'app_control_requests'").fetchone():
             for request in db.execute("""SELECT request_id, sender_session_id, thread_id, result_json
                     FROM app_control_requests WHERE operation = 'create' AND status = 'completed'
-                    AND sender_session_id = ?""", (session_id,)):
+                    AND sender_session_id = ?""" + ("" if limit is None else
+                    " AND thread_id IN (SELECT value FROM json_each(?))"),
+                    (session_id,) if limit is None else (session_id, json.dumps(targets))):
                 try:
                     receipt = json.loads(request["result_json"])
                 except (TypeError, ValueError):
                     continue
                 if isinstance(receipt, dict) and type(receipt.get("message_id")) is int:
                     creations[(receipt["message_id"], request["sender_session_id"], request["thread_id"])] = request["request_id"]
-        rows = _timeline_rows(db, session_id)
     result = []
     for row in rows:
         item = dict(row)
