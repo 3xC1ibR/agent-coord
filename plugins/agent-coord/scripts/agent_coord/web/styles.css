@@ -702,15 +702,16 @@ body.mobile-chat .timeline { min-height: 0; overflow: auto; overscroll-behavior-
 body.mobile-chat .message { font-size: var(--text-base); }
 body.mobile-chat .turn-elapsed { padding-inline: var(--space-4); }
 body.mobile-chat .requests { margin: 0 var(--space-3); max-height: 35%; overflow: auto; }
-body.mobile-chat .composer { margin: 0 var(--space-3) max(var(--space-2), env(safe-area-inset-bottom)); }
+/* The in-document tiles use their own composer layout in thread-panes.css. */
+body.mobile-chat .composer:where(#composer) { margin: 0 var(--space-3) max(var(--space-2), env(safe-area-inset-bottom)); }
 body.mobile-chat .agent-recipient { display: none; }
-body.mobile-chat:not(.dispatcher-workspace) .composer { display: flex; flex-direction: column; flex-shrink: 1; min-height: 0; }
-body.mobile-chat .composer > :not(.composer-draft) { flex-shrink: 0; }
+body.mobile-chat:not(.dispatcher-workspace) .composer:where(#composer) { display: flex; flex-direction: column; flex-shrink: 1; min-height: 0; }
+body.mobile-chat .composer:where(#composer) > :not(.composer-draft) { flex-shrink: 0; }
 /* Give the editor its own scroll area. Feedback and attachments must never
    scroll the textarea itself out of the visible draft. */
 body.mobile-chat .composer-draft { display: flex; flex-direction: column; min-height: 0; max-height: min(var(--mobile-draft-max-height), calc(var(--mobile-viewport-height, 100dvh) * .55)); }
 body.mobile-chat .composer-draft > :not(textarea) { flex-shrink: 1; min-height: 0; overflow-y: auto; }
-body.mobile-chat .composer textarea { font-size: var(--text-lg); line-height: var(--mobile-chat-input-leading); max-height: min(var(--mobile-input-max-height), calc(var(--mobile-viewport-height, 100dvh) * .45)); overflow-y: auto; resize: none; }
+body.mobile-chat .composer:where(#composer) textarea { font-size: var(--text-lg); line-height: var(--mobile-chat-input-leading); max-height: min(var(--mobile-input-max-height), calc(var(--mobile-viewport-height, 100dvh) * .45)); overflow-y: auto; resize: none; }
 body.mobile-chat .composer-draft > .command-feedback { flex-shrink: 0; }
 body.mobile-chat .command-feedback { padding: 0; border: 0; background: transparent; color: var(--muted); }
 body.mobile-chat .composer-toolbar { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); min-width: 0; }
