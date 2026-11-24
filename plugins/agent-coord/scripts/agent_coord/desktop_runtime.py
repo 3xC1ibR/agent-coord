@@ -815,7 +815,8 @@ class Runtime:
         }, self.edge_browser_token, ready=ready)
 
     def fence_edge(self):
-        if (self.directory / "edge.json").exists():
+        if (getattr(self.server, "edge_fenced_generation", None) != self.instance
+                and (self.directory / "edge.json").exists()):
             if self.edge_admission_closed_at is None:
                 self.edge_admission_closed_at = time.monotonic()
             self.server.edge_fenced_generation = self.instance
@@ -919,12 +920,15 @@ class Runtime:
             if self.update_requested:
                 self.wait_for_provider_work(sessions, blocked)
             return False
-        self.fence_edge()
-        sessions.admission.pause()
-        if self.update_requested and self.update_drain_started is None:
-            self.update_drain_started = time.monotonic()
+        start_drain = self.update_requested and self.update_drain_started is None
+        if start_drain:
+            # Save the drain intent while the current route is still serving.
             self.update_requested = runtime_update.write(self.directory, self.update_requested,
                 phase="draining", admission_drain_started_at=time.time())
+        self.fence_edge()
+        sessions.admission.pause()
+        if start_drain:
+            self.update_drain_started = time.monotonic()
         blocked = uninterrupted_readiness(sessions)
         if (getattr(self.server, "edge_fenced_generation", None) and "admitted operations" not in blocked
                 and not runtime_edge.drained(self.directory)):
@@ -1301,11 +1305,21 @@ class Runtime:
         from .ui import make_ui_server
         from . import launch_metrics
         from .runtime_cutover import RuntimeListeners
-        store = CoordinationStore(self.database)
         from .runtime_coordinator_transport import CoordinatorTransport
-        store.provider_transport = CoordinatorTransport.connect(self.directory / "provider-transport", self.instance)
-        # Finish ownership adoption before any automatic worker can claim work.
         defer_services = prewarmed_native_transport is not None
+        transport_directory = self.directory / "provider-transport"
+        if defer_services:
+            # The predecessor is gone and its snapshot is durable. Claiming
+            # the separate transport journal can overlap database preparation.
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="runtime-transport") as pool:
+                transport = pool.submit(CoordinatorTransport.connect, transport_directory, self.instance)
+                store = CoordinationStore(self.database)
+                store.provider_transport = transport.result()
+        else:
+            store = CoordinationStore(self.database)
+            store.provider_transport = CoordinatorTransport.connect(transport_directory, self.instance)
+        # Finish ownership adoption before any automatic worker can claim work.
         self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True,
             csrf_token=self.edge_browser_token, native_transport=prewarmed_native_transport,
             defer_services=defer_services)
@@ -1496,6 +1510,8 @@ class Runtime:
                             runtime_update.write(self.directory, update, phase="stopping", uninterrupted=True,
                                                  queue_owner=sessions.queue.owner,
                                                  schedule_start=sessions.schedules.started_at,
+                                                 admission_drain_seconds=update.get("admission_drain_seconds"),
+                                                 blocked=[],
                                                  edge_admission_closed_at=self.edge_admission_closed_at,
                                                  edge_admission_drained_at=self.edge_admission_drained_at,
                                                  edge_projection_saved_at=time.monotonic())
@@ -1527,6 +1543,7 @@ class Runtime:
                             recovery = RuntimeRecovery(sessions)
                             recovery.prepare(self.update_requested["id"])
                             self.update_requested = runtime_update.write(self.directory, self.update_requested, phase="stopping",
+                                admission_drain_seconds=self.update_requested["admission_drain_seconds"], blocked=[],
                                 queue_owner=sessions.queue.owner, schedule_start=sessions.schedules.started_at)
                             self.launch_update_supervisor()
                             sessions.shutdown_deadline = time.monotonic() + UPDATE_DRAIN_SECONDS
@@ -1567,6 +1584,14 @@ class Runtime:
             atomic_json(self.directory / "stop-proof.json", proof)
             return 0
         if getattr(sessions, "transport_handover", False) and not self.explicit_stop:
+            if candidate is not None and not (sessions.shutdown_report or {}).get("clean"):
+                # The supervisor can recover the existing coordinator from its
+                # saved projection. Never activate a successor after a drain
+                # that could not confirm the predecessor's required writes.
+                update = runtime_update.read(self.directory)
+                runtime_update.write(self.directory, update, phase="failed",
+                                     error="Predecessor bookkeeping did not stop cleanly.")
+                return 1
             return 75 if candidate is not None else 1
         if self.update_exit_fd is not None:
             report = sessions.shutdown_report or {"clean": False, "reason": "The bookkeeping drain did not run."}
@@ -2345,7 +2370,7 @@ def main(argv=None):
             # claim, scheduler, search publisher or server exists yet.
             from . import (
                 coordinator_projection, dispatch_runtime, event_subscriptions, execution_state,
-                external_work, launch_metrics, reviews, runtime_coordinator_transport,
+                external_work, launch_metrics, reviews, runtime_coordinator_transport, runtime_cutover,
                 session_control, sidecars, submission_receipts, turn_watchdog, ui,
             )
             from .native_push import APNsTransport
@@ -2382,9 +2407,16 @@ def main(argv=None):
                     retire_supervisor=args.retire_supervisor)
             if args.runtime_coordinate_update:
                 return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd).coordinate_update(args.exit_fd, args.source_pid)
-            return Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd, args.ready_fd,
-                start_paused=args.runtime_start_paused, commit_fd=args.commit_fd).serve(
-                    prewarmed_native_transport=prewarmed_native_transport)
+            coordinator = Runtime(args.db, Path(sys.argv[0]).resolve().parent, fd, args.ready_fd,
+                start_paused=args.runtime_start_paused, commit_fd=args.commit_fd)
+            result = coordinator.serve(prewarmed_native_transport=prewarmed_native_transport)
+            if result == 75 and coordinator.supervised and coordinator.edge_admission_closed_at is not None:
+                # The explicit service close and durable bookkeeping drain
+                # already finished. The supervisor waits for kernel exit
+                # before snapshotting. Skip interpreter-wide finalizers, which
+                # cannot contribute to the committed coordinator state.
+                os._exit(result)
+            return result
         finally:
             os.close(fd)
     parser.error("Choose a runtime operation")
