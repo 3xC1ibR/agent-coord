@@ -1108,7 +1108,11 @@ function conversationEntry(id) {
     following: position?.following ?? true, revision: 0, pending: null};
   cache.delete(id); cache.set(id, entry);
   // Retain only a few recently viewed transcripts and their rendered nodes.
-  while (cache.size > 4) cache.delete([...cache.keys()].find(key => key !== state.selected));
+  while (cache.size > 4) {
+    const expired = [...cache.keys()].find(key => key !== state.selected);
+    cache.delete(expired);
+    state.outgoing?.release?.(expired);
+  }
   return entry;
 }
 function retainConversation() {
@@ -1931,9 +1935,18 @@ class OutgoingMessages {
     this.transferStates = new Map();
     this.pendingTransferCounts = new Map();
     this.acceptedRequests = new Map();
+    this.consumedItems = new Map();
   }
 
   list(id) { return this.threads.get(id) || []; }
+
+  // Retain reconciliation evidence across echo lifetimes, but only for cached
+  // conversations or unresolved input. Reopening restores durable receipts.
+  release(id) {
+    if (this.list(id).length) return;
+    this.consumedItems.delete(id);
+    this.acceptedRequests.delete(id);
+  }
 
   // Dispatcher requests settle by their durable request ID; other messages
   // settle when a user message that was not already present carries the text.
@@ -2026,6 +2039,8 @@ class OutgoingMessages {
     this.confirm(id, detail?.acceptedMessages);
     const entries = this.list(id);
     if (!entries.length || !detail) return;
+    const consumed = this.consumedItems.get(id) || new Map();
+    this.consumedItems.set(id, consumed);
     const positions = new Map();
     const messages = (detail.thread?.turns || []).flatMap(turn => {
       const items = (turn.items || []).filter(item => item.type === "userMessage");
@@ -2044,7 +2059,7 @@ class OutgoingMessages {
           (entry.submissionId && entry.status === "sending")) return true;
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
       const match = messages.find(item => {
-        if (entry.known.has(item.id)) return false;
+        if (entry.known.has(item.id) || consumed.get(item.turnId)?.has(item.id)) return false;
         if (entry.acceptance) {
           if (item.turnId !== entry.acceptance.turnId) return false;
           const anchor = entry.acceptance.afterItemId;
@@ -2059,7 +2074,17 @@ class OutgoingMessages {
       });
       if (!match) return true;
       // Each provider message consumes one echo, including across repeated
-      // snapshots. Two identical steers must not disappear with the first copy.
+      // snapshots and receipts arriving after an earlier echo was removed.
+      const turnItems = consumed.get(match.turnId) || new Set();
+      turnItems.add(match.id);
+      consumed.set(match.turnId, turnItems);
+      if (entry.submissionId) {
+        // A gateway acknowledgement can settle the sender's echo before the
+        // completed receipt event arrives. That event is the same submission.
+        const accepted = this.acceptedRequests.get(id) || new Set();
+        accepted.add(entry.submissionId);
+        this.acceptedRequests.set(id, accepted);
+      }
       for (const pending of entries) if (!pending.acceptance || pending.acceptance.turnId === match.turnId) pending.known.add(match.id);
       return false;
     });
@@ -2636,6 +2661,9 @@ function applyEvent(event) {
   const cached = state.conversations?.get(event.params.threadId);
   if (event.method === "browser/messageAccepted") {
     const id = event.params.threadId;
+    // Unopened conversations restore receipts on their next read. Do not retain
+    // reconciliation state for every thread broadcast by the shared stream.
+    if (!cached && state.selected !== id) return;
     const detail = cached?.detail || (state.selected === id ? state.detail : null);
     if (state.outgoing?.confirm(id, [event.params])) {
       if (cached) cached.revision++;

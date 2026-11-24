@@ -168,6 +168,88 @@ test("receipt identities reconcile repeated text, own echoes, and different turn
   assert.equal(messages.list("thread").length, 0);
 });
 
+test("a late identical acceptance cannot consume an item settled before that receipt arrived", () => {
+  const messages = outgoing(), detail = detailWith(user("old", "Correction"));
+  const first = acceptance("first"), second = acceptance("second");
+  messages.confirm("thread", [first]);
+  detail.thread.turns[0].items.push(user("first-copy", "Correction"));
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 0);
+
+  messages.confirm("thread", [second]);
+  messages.settle("thread", detail);
+  assert.deepEqual(messages.list("thread").map(entry => entry.submissionId), ["second"],
+    "copy one cannot acknowledge the second input even though no echo was pending when its receipt arrived");
+  messages.confirm("thread", [first, second]);
+  messages.settle("thread", detail);
+  assert.deepEqual(messages.list("thread").map(entry => entry.submissionId), ["second"]);
+
+  detail.thread.turns[0].items.push(user("second-copy", "Correction"));
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 0);
+  messages.confirm("thread", [first, second]);
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 0, "settled receipt replay cannot recreate either echo");
+});
+
+test("canonical consumption is isolated by both conversation and turn", () => {
+  const messages = outgoing();
+  for (const [threadId, turnId] of [["thread", "turn"], ["other-thread", "turn"], ["thread", "other-turn"]]) {
+    const detail = {thread: {turns: [{id: turnId, items: [user("old", "Earlier"), user("same-item-id", "Correction")]}]}};
+    messages.confirm(threadId, [acceptance(threadId + turnId, "Correction", {threadId, turnId})]);
+    messages.settle(threadId, detail);
+    assert.equal(messages.list(threadId).length, 0, `${threadId}/${turnId} has its own canonical item`);
+  }
+});
+
+test("a sender echo settled through the gateway cannot return when its acceptance event arrives", () => {
+  const messages = outgoing(), detail = detailWith(user("old", "Earlier"));
+  messages.add("thread", {text: "Correction", submissionId: "first", detail});
+  messages.transfers("thread", [{threadId: "thread", requestId: "first", message: "Correction",
+    imageCount: 0, state: "committed", sequence: 1}], detail);
+  detail.thread.turns[0].items.push(user("first-copy", "Correction"));
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 0);
+  messages.confirm("thread", [acceptance("first"), acceptance("second")]);
+  messages.settle("thread", detail);
+  assert.deepEqual(messages.list("thread").map(entry => entry.submissionId), ["second"]);
+});
+
+test("conversation eviction releases settled reconciliation state and snapshots reconstruct it", () => {
+  const messages = outgoing(), detail = detailWith(user("old", "Earlier"), user("first-copy", "Correction"));
+  const first = acceptance("first"), second = acceptance("second");
+  messages.settle("thread", {...detail, acceptedMessages: [first]});
+  messages.release("thread");
+  assert.equal(messages.consumedItems.has("thread"), false);
+  assert.equal(messages.acceptedRequests.has("thread"), false);
+
+  messages.settle("thread", {...detail, acceptedMessages: [first, second]});
+  assert.deepEqual(messages.list("thread").map(entry => entry.submissionId), ["second"]);
+  messages.release("thread");
+  assert.equal(messages.consumedItems.has("thread"), true, "unresolved input retains its consumption evidence");
+  detail.thread.turns[0].items.push(user("second-copy", "Correction"));
+  messages.settle("thread", detail);
+  messages.release("thread");
+  assert.equal(messages.consumedItems.size, 0);
+  assert.equal(messages.acceptedRequests.size, 0);
+});
+
+test("reconciliation state follows the four-conversation cache instead of accumulating across visits", () => {
+  const messages = outgoing();
+  const c = {state: {outgoing: messages, conversations: new Map(), selected: null}};
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
+  for (let index = 0; index < 20; index++) {
+    const id = "conversation-" + index;
+    c.state.selected = id;
+    c.conversationEntry(id);
+    messages.confirm(id, [acceptance("first", "Correction", {threadId: id})]);
+    messages.settle(id, detailWith(user("old", "Earlier"), user("canonical", "Correction")));
+    assert.ok(messages.consumedItems.size <= 4);
+    assert.ok(messages.acceptedRequests.size <= 4);
+  }
+});
+
 test("acceptance event routes to its conversation without changing provider history", () => {
   const messages = outgoing(), timeline = new FakeElement("div"), detail = detailWith(user("old", "Earlier"));
   const c = {state: {selected: "thread", timelineThread: "thread", detail, outgoing: messages,
@@ -180,6 +262,7 @@ test("acceptance event routes to its conversation without changing provider hist
   assert.equal(detail.thread.turns[0].items.length, 1);
   c.applyEvent({method: "browser/messageAccepted", params: acceptance("other", "Different", {threadId: "other"})});
   assert.doesNotMatch(timeline.text, /Different/);
+  assert.equal(messages.acceptedRequests.has("other"), false, "unopened stream conversations do not allocate reconciliation state");
 });
 
 test("receipt text remains literal and invalid or cross-thread projections are ignored", () => {
