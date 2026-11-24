@@ -1,5 +1,5 @@
 "use strict";
-const {loadComposer} = require("./web_application_fixture.js");
+const {loadComposer, loadTimelineReplacement} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -266,6 +266,7 @@ function projectAppFixture({known = true} = {}) {
       throw new Error("Unexpected API call: " + path);
     }};
   vm.createContext(c);
+  loadTimelineReplacement(c);
   for (const [start, end] of [["async function refreshList(", "function currentProjectDispatcher("],
     ["function threadsInProject(", "async function restoreProjectTab("],
     ["async function openProjectDirectory(", "function renderFolders("],

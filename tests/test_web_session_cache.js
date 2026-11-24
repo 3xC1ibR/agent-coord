@@ -37,7 +37,17 @@ function setup() {
   const elements = new Map(), replies = new Map(), calls = [], timers = new Map();
   const element = (tag = "div", text = "") => ({tag, textContent: text, value: "", dataset: {}, hidden: false,
     childNodes: [], scrollTop: 0, classList: {add() {}, remove() {}, toggle() {}},
-    replaceChildren(...nodes) { this.childNodes = nodes; }, append(...nodes) { this.childNodes.push(...nodes); },
+    replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); },
+    append(...nodes) {
+      for (const node of nodes) {
+        node.remove = () => { this.childNodes = this.childNodes.filter(child => child !== node); };
+        this.childNodes.push(node);
+      }
+    },
+    querySelectorAll(selector) {
+      return selector === "article[data-outgoing]" ? this.childNodes.filter(node => node.dataset.outgoing) : [];
+    },
+    querySelector() { return null; },
     focus() {}, setAttribute() {}});
   const c = {state: {selected: null, detail: null, drafts: new Map(), sessions: [], config: {}, closing: new Set()}, calls, replies, timers, base: "/api/browser/",
     AbortController, setTimeout(fn, delay) { const timer = {fn, delay}; timers.set(timer, timer); return timer; },
@@ -50,7 +60,8 @@ function setup() {
     notifications: {syncFocus() {}, receive() {}}, savedViews: {remember() {}, restoreScroll() {}}, navigation: {remember() {}},
     setNavigation() {}, setChatExpanded() {}, isSessionDraft: () => c.state.selected === "new-session",
     renderTitle() {}, renderList() {}, renderThread() {}, renderRequests() {}, renderQueuedMessages() {}, renderStatus() {},
-    refreshList: async () => {}, refreshDecisionsAndSchedules() {}, loadSessionModels() {}, sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
+    refreshList: async () => {}, refreshDecisionsAndSchedules() {}, loadSessionModels: async () => {},
+    sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
     scheduleDetail: () => { c.scheduled = (c.scheduled || 0) + 1; }, scheduleList() {}, showError() {},
     window: {addEventListener() {}}, EventSource: function (url) { c.events = this; this.url = url; },
     renderTimeline() {
@@ -76,6 +87,7 @@ function setup() {
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function renderThread(")), c);
   vm.runInContext(source.slice(source.indexOf("function goHome("), source.indexOf('$("back-home").onclick')), c);
   vm.runInContext(source.slice(source.indexOf("function applyEvent("), source.indexOf("let listTimer")), c);
+  loadComposer(c);
   return c;
 }
 
@@ -317,7 +329,7 @@ test("a cold conversation becomes usable while events continue during every read
   assert.equal(c.state.detail.thread.turns[0].items[0].text, "Saved answer initial next");
 });
 
-test("first-send acknowledgement opens its cached conversation before full detail returns", async () => {
+test("first send opens its cached conversation before acceptance and full detail return", async () => {
   const c = recoverySetup(), api = c.api;
   const storage = new Map();
   c.DispatchUI = require("../plugins/agent-coord/scripts/agent_coord/web/dispatch.js");
@@ -327,20 +339,23 @@ test("first-send acknowledgement opens its cached conversation before full detai
   c.state.commandFeedback = new Map(); c.state.sending = new Set([draft]);
   c.$("message").value = "First message";
   c.gate = {id: "created", ...deferred()};
+  const acceptance = deferred();
   c.api = async (path, body) => {
     if (path === "sessions") return {session: {thread_id: "created"}, thread: {turns: []}};
-    if (path === "sessions/created/messages") return {turn: {id: "first-turn", status: "inProgress", items: []}};
+    if (path === "sessions/created/messages") return acceptance.promise;
     return api(path, body);
   };
   vm.runInContext(source.slice(source.indexOf("async function sendSessionDraft("), source.indexOf('$("new-session").onclick')), c);
   const sending = c.sendSessionDraft("First message", []);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(c.state.selected, "created");
-  assert.equal(c.state.detail.activeTurn, "first-turn");
+  assert.equal(c.state.detail.work_thread.thread_id, "created");
+  assert.equal(c.state.outgoing.list("created")[0].status, "sending");
   assert.equal(c.$("send").disabled, false);
   assert.equal(c.$("conversation-refresh").hidden, true);
   assert.equal(c.state.sending.size, 0);
   assert.equal(c.$("message").value, "");
+  acceptance.resolve({turn: {id: "first-turn", status: "inProgress", items: []}});
   c.gate.resolve(fixture("created")); await sending;
 });
 
@@ -506,7 +521,6 @@ test("cached approvals wait for authoritative refresh while the composer stays u
   c.replies.set("one", {...fixture("one"), requests: [{key: "old", method: "unknown", params: {}}]});
   await c.select("one"); c.goHome();
   vm.runInContext(source.slice(source.indexOf("function renderRequests("), source.indexOf("function applyEvent(")), c);
-  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   const {opening, gate} = await startRefresh(c, "one");
   c.renderRequests(); assert.equal(c.$("requests").childNodes.length, 0);

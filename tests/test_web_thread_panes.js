@@ -619,6 +619,7 @@ test("background in-process panes acknowledge only when focused and consume shar
   const pane = vm.runInContext("Object.create(ConversationPane.prototype)", c);
   const work = {thread_id: "a", checkpoint: {id: 2}, turn_completion: {id: 3}};
   Object.assign(pane, {id: "a", input: {value: "Draft A"},
+    images: {items: () => []}, attachButton: {}, imageList: {replaceChildren() {}},
     view: {detail: {work_thread: work},
       timelineScroll: {position: () => scroll, restore: value => { scroll = value; }}},
     workspace: {attachments: {items: () => [], drafts: new Map()}, drafts: new Map()},

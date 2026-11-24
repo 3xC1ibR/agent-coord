@@ -1,5 +1,5 @@
 'use strict';
-const {loadComposer} = require("./web_application_fixture.js");
+const {loadComposer, loadTimelineReplacement} = require("./web_application_fixture.js");
 const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm');
 const {ThreadMentionDraft,ThreadMentions}=require('../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.js');
 const one={thread_id:'one',title:'Chat UI',client:'codex',attention:'now',cwd:'/project/one'};
@@ -90,6 +90,7 @@ test('actual conversation navigation restores textarea before rendering mention 
  const ctx=vm.createContext({state,$,savedViews:null,navigation:null,notifications:null,history:{replaceState(){}},
   retainConversation(){},setNavigation(){},conversationEntry:()=>({detail:null}),
   renderStatus(){h.switch(state.selected);h.mentions.render();},renderTitle(){},renderList(){},node:()=>({}),refreshDetail:async()=>false});
+ loadTimelineReplacement(ctx);
  vm.runInContext(source.slice(source.indexOf('async function select('),source.indexOf('async function refreshDetail(')),ctx);
  await ctx.select('second');assert.deepEqual(h.mentions.snapshot('second',d.text),d.snapshot());
 });
@@ -124,10 +125,12 @@ test('schedule editor restores selected identities and sends its edited snapshot
 test('first message in a new conversation carries resolved mentions and clears the submitted draft',async()=>{
  const h=harness(),d=draft(),calls=[];h.switch('new-session');h.input.value=d.text;h.mentions.restore('new-session',d.text,d.refs);
  const state={selected:'new-session',newSessionDraft:{session:{client:'codex'}},drafts:new Map(),commandFeedback:new Map(),mentions:h.mentions};
- const ctx=vm.createContext({state,$:()=>h.input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>state.selected==='new-session',
+ const timeline={replaceChildren() {}};
+ const ctx=vm.createContext({state,$:id=>id==='timeline'?timeline:h.input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>state.selected==='new-session',
   api:async(path,body)=>{calls.push({path,body});return path==='sessions'?{session:{thread_id:'created'}}:{};},
-  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},refreshList:async()=>{},showError(){}});
- vm.runInContext(source.slice(source.indexOf('function conversationEntry('),source.indexOf('function retainConversation(')),ctx);
+  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},
+  refreshDetail:async()=>{},refreshList:async()=>{},renderStatus(){},showError(){}});
+ loadComposer(ctx);
  vm.runInContext(source.slice(source.indexOf('async function sendSessionDraft('),source.indexOf('$("new-session").onclick',source.indexOf('async function sendSessionDraft('))),ctx);
  ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
  const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};

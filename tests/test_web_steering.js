@@ -205,7 +205,9 @@ test("accepted sends release the composer before detail and inventory refreshes 
   c.renderStatus();
   const sending = c.sendMessage();
   assert.equal(c.$("send").disabled, false);
-  await c.sendMessage(); assert.equal(posts, 1);
+  await c.sendMessage();
+  await new Promise(setImmediate);
+  assert.equal(posts, 1);
   c.$("message").value = "Next draft";
   c.state.drafts.set("one", "Next draft");
   accept({turnId: "turn-one"}); await sending;

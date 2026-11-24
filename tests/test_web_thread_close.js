@@ -9,7 +9,8 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const elements = new Map();
-  const c = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
+  const c = {listRequest: 0, document: {hidden: false}, clearTimeout,
+    $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
     state: {selected: "one", detail: {work_thread: {browser_session: true, attention: "now"}}, sessions: [{thread_id: "one"}], closing: new Set()},
     threadGrouping: grouping, renderSessionSettings() {}, refreshDetail: async () => {}, refreshList: async () => {},
     renderList() { c.rendered = c.state.sessions.filter(thread => !c.state.pendingCloses?.has(thread.thread_id)); },

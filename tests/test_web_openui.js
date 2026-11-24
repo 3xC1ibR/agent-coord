@@ -87,6 +87,7 @@ test("UI responses preserve action and submitted values as a literal message", (
 
 class Element {
   constructor(name) { this.name = name; this.dataset = {}; this.childNodes = []; this.parentNode = null; this.moves = 0; }
+  contains(other) { return this === other || this.childNodes.some(child => child.contains(other)); }
   get firstChild() { return this.childNodes[0] || null; }
   get nextSibling() { return this.parentNode?.childNodes[this.parentNode.childNodes.indexOf(this) + 1] || null; }
   remove() {

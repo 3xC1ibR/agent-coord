@@ -21,10 +21,17 @@ function loadWebModule(context, name) {
   vm.runInContext(readFileSync(filename, "utf8"), context, {filename});
 }
 
+function loadTimelineReplacement(context) {
+  if (!context.replaceTimelineContent) {
+    vm.runInContext(range(application, "function replaceTimelineContent(", "function retainConversation("), context);
+  }
+}
+
 function loadComposer(context) {
   loadWebModule(context, "outgoing-messages.js");
   context.crypto ??= {randomUUID};
   context.clearTimeout ??= clearTimeout;
+  context.document ??= require("./web_dom_stub.js").makeDocument();
   if (!context.showError) {
     context.fixtureErrors = [];
     context.showError = error => context.fixtureErrors.push(error);
@@ -32,6 +39,7 @@ function loadComposer(context) {
   if (!context.conversationEntry) {
     vm.runInContext(range(application, "function conversationEntry(", "function retainConversation("), context);
   }
+  loadTimelineReplacement(context);
   context.state.submissionQueue = vm.runInContext("new ConversationSubmissionQueue()", context);
   if (!context.state.outgoing) {
     const outgoing = range(application, "class OutgoingMessages {", "class UpdateSubmissionChanges");
@@ -74,4 +82,4 @@ function threadListFixture(callbacks = {}) {
   };
 }
 
-module.exports = {loadComposer, loadWebModule, range, threadListFixture};
+module.exports = {loadComposer, loadTimelineReplacement, loadWebModule, range, threadListFixture};

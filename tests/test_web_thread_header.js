@@ -9,6 +9,7 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 function setup() {
   const elements = new Map();
   const c = {
+    document: {hidden: false}, setTimeout: () => Symbol("elapsed timer"), clearTimeout() {},
     $: id => {
       if (!elements.has(id)) elements.set(id, {
         value: "", focus() { c.focused = id; }, select() { c.selectedText = id; },
