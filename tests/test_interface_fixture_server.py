@@ -18,9 +18,9 @@ FIXTURE = ROOT / "tests/interface_fixture_server.py"
 
 
 class InterfaceFixtureServerTests(unittest.TestCase):
-    def start_fixture(self, state):
+    def start_fixture(self, state, *options):
         process = subprocess.Popen(
-            [sys.executable, "-B", "-W", "error::ResourceWarning", str(FIXTURE), "--state", state],
+            [sys.executable, "-B", "-W", "error::ResourceWarning", str(FIXTURE), "--state", state, *options],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         self.addCleanup(self.stop_fixture, process)
@@ -86,6 +86,13 @@ class InterfaceFixtureServerTests(unittest.TestCase):
             receipt = json.load(response)["receipts"][0]
         self.assertEqual(receipt["event_id"], event["event_id"])
         self.assertGreater(receipt["sequence"], 0)
+
+    def test_cacheable_fixture_limits_the_policy_to_its_html_shell(self):
+        _, fixture = self.start_fixture("default", "--cacheable-shell")
+        for path, expected in (("/", "private, no-cache"), ("/api/browser/config", "no-store"),
+                               ("/fixture/document", "no-store")):
+            with urlopen(fixture["base"] + path, timeout=5) as response:
+                self.assertEqual(response.headers["Cache-Control"], expected)
 
 
 if __name__ == "__main__":
