@@ -3,6 +3,7 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const {loadWebModule} = require("./web_application_fixture.js");
 const root = "../plugins/agent-coord/scripts/agent_coord/web/";
 const settingsSource = fs.readFileSync(require.resolve(root + "settings.js"), "utf8");
 const appSource = fs.readFileSync(require.resolve(root + "app.js"), "utf8");
@@ -167,10 +168,18 @@ test("browser Settings preserves the workspace and unloads previews when its dia
   Object.defineProperty(frame, "src", {set(value) { this.attributes.src = value; }});
   dialog.showModal = () => { dialog.open = true; };
   dialog.close = () => { dialog.open = false; dialog.dispatchEvent(new Event("close")); };
-  const context = {window: env, $, location: {origin: "https://ribbon.test"},
-    setNavigation: open => navigation.push(open), showError: assert.fail};
-  vm.runInNewContext(appSource.slice(appSource.indexOf('$("open-settings").onclick'), appSource.indexOf('const mobileNavigation')), context);
+  let mounts = 0;
+  const template = {content: {firstElementChild: frame}, replaceWith(node) { assert.equal(node, frame); mounts++; }};
+  const document = {getElementById(id) {
+    if (id === "settings-frame") return mounts ? frame : null;
+    return id === "settings-frame-template" && !mounts ? template : null;
+  }};
+  const context = vm.createContext({window: env, $, document, crypto: {randomUUID() {}}, location: {origin: "https://ribbon.test"},
+    setNavigation: open => navigation.push(open), showError: assert.fail});
+  loadWebModule(context, "browser-compatibility.js");
+  vm.runInContext(appSource.slice(appSource.indexOf('$("open-settings").onclick'), appSource.indexOf('const mobileNavigation')), context);
   const open = () => $("open-settings").onclick({preventDefault() {}});
+  assert.equal(mounts, 0);
   open();
   assert.equal(dialog.open, true);
   assert.equal(frame.getAttribute("src"), "/settings?embedded=1");
@@ -187,6 +196,7 @@ test("browser Settings preserves the workspace and unloads previews when its dia
   assert.equal(env.focused, "menu-toggle");
   open();
   assert.equal(frame.getAttribute("src"), "/settings?embedded=1", "reopening loads fresh preference state");
+  assert.equal(mounts, 1);
   dialog.close();
   let nativeOpened = false;
   env.agentCoordDesktop = {openSettings: async () => { nativeOpened = true; }};
