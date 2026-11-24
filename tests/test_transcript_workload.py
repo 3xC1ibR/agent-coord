@@ -1,11 +1,12 @@
 """Content-free workload reports must reject missing progress and actual delta writes."""
 import copy
+import logging
 import sys
 from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from measure_transcript_workload import gates, measure
+from measure_transcript_workload import DownstreamErrors, gates, measure
 
 
 class TranscriptWorkloadTests(unittest.TestCase):
@@ -35,9 +36,36 @@ class TranscriptWorkloadTests(unittest.TestCase):
                 report[field] = value
                 self.assertTrue(gates(report))
 
+    def test_downstream_failure_counts_are_content_free_and_gated(self):
+        observer = DownstreamErrors()
+        record = logging.LogRecord('agent_coord.transcript_migration', logging.ERROR, '', 0,
+                                   'private transcript body', (), (OSError, OSError('private path'), None))
+        observer.emit(record)
+        snapshot = observer.snapshot()
+        self.assertEqual(snapshot['error_count'], 1)
+        self.assertEqual(snapshot['errors'][0]['type'], 'OSError')
+        self.assertNotIn('private', repr(snapshot))
+        report = self.report()
+        report['http_error_count'] = 0
+        observer.apply(report)
+        self.assertEqual(report['error_count'], 1)
+        self.assertIn('downstream service errors', report['budget_failures'])
+        for key, value in [('persistence', {'required_failures': 1}),
+                           ('persistence', {'optional_failures': 1}),
+                           ('migration', {'error_present': True}),
+                           ('setup_migration_complete', False)]:
+            with self.subTest(key=key):
+                report = self.report()
+                report[key] = value
+                self.assertTrue(gates(report))
+
     def test_small_real_fixture_progress_and_receipts(self):
         report = measure(seconds=1, threads=2, turns=3, rounds=2)
         self.assertEqual(report['error_count'], 0, report['errors'])
+        self.assertTrue(report['setup_migration_complete'])
+        self.assertEqual(report['downstream']['error_count'], 0)
+        self.assertEqual(report['persistence']['required_failures'], 0)
+        self.assertEqual(report['persistence']['optional_failures'], 0)
         self.assertEqual(report['seeded'], {'threads': 2, 'turns': 6})
         if report['search']['available']:
             self.assertTrue(report['search']['database_isolated'])

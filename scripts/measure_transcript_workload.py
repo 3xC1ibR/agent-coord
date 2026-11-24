@@ -7,6 +7,7 @@ from contextlib import closing, ExitStack
 import hashlib
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import platform
@@ -56,6 +57,31 @@ class RetainedClient:
         return {'outcome': 'written', 'result': {}}
 
 
+class DownstreamErrors(logging.Handler):
+    """Count service failures without retaining message text, paths or content."""
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.phase = 'setup'
+        self.records = {}
+
+    def emit(self, record):
+        kind = record.exc_info[0].__name__ if record.exc_info and record.exc_info[0] else record.levelname
+        key = (self.phase, record.name, kind)
+        with self.lock:
+            self.records[key] = self.records.get(key, 0) + 1
+
+    def snapshot(self):
+        with self.lock:
+            return {'error_count': sum(self.records.values()), 'errors': [
+                {'phase': phase, 'service': service, 'type': kind, 'count': count}
+                for (phase, service, kind), count in self.records.items()]}
+
+    def apply(self, report):
+        report['downstream'] = self.snapshot()
+        report['error_count'] = report['http_error_count'] + report['downstream']['error_count']
+        report['budget_failures'] = gates(report)
+
+
 def turn(sequence):
     return {'id': f'turn-{sequence}', 'status': 'completed', 'items': [
         {'id': f'user-{sequence}', 'type': 'userMessage', 'content': [{'type': 'text', 'text': 'generated request'}]},
@@ -69,6 +95,12 @@ def gates(report):
     if report['mixed_stream_deltas'] < 10: failures.append('mixed streaming made no progress')
     if min(report['open_paths'].values()) < 1: failures.append('managed/external opens not covered')
     if report['error_count']: failures.append('workload errors')
+    if report.get('setup_migration_complete') is False: failures.append('setup migration incomplete')
+    if report.get('downstream', {}).get('error_count'): failures.append('downstream service errors')
+    if report.get('persistence', {}).get('required_failures') or report.get('persistence', {}).get('optional_failures'):
+        failures.append('downstream persistence failure')
+    if report.get('migration', {}).get('error_present'): failures.append('downstream migration failure')
+    if report.get('search', {}).get('pending_retries'): failures.append('downstream search retry pending')
     expected = report['workload']
     if report['seeded'] != {'threads': expected['threads'], 'turns': expected['threads'] * expected['turns_per_thread']}:
         failures.append('seeded transcript inventory mismatch')
@@ -98,12 +130,28 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
     setup_start = time.monotonic()
     errors = []
     with tempfile.TemporaryDirectory(prefix='transcript_workload_') as directory, ExitStack() as cleanup:
+        downstream = DownstreamErrors()
+        report = None
+        for name in ('agent_coord.transcript_migration', 'agent_coord.search_publication', 'agent_coord.browser_persistence'):
+            logger = logging.getLogger(name)
+            logger.addHandler(downstream)
+            cleanup.callback(logger.removeHandler, downstream)
+        def finish_diagnostics():
+            if report is not None:
+                report['admission_timeouts'] = store.database_metrics()['admission_timeouts'] - initial_timeouts
+                status = sessions.persistence.status()
+                report['persistence'] = {'required_failures': len(status['failures']),
+                    'optional_failures': status['optional_failure_count'], 'pending': status['pending'], 'retries': status['retries']}
+                report['search']['pending_retries'] = len(publisher.retry)
+                downstream.apply(report)
+        cleanup.callback(finish_diagnostics)
         root = Path(directory)
         store = CoordinationStore(root / 'state.sqlite3')
         identity = str(store.database_path.resolve())
         desktop_runtime._OWNED_DATABASES.add(identity)
         resources = {}
         def close_resources():
+            downstream.phase = 'cleanup'
             with ExitStack() as closing_stack:
                 closing_stack.callback(desktop_runtime._OWNED_DATABASES.discard, identity)
                 for name in ('search', 'journal', 'sessions'):
@@ -151,6 +199,12 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
         for thread in streams:
             sessions.send(thread, {'message': 'generated stream'})
         sessions.persistence.flush()
+        # Convert the controlled runtime threads during fixture preparation too.
+        # Otherwise the normal maintenance worker can migrate their legacy
+        # start records inside the supposedly migration-free timed interval.
+        for thread in (composer, *streams):
+            history = sessions.histories.get(thread) or {'id': thread, 'cwd': directory, 'turns': []}
+            transcripts.save(thread, history, activate=True)
         def baseline_records():
             with store.reading(), store._connection() as db:
                 identities = [row[0] for row in db.execute('SELECT thread_id FROM work_threads ORDER BY thread_id')]
@@ -197,7 +251,13 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             emit('item/started', thread, item={'id': 'agent', 'type': 'agentMessage', 'text': ''})
         projection.project_batch(journal.events(0))
         sessions.persistence.flush()
+        migration_worker = getattr(sessions, 'transcript_migration', None)
+        maintenance_deadline = time.monotonic() + 30
+        while migration_worker and migration_worker.phase != 'active' and not migration_worker.error and time.monotonic() < maintenance_deadline:
+            time.sleep(.02)
+        setup_migration_complete = bool(migration_worker and migration_worker.phase == 'active' and not migration_worker.error)
         setup_seconds = time.monotonic() - setup_start
+        downstream.phase = 'isolated_deltas'
         # A separate delta-only interval makes boundary/foreground writes distinguishable.
         from contextlib import contextmanager
         write_statements = {'state': 0, 'transport': 0}
@@ -325,6 +385,7 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                     except Exception as error:
                         errors.append({'operation': 'mixed_stream', 'type': type(error).__name__})
                     stop.wait(.125)
+        downstream.phase = 'mixed'
         start = time.monotonic()
         try:
             with ThreadPoolExecutor(max_workers=4) as pool:
@@ -333,6 +394,10 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                 stop.set()
                 for future in futures: future.result(timeout=60)
             elapsed = time.monotonic() - start
+            downstream.phase = 'drain'
+            sessions.persistence.flush()
+            persistence = sessions.persistence.status()
+            migration = getattr(sessions, 'transcript_migration', None)
             with store.reading(), store._connection() as db:
                 durable = sum(db.execute('SELECT count(*) FROM browser_submission_receipts WHERE thread_id=? AND request_id=? AND state=?', (composer, key, 'completed')).fetchone()[0] for key in receipts)
             # Drain source outbox through its installed worker, never direct enqueue.
@@ -347,12 +412,15 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             new_publication_applied = 'new-publication' in applied
             metrics = store.database_metrics()
             report = {'schema_version': 1, 'workload': {'threads': threads, 'turns_per_thread': turns, 'streaming_turns': 10, 'delta_rounds': rounds, 'seconds': seconds},
-                'seeded': seeded, 'storage_settings': storage_settings, 'setup_seconds': round(setup_seconds, 3), 'elapsed_seconds': round(elapsed, 3),
+                'seeded': seeded, 'storage_settings': storage_settings, 'setup_migration_complete': setup_migration_complete, 'setup_seconds': round(setup_seconds, 3), 'elapsed_seconds': round(elapsed, 3),
                 'open': {**_distribution(samples['open']), 'count': len(samples['open'])}, 'send_accept': {**_distribution(samples['send_accept']), 'count': len(samples['send_accept'])},
                 'request_operations': metrics['requests'], 'writer_hold': metrics['writer_hold'], 'writer_wait': metrics['writer_wait'], 'admission_timeouts': metrics['admission_timeouts'] - initial_timeouts,
                 'durable_receipts': durable, 'finalized_writes': counts['finalized'],
-                'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'new_transcript_published': new_publication_applied, 'durable_coverage': search.coverage() if search else None},
-                'streaming': stream_result, 'mixed_stream_deltas': mixed_deltas, 'open_paths': open_paths, 'projection_lock_hold': _distribution(projection.stream_metrics['lock_holds_ms']), 'error_count': len(errors), 'errors': errors[:20],
+                'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'pending_retries': len(publisher.retry), 'new_transcript_published': new_publication_applied, 'durable_coverage': search.coverage() if search else None},
+                'downstream': downstream.snapshot(),
+                'persistence': {'required_failures': len(persistence['failures']), 'optional_failures': persistence['optional_failure_count'], 'pending': persistence['pending'], 'retries': persistence['retries']},
+                'migration': {'phase': migration.phase if migration else 'unavailable', 'error_present': bool(migration and migration.error)},
+                'streaming': stream_result, 'mixed_stream_deltas': mixed_deltas, 'open_paths': open_paths, 'projection_lock_hold': _distribution(projection.stream_metrics['lock_holds_ms']), 'http_error_count': len(errors), 'error_count': len(errors), 'error_count_kind': 'HTTP failures plus captured downstream service error logs; persistence and pending retries reported separately', 'errors': errors[:20],
                 'throughput_per_second': {kind: round(len(values) / elapsed, 2) for kind, values in samples.items()},
                 'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': revision, 'harness_sha256': harness_sha256},
                 'coverage': {'http_recent_open': True, 'durable_composer_receipt': True, 'retained_transport_journal': True, 'live_provider_process': False,
