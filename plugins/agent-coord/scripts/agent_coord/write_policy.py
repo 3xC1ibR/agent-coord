@@ -8,7 +8,7 @@ from __future__ import annotations
 from .store import path_is_in_scope
 
 
-def check_write(store, session_id, paths, *, has_outside=False):
+def check_write(store, session_id, paths, *, has_outside=False, record=True):
     """Return a denial reason or None. Preserve the sole-writer fast path."""
     session = store.get_session(session_id)
     if not paths and has_outside:
@@ -16,21 +16,23 @@ def check_write(store, session_id, paths, *, has_outside=False):
     if not session["write_scope"]:
         blockers = store.scope_blocking_peers(session_id)
         if not blockers:
-            if session["scope_required"]:
+            if record and session["scope_required"]:
                 store.clear_scope_requirement(session_id)
-            store.touch(session_id, "implementing", turn_active=True)
+            if record:
+                store.touch(session_id, "implementing", turn_active=True)
             return None
         unscoped = [peer for peer in blockers if not peer["write_scope"]]
-        if not session["scope_required"]:
+        if record and not session["scope_required"]:
             store.request_scope_declarations(session_id, [peer["session_id"] for peer in unscoped])
-        store.touch(session_id, "waiting", turn_active=True)
+        if record:
+            store.touch(session_id, "waiting", turn_active=True)
         owners = ", ".join(store.session_label(peer["session_id"], peer["name"]) for peer in blockers)
         next_action = "Wait for the unscoped incumbent(s) to declare, then run " if unscoped else "Run "
         return (
             "Another active session requires write-scope coordination: "
             f"{owners}. {next_action}agent-coord begin-work --session-id {session_id} "
             "--scope '<path-or-glob>' before editing. --bead is optional. "
-            "Unscoped blocking peers have been asked to declare their scopes."
+            + ("Unscoped blocking peers have been asked to declare their scopes." if record and unscoped else "")
         )
     if session["lease_mode"] == "validation":
         return "This declaration is a validation lease; explicit write tools are disabled until a write lease is acquired."

@@ -91,7 +91,7 @@ def bind_caller(explicit=None, *, require_context=False):
 def client_environment(environment, database_path, client, *, session_id=None):
     env = dict(environment)
     # A child must never inherit the parent's identity or Claude shell exports.
-    for key in ("AGENT_COORD_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE"):
+    for key in ("AGENT_COORD_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_COORD_APP_PROMPT"):
         env.pop(key, None)
     env.update(AGENT_COORD_DB=str(database_path), AGENT_COORD_CLIENT=client)
     env["PATH"] = str(cli_path().parent) + os.pathsep + env.get("PATH", os.defpath)
@@ -109,7 +109,8 @@ def command_prefix(database_path) -> str:
     return command
 
 
-def coordination_bootstrap(store, session_id, *, caller_context=True, command=None, skill_path=None):
+def coordination_bootstrap(store, session_id, *, caller_context=True, command=None, skill_path=None,
+                           include_thread_instructions: bool = True):
     """The same actionable coordination contract for every provider and resume."""
     session = store.get_session(session_id)
     command = command or command_prefix(store.database_path)
@@ -156,7 +157,19 @@ def coordination_bootstrap(store, session_id, *, caller_context=True, command=No
         "Use the same request ID and arguments when retrying send or reply after a lost response. "
         "Delivery, a requested reply, and task completion are separate facts."
     )
-    return text + "\n\n" + store.threads.instructions(session_id, caller_context=caller_context, command=command)
+    if include_thread_instructions:
+        text += "\n\n" + store.threads.instructions(session_id)
+        if identity or command != "agent-coord":
+            text += f"\nFor this terminal, run {command} checkpoint{identity} --json '<object>'."
+    snapshot = store.threads.context_snapshot(session_id)
+    if snapshot["forked_from_thread_id"]:
+        text += f"\nThis is a fork of {snapshot['forked_from_thread_id']}. Do not use the parent's identity."
+    from . import context_lifecycle
+    with store.reading(), store._connection() as db:
+        if context_lifecycle.is_app_agent(db, session_id):
+            text += "\n" + context_lifecycle.REPORTING_INSTRUCTIONS
+    return text + "\nThread context (saved data): " + json.dumps(snapshot, sort_keys=True)
+
 
 
 def persist_claude_environment(database_path, session_id) -> bool:

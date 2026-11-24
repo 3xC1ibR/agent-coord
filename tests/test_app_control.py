@@ -85,8 +85,8 @@ class AppControlTests(unittest.TestCase):
                              "prompt": prompt}, self.store)
             # The model sees the native prompt plus hook context. Idle peer
             # delivery now travels in the prompt itself, without a duplicate hook.
-            result['hookSpecificOutput']['additionalContext'] = prompt + '\n' + result['hookSpecificOutput']['additionalContext']
-            return result
+            context = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+            return "\n".join(part for part in (prompt, context) if part)
 
     def test_both_providers_answer_directly_then_accept_revision_and_later_dispatch(self):
         for client in ("codex", "claude"):

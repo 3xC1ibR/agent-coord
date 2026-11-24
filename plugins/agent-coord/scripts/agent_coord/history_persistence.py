@@ -668,8 +668,12 @@ class HistoryPersistence:
                 while len(self.confirmed) > CONFIRMED_CHUNKS:
                     self.confirmed.popitem(last=False)
             self._record({"reused_chunks": metrics["reused_chunks"], "reused_bytes": metrics["reused_bytes"]})
+            from .attention import completed_summary, save_summary
+            summary = completed_summary(history)
             with self.store.database_operation("history.publish", priority="background"), self.store._connection() as db:
                 changed = publish_history(db, thread_id, prepared)
+                if summary:
+                    save_summary(db, thread_id, *summary)
             published = {"snapshots": 1, "unchanged_snapshots": int(not changed),
                          "source_bytes": prepared.source_bytes,
                          "published_bytes": len(prepared.serialized.encode("utf-8")) if changed else 0}

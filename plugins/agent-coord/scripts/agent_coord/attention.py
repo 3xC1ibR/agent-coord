@@ -203,7 +203,7 @@ class AttentionStore:
                        (*key, attempts, token, now + LEASE_SECONDS, now))
         return token
 
-    def save(self, thread, token, result=None, error=None):
+    def save(self, thread, token, result=None, error=None, summary=None):
         now = self.store.clock()
         key = self._key(thread)
         with self.store._connection() as db:
@@ -211,6 +211,8 @@ class AttentionStore:
                              (*key, token)).fetchone()
             if not row:
                 return False  # An expired worker cannot replace a newer result.
+            if summary and thread.get("turn_key"):
+                save_summary(db, thread["thread_id"], thread["turn_key"], summary)
             status = ("classified" if result["confidence"] >= MIN_CONFIDENCE and not error else "uncertain") if result else "unavailable"
             db.execute("""UPDATE response_classification_cache SET status = ?, choice = ?, confidence = ?,
                 probabilities_json = ?, error = ?, lease_token = NULL, lease_until = 0, retry_at = ?, updated_at = ?
@@ -330,6 +332,30 @@ def terminal_messages(thread):
     return messages[-6:] if current_user and current_final and messages[-1]["role"] == "assistant" else None
 
 
+def completed_summary(history):
+    """Bound the final visible reply before entering the history publication transaction."""
+    turns = history.get("turns") if isinstance(history, dict) else None
+    if not isinstance(turns, list) or not turns or not isinstance(turns[-1], dict) or turns[-1].get("status") != "completed":
+        return None
+    turn = turns[-1]
+    if not turn.get("id"):
+        return None
+    for item in reversed(turn.get("items") or []):
+        if isinstance(item, dict) and item.get("type") == "agentMessage" and item.get("phase") in {None, "final_answer"}:
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                return turn["id"], " ".join(text[:1000].split())[:480]
+    return None
+
+
+def save_summary(db, thread_id, turn_id, summary):
+    # Late saves must not replace the result of a newer turn.
+    db.execute("""UPDATE work_threads SET summary_turn_id=?, completion_summary=?
+                  WHERE thread_id=? AND (turn_id=? OR turn_key=?)
+                    AND (summary_turn_id IS NOT ? OR completion_summary IS NOT ?)""",
+               (turn_id, summary, thread_id, turn_id, turn_id, turn_id, summary))
+
+
 def context_for(store, thread):
     try:
         history = read_history(store, thread["thread_id"])
@@ -392,7 +418,9 @@ class AttentionClassifier:
                 state = context_for(self.store, thread)
                 result = self.classify_fn(state, self.config)
                 incomplete = result["choice"] in {"update", "findings", "done"} and any(m["truncated"] for m in state["recent_messages"][-2:])
-                self.store.threads.attention.save(thread, token, result=result, error="context_truncated" if incomplete else None)
+                self.store.threads.attention.save(thread, token, result=result,
+                    summary=" ".join(state["recent_messages"][-1]["text"][:1000].split())[:480],
+                    error="context_truncated" if incomplete else None)
             except ClassificationError as exc:
                 self.store.threads.attention.save(thread, token, error=str(exc))
             self.sessions._publish("thread/classified", {"threadId": thread["thread_id"]})

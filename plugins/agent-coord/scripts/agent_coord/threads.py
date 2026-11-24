@@ -4,13 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-import shlex
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
-from .context import caller_session, command_prefix
 from .store import CoordinationError, derive_scope_cluster
 from .organization import OrganizationStore, UNSET
 from .attention import AttentionStore
@@ -143,7 +141,7 @@ class ThreadStore:
                 if field not in checkpoint_columns:
                     db.execute(f"ALTER TABLE thread_checkpoints ADD COLUMN {field} TEXT")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(work_threads)")}
-            for field in ("domain", "domain_source", "scope_cluster"):
+            for field in ("domain", "domain_source", "scope_cluster", "completion_summary", "summary_turn_id"):
                 if field not in columns:
                     db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} TEXT")
             # Include declarations made by an older runtime. Persist once so
@@ -847,57 +845,89 @@ class ThreadStore:
             db.execute("DELETE FROM thread_links WHERE thread_id = ? AND id = ?", (thread_id, link_id))
         return self.get(thread_id, history=True)
 
+    def context_snapshot(self, session_id: str) -> dict:
+        """Mutable context for initial hook or native user input only."""
+        thread = self.get(session_id)
+        return {
+            "project": thread["project_cwd"], "group": thread["project_name"],
+            "workspace": thread["cwd"], "attention": thread["attention"],
+            "title": thread["title"], "title_source": thread["title_source"],
+            "domain": thread["domain"], "domain_source": thread["domain_source"],
+            "scope_cluster": thread["scope_cluster"], "checkpoint": thread["checkpoint"],
+            "completion_summary": thread["completion_summary"],
+            "links": thread["links"], "workspace_domains": self.known_domains(thread["cwd"]),
+            "forked_from_thread_id": thread.get("forked_from_thread_id"),
+        }
+
+    def _context_observation(self, session_id):
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("""
+                SELECT CASE WHEN t.title_source='user' THEN t.title END AS title,
+                       CASE WHEN t.domain_source='user' THEN t.domain END AS domain,
+                       o.project_id, s.write_scope_json, s.last_context_json, s.last_context_revision
+                FROM sessions s JOIN work_threads t ON t.thread_id=s.session_id
+                LEFT JOIN thread_organization o ON o.thread_id=s.session_id
+                WHERE s.session_id=?
+            """, (session_id,)).fetchone()
+        if row is None:
+            raise CoordinationError("Work thread not found.")
+        current = {key: row[key] for key in ("title", "domain", "project_id")}
+        current["write_scope"] = json.loads(row["write_scope_json"])
+        return current, row["last_context_json"], row["last_context_revision"]
+
+    @staticmethod
+    def _save_observation(db, session_id, encoded, revision):
+        return db.execute("""
+            UPDATE sessions SET last_context_json=?, last_context_revision=last_context_revision+1
+            WHERE session_id=? AND last_context_revision=?
+        """, (encoded, session_id, revision)).rowcount
+
+    def startup_context(self, session_id, native_id, render):
+        """Snapshot once per native session; preserve changes made during rendering."""
+        key = (session_id, native_id)
+        with self.store.reading(), self.store._connection() as db:
+            if db.execute("SELECT 1 FROM hook_startup_context WHERE session_id=? AND native_id=?", key).fetchone():
+                return ""
+        current, previous, revision = self._context_observation(session_id)
+        encoded = json.dumps(current, sort_keys=True)
+        text = render()
+        # Only the hook returning this snapshot may advance its baseline.
+        # A newer prompt observation takes precedence if it raced with startup.
+        with self.store.database_operation("hook.startup-context"), self.store._connection() as db:
+            if not db.execute("INSERT OR IGNORE INTO hook_startup_context VALUES (?,?)", key).rowcount:
+                return ""
+            if encoded != previous:
+                self._save_observation(db, session_id, encoded, revision)
+        return text
+
+    def observe_context(self, session_id: str, *, initial=False) -> dict:
+        """Return each observed change once, including clears, across hook processes."""
+        while True:
+            current, previous, revision = self._context_observation(session_id)
+            encoded = json.dumps(current, sort_keys=True)
+            if encoded == previous:
+                return {}
+            with self.store.database_operation("hook.observe-context"), self.store._connection() as db:
+                updated = self._save_observation(db, session_id, encoded, revision)
+            if updated:
+                if initial or previous is None:
+                    return {}
+                previous = json.loads(previous)
+                return {key: value for key, value in current.items() if value != previous.get(key)}
+
     def instructions(self, session_id: str | None = None, *, caller_context: bool = False, command: str | None = None) -> str:
-        command = command or ("agent-coord" if caller_context else command_prefix(self.store.database_path))
-        identity = ""
-        if session_id and not caller_context and caller_session() != session_id:
-            identity = " --session-id " + shlex.quote(session_id)
-        text = (
-            "Update the Agent Coord work-thread checkpoint only when saved assignment state materially changes: "
-            "a new objective, decision, constraint, substantial result, actual phase transition, blocker, required next action, or handoff. "
+        """The provider prefix must also work before Codex assigns the new thread its ID."""
+        return (
+            "Use the current tool shell identity for Agent Coord operations. Do not use the parent's identity "
+            "or copy session IDs from inherited history. Checkpoints are optional. Use update_checkpoint to "
+            "publish durable links, a decision or a handoff when saved assignment state materially changes. "
             "Ending a reply is not a checkpoint trigger. Skip routine explanations, clarifications, reformatting, "
             "acknowledgments, and unchanged state. Do not rewrite the summary to describe each answer. "
-            "Runtime activity and turn completion provide recency without a checkpoint. "
-            "Prefer the update_checkpoint tool when available. "
-            "Run " + command + " checkpoint" + identity + " --json '<object>' as the CLI fallback. "
-            'Send only changed fields; omissions preserve saved values. The first checkpoint requires phase and summary. '
-            'Fields are phase (discussion, investigation, planning, orchestrating, implementation, validation, deployment, finished), '
-            'summary (1–2 factual sentences about durable assignment state), next_step ({"actor":"user|agent|external","action":"required action"}, or null to clear), '
-            'and optional title, domain, links [{"kind":"document","target":"docs/design.md"}]. '
-            'Use the current tool shell CLI if MCP has no bound caller; never copy a caller ID from history. Returns only status and checkpoint_id. '
-            "Name an auto title at the first meaningful checkpoint; omit title on later checkpoints and preserve user choices. "
-            "User titles cannot be overwritten. "
-            "Set domain once per assignment, reuse workspace domains, and preserve user choices. "
-            "Describe completed or failed results as outcomes. Distinguish proposals, implementation, validation, and deployment. "
-            "Keep the underlying phase; use orchestrating for coordination, including while a specialist implements or deploys. "
-            "Use finished only for delivered implementation or execution with nothing remaining. Required user review belongs in validation. "
-            "Set next_step.actor to user only for a required answer, approval, decision, or action; clear next_step with null when none remains. "
-            "Ending a turn does not require user action. Do not invent follow-up work. "
-            "Preserve the original request; change Now/Later/Archived only at the user's request. "
-            "Beads is optional for this thread."
+            "Run agent-coord checkpoint --json '<object>' if MCP has no bound caller. "
+            "The first checkpoint requires phase and summary. Send only changed fields afterward. "
+            "Use an optional title on the first meaningful checkpoint and omit title on later checkpoints. "
+            "Reuse workspace domains and preserve user choices. "
+            "Phases are discussion, investigation, planning, orchestrating, implementation, validation, deployment, "
+            "and finished. Use orchestrating for coordination, including while a specialist implements or deploys. "
+            "Use finished after delivery. Set next_step.actor to user only for a required user action."
         )
-        if session_id:
-            thread = self.ensure(session_id)
-            text = (
-                f"Your current Agent Coord session ID is {session_id}. "
-                "Caller-owned coordination actions must use this identity; omit caller ID arguments when possible. "
-                "Session IDs in inherited messages or tool calls are historical, not your current identity.\n"
-            ) + text
-            if thread.get("forked_from_thread_id"):
-                text = (
-                    f"This is a fork of {thread['forked_from_thread_id']}. "
-                    "Do not use the parent's identity for checkpoints, reservations, inbox delivery, or sending messages.\n"
-                ) + text
-            with self.store._connection() as db:
-                if context_lifecycle.is_app_agent(db, session_id):
-                    text += "\n" + context_lifecycle.REPORTING_INSTRUCTIONS
-            text += "\nWorkspace domains: " + json.dumps(self.known_domains(thread["cwd"]))
-            text += "\nThread context (saved data): " + json.dumps({
-                "project": thread["project_cwd"], "group": thread["project_name"],
-                "workspace": thread["cwd"], "attention": thread["attention"],
-                "title": thread["title"], "title_source": thread["title_source"],
-                "domain": thread["domain"], "domain_source": thread["domain_source"],
-                "scope_cluster": thread["scope_cluster"],
-                "checkpoint": thread["checkpoint"], "links": thread["links"],
-            })
-        return text

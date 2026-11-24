@@ -154,6 +154,19 @@ class JevAttentionTests(unittest.TestCase):
                  json.dumps(decision(choice)["probabilities"]), "legacy" if status == "pending" else None,
                  self.now + 45 if status == "pending" else 0, self.now))
 
+    def test_post_turn_summary_does_not_require_a_checkpoint_or_remote_classifier(self):
+        with patch.object(self.store.threads, "checkpoint"):
+            self.finish()
+        item = self.thread()
+        self.assertIsNone(item["checkpoint"])
+        self.assertEqual(item["completion_summary"], "The backfill finished. All records are present.")
+        self.assertEqual(item["title"], "Check the backfill status.")
+        self.assertEqual(item["summary_turn_id"], "one")
+        self.store.threads.update("terminal", title="Chosen by user")
+        self.worker.scan()
+        self.assertEqual(self.thread()["attention_reason"], "update")
+        self.assertEqual(self.thread()["title"], "Chosen by user")
+
     def test_information_stays_in_attention_after_reading(self):
         self.finish()
         self.worker.scan()

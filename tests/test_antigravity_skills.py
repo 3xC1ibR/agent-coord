@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -35,7 +34,15 @@ class AntigravitySkillTests(unittest.TestCase):
         return prepare_skills(self.store, self.workspace, home=self.home, bundled=self.bundle)
 
     def inventory(self, context):
-        return {item["name"]: item for item in json.loads(context.instructions.split("\n", 1)[1])}
+        result = {}
+        for line in context.instructions.splitlines()[1:]:
+            if line.startswith("Directory: "):
+                directory = Path(line.removeprefix("Directory: "))
+            else:
+                name, entry = line.removeprefix("- ").split(": ", 1)
+                description, path = entry.removesuffix(")").rsplit(" (", 1)
+                result[name] = {"description": description, "path": directory / path}
+        return result
 
     def test_symlinked_personal_skill_and_resources_are_readable_real_files(self):
         source = self.skill(self.root / "external-source", "refine-prompt", ">\n  Interview the user.\n  Rewrite their prompt.")
@@ -58,7 +65,7 @@ class AntigravitySkillTests(unittest.TestCase):
         self.assertEqual(copied.read_bytes(), source.read_bytes())
         self.assertEqual((copied.parent / "references/details.md").read_text(), "Interview steps")
         self.assertTrue((copied.parent / "scripts/interview.py").stat().st_mode & 0o111)
-        self.assertEqual(inventory["refine-prompt"]["description"], "Interview the user. Rewrite their prompt.")
+        self.assertEqual(inventory["refine-prompt"]["description"], "Interview the user.")
         self.assertTrue((context.coordination_skill.parent.parent / "dispatch/SKILL.md").is_file())
 
     def test_updates_publish_new_copy_without_changing_existing_conversations(self):

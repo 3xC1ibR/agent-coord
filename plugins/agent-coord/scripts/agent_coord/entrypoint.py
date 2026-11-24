@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from urllib.error import URLError
 
 from . import desktop_runtime as runtime
 
@@ -45,7 +46,7 @@ def route_to_owner(kind, argv):
     directory = runtime.runtime_directory(database)
     if runtime.owner_available(directory):
         return
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + (1 if kind == "hook" else 2)
     while True:
         record = runtime.discover(database, timeout=max(.001, deadline - time.monotonic()))
         if record is not None:
@@ -56,7 +57,7 @@ def route_to_owner(kind, argv):
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError("The runtime owner is unavailable. Try again shortly.")
+            raise runtime.RuntimeOwnerUnavailableError("The runtime owner is unavailable. Try again shortly.")
         time.sleep(min(.05, remaining))
     payload = Path(record["payload"]).resolve()
     if payload.parent != directory / "payloads" or not payload.is_dir():
@@ -80,6 +81,18 @@ def route_to_owner(kind, argv):
 def main(kind):
     try:
         route_to_owner(kind, sys.argv[1:])
+    except runtime.RuntimeOwnerUnavailableError as exc:
+        # An absent listener or a missing discovery record during restart is
+        # recoverable for PreToolUse. Authentication and malformed metadata
+        # remain errors, and no unauthenticated payload is loaded.
+        cause = exc.__context__
+        if isinstance(cause, URLError):
+            cause = cause.reason
+        if kind == "hook" and (cause is None or isinstance(cause, (ConnectionError, TimeoutError))):
+            from .hook import main as hook_main
+            return hook_main(unavailable=exc)
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        return 2
     except Exception as exc:  # Malformed owner metadata must also block write hooks.
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2

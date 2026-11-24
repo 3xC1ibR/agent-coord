@@ -84,23 +84,24 @@ class HookTests(unittest.TestCase):
         self.assertIn("codex-one", context)
         self.assertEqual(self.store.get_session("codex-one")["presence"], "online")
 
-    def test_each_prompt_receives_domain_ownership_and_workspace_vocabulary(self) -> None:
-        handle(self.payload("SessionStart"), self.store)
+    def test_session_snapshot_and_external_deltas_only_on_prompt(self) -> None:
+        self.store.register(session_id="codex-one", client="codex", cwd=str(self.root))
         self.store.threads.update("codex-one", domain="Web")
         self.store.register(session_id="peer", client="claude", cwd=str(self.root))
         self.store.threads.update("peer", domain="docs")
-        for event in ("SessionStart", "UserPromptSubmit"):
-            result = handle(self.payload(event, prompt="Continue."), self.store)
-            context = result["hookSpecificOutput"]["additionalContext"]
-            names = json.loads(context.split("Workspace domains: ", 1)[1].splitlines()[0])
-            self.assertEqual(names, ["docs", "web"])
-            saved = json.loads(context.split("Thread context (saved data): ", 1)[1])
-            self.assertEqual((saved["domain"], saved["domain_source"]), ("web", "user"))
-            self.assertIsNone(saved["scope_cluster"])
-            self.assertIn("once per assignment", context)
+        start = handle(self.payload("SessionStart"), self.store)
+        context = start["hookSpecificOutput"]["additionalContext"]
+        saved = json.loads(context.split("Thread context (saved data): ", 1)[1].splitlines()[0])
+        self.assertEqual(saved["workspace_domains"], ["docs", "web"])
+        self.assertEqual(saved["domain"], "web")
         self.store.threads.update("peer", domain="backend")
+        self.assertEqual(handle(self.payload("UserPromptSubmit", prompt="Continue."), self.store), {})
+        self.store.threads.update("codex-one", title="Repair deployment", domain="Release")
         result = handle(self.payload("UserPromptSubmit", prompt="Continue."), self.store)
-        self.assertIn('Workspace domains: ["backend", "web"]', result["hookSpecificOutput"]["additionalContext"])
+        changes = json.loads(result["hookSpecificOutput"]["additionalContext"].split(": ", 1)[1])
+        self.assertEqual(changes["title"], "Repair deployment")
+        self.assertEqual(changes["domain"], "release")
+        self.assertEqual(handle(self.payload("UserPromptSubmit", prompt="Again."), self.store), {})
 
     def test_hooks_capture_intent_and_preserve_checkpoint_after_stop(self) -> None:
         handle(self.payload("SessionStart"), self.store)
@@ -110,7 +111,7 @@ class HookTests(unittest.TestCase):
         handle(self.payload("Stop"), self.store)
         handle(self.payload("SessionEnd"), self.store)
         resumed = handle(self.payload("SessionStart"), self.store)
-        self.assertIn("Two options remain.", resumed["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(resumed, {})
         thread = self.store.threads.get("codex-one")
         self.assertEqual(thread["attention"], "later")
         self.assertEqual(thread["original_request"], "Investigate the write path.")
@@ -571,9 +572,9 @@ class HookTests(unittest.TestCase):
         self.assertIn(
             "I need src/app.py.", first["hookSpecificOutput"]["additionalContext"]
         )
-        self.assertNotIn("I need src/app.py.", second["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(second, {})
 
-    def test_actionable_messages_precede_large_bootstrap_and_remain_recoverable(self):
+    def test_actionable_messages_omit_bootstrap_and_remain_recoverable(self):
         handle(self.payload("SessionStart"), self.store)
         self.store.register(session_id="peer", client="claude", cwd=str(self.root))
         for event in ("UserPromptSubmit",):
@@ -587,7 +588,7 @@ class HookTests(unittest.TestCase):
                     result = handle(self.payload(event), self.store)
                 text = result["hookSpecificOutput"]["additionalContext"]
                 self.assertLess(text.index("URGENT:"), 1000)
-                self.assertLess(text.index("END-OF-REQUEST"), text.index("LONG-BOOTSTRAP"))
+                self.assertNotIn("LONG-BOOTSTRAP", text)
                 self.assertEqual(text.count(body), 1)
                 again = handle(self.payload("PreToolUse", tool_name="Read"), self.store)
                 self.assertNotIn("URGENT:", json.dumps(again))
@@ -694,7 +695,7 @@ class HookTests(unittest.TestCase):
 
         result = handle(self.payload("UserPromptSubmit"), self.store)
 
-        self.assertNotIn("Please validate", result["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(result, {})
         history = self.store.inbox(
             "codex-one", include_delivered=True, mark_delivered=False
         )

@@ -185,10 +185,31 @@ class AntigravityTests(unittest.TestCase):
         connection = self.start(thread)
         resume = next(p for m, p in connection.calls if m == "session/resume")
         self.assertEqual(resume["sessionId"], native)
-        self.assertIn(str(self.sessions.antigravity.skill_contexts[thread].coordination_skill),
-                      connection.calls[-1][1]["prompt"][0]["text"])
+        self.assertEqual(connection.calls[-1][1]["prompt"], [{"type": "text", "text": "Hello"}])
+        self.assertNotIn(thread, self.sessions.antigravity.skill_contexts)
         selections = [p for m, p in connection.calls if m == "session/set_config_option"]
         self.assertIn({"sessionId": native, "configId": "model", "value": "gemini-test"}, selections)
+
+    def test_renaming_an_initialized_session_adds_only_the_external_delta(self):
+        thread = self.create()
+        self.start(thread)
+        self.complete(thread)
+        self.sessions.update_work_thread(thread, {"title": "New title"})
+        connection = self.start(thread)
+        self.assertEqual(connection.calls[-1][1]["prompt"], [
+            {"type": "text", "text": 'Updated coordination context: {"title": "New title"}'},
+            {"type": "text", "text": "Hello"}])
+        self.complete(thread)
+        self.assertEqual(self.start(thread).calls[-1][1]["prompt"], [{"type": "text", "text": "Hello"}])
+
+    def test_rejected_first_prompt_retries_bootstrap_in_same_native_session(self):
+        thread = self.create()
+        connection = self.start(thread)
+        native_id = self.sessions.antigravity.native[thread]
+        connection.future.set_exception(ACPError("Rejected input", -32602))
+        retried = self.start(thread)
+        self.assertEqual(self.sessions.antigravity.native[thread], native_id)
+        self.assertIn("AGENTS.md", retried.calls[-1][1]["prompt"][0]["text"])
 
     def test_approvals_are_scoped_and_only_offer_native_decisions(self):
         first, second = self.create(), self.create()
@@ -539,7 +560,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         thread = self.create()
         ident = self.send_correction(thread)
         connection = self.start(thread)
-        self.assertIn('Use the revised interface', connection.calls[-1][1]['prompt'][-1]['text'])
+        self.assertIn('Use the revised interface', connection.calls[-1][1]['prompt'][0]['text'])
         self.assertIsNone(self.store.inbox(thread, mark_delivered=False)[0]['delivered_at'])
         self.update(thread, sessionUpdate="agent_message_chunk", content={"type": "text", "text": "Received"})
         receipt = self.sessions.antigravity.delivery.read('sender', ident)
@@ -572,7 +593,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertEqual(self.sessions.antigravity.native[thread], native)
         self.assertFalse(connection.closed)
         self.assertFalse(connection.writes)
-        self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
+        self.assertIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][0]['text'])
 
     def test_completion_during_history_read_cannot_restore_running_tools(self):
         thread = self.create()
@@ -617,7 +638,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         receipt = self.sessions.antigravity.delivery.read('sender', ident)
         self.assertIsNone(receipt['delivered_at'])
         self.assertIn('stopped', receipt['delivery']['blocked_reason'].lower())
-        self.assertIn('Use the revised interface', self.start(thread).calls[-1][1]['prompt'][-1]['text'])
+        self.assertIn('Use the revised interface', self.start(thread).calls[-1][1]['prompt'][0]['text'])
 
     def test_pending_peer_does_not_resolve_user_permission(self):
         thread = self.create()
@@ -696,7 +717,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
         self.assertNotIn(thread, self.sessions.antigravity.connections)
         connection = self.start(thread)
         self.assertEqual(self.sessions.antigravity.native[thread], native)
-        self.assertNotIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][-1]['text'])
+        self.assertNotIn(f'"id": {ident}', connection.calls[-1][1]['prompt'][0]['text'])
         self.complete(thread)
         self.assertNotIn('Coordination messages from other agents', str(self.start(thread).calls[-1]))
 

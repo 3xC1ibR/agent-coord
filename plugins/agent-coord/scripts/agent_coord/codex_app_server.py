@@ -129,6 +129,7 @@ class CodexRPC:
                 }:
                     env.pop(key)
             env = client_environment(env, self.store.database_path, "codex")
+            env["AGENT_COORD_APP_PROMPT"] = "1"
             projection = getattr(self.store, "provider_projection", None)
             if projection is not None:
                 self.process = projection.open(self.channel, self.command, env, None, self._message, provider="codex")
@@ -2128,7 +2129,7 @@ class BrowserSessions:
                 self._remember_thread(result["thread"])
             self.store.end_session(child_id)
             # Leave the fork saved locally. Opening/sending uses read() to resume
-            # with child-specific instructions before any turn. A failed resume
+            # with the fork hook identity before any turn. A failed resume
             # can be retried by opening the same child, without forking again.
             self._publish("browser/changed", {"threadId": child_id})
             return self.work_thread(child_id)
@@ -2146,7 +2147,7 @@ class BrowserSessions:
         options: dict = {
             "cwd": record["cwd"], **self._permission_options(record),
             "config": {"sandbox_workspace_write.writable_roots": [str(self.store.database_path.parent)]},
-            "developerInstructions": self.store.threads.instructions(record.get("thread_id"), caller_context=True),
+            "developerInstructions": self.store.threads.instructions(record.get("thread_id")),
         }
         if "permissions" in options:
             # A named native profile owns its filesystem/network rules.

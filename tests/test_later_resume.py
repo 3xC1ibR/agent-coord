@@ -86,7 +86,7 @@ class LaterResumeTests(unittest.TestCase):
                 result = handle({"hook_event_name": "UserPromptSubmit", "session_id": session_id,
                                  "cwd": str(self.root), "prompt": "Continue."}, self.store)
                 self.assertEqual(self.store.threads.get(session_id)["attention"], "now")
-                self.assertIn('"attention": "now"', result["hookSpecificOutput"]["additionalContext"])
+                self.assertEqual(result, {})
 
     def test_automatic_terminal_wake_preserves_later(self):
         self.store.register(session_id="terminal", client="codex", cwd=str(self.root))

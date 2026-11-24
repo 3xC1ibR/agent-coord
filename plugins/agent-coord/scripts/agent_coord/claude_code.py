@@ -12,11 +12,15 @@ import copy
 import json
 import logging
 import os
+import shutil
+import stat
+import tempfile
 import subprocess
 import threading
 import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
+from functools import lru_cache
 from pathlib import Path
 
 from .context import client_environment
@@ -24,6 +28,48 @@ from .browser_persistence import BrowserPersistence
 from .claude_usage import ClaudeUsage, native_id as usage_native_id
 from .store import CoordinationError
 from .permission_modes import CLAUDE_MODES, legacy_mode, validate_mode
+
+
+@lru_cache(maxsize=16)
+def _supports_prompt_file(command, executable_revision):
+    # The option is hidden from --help on some supported releases. An omitted
+    # required argument tests the parser without opening a provider session.
+    try:
+        probe = subprocess.run([*command, "--append-system-prompt-file"], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5,
+                               text=True, errors="replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    # Only a definite parser rejection permits exposing instructions in argv.
+    return "unknown option '--append-system-prompt-file'" not in probe.stdout.lower()
+
+
+def _prompt_arguments(command, directory, thread_id, instructions):
+    executable = shutil.which(command[0])
+    if executable:
+        metadata = Path(executable).stat()
+        if not _supports_prompt_file(tuple(command), (executable, metadata.st_ino, metadata.st_mtime_ns)):
+            return ["--append-system-prompt", instructions]
+    if not thread_id or Path(thread_id).name != thread_id or thread_id in {".", ".."}:
+        raise CoordinationError("Invalid Claude prompt file identity.")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / (thread_id + ".txt")
+    content = instructions.encode("utf-8")
+    try:
+        mode = path.lstat().st_mode
+        if stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o600 and path.read_bytes() == content:
+            return ["--append-system-prompt-file", str(path)]
+    except FileNotFoundError:
+        pass
+    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as temporary:
+        staging = Path(temporary.name)
+        try:
+            temporary.write(content)
+            temporary.flush()
+            os.replace(staging, path)
+        finally:
+            staging.unlink(missing_ok=True)
+    return ["--append-system-prompt-file", str(path)]
 
 
 class ClaudeConnection:
@@ -36,7 +82,8 @@ class ClaudeConnection:
         self.errors = deque(maxlen=12)
         self.closed = False
         self.channel = "claude:" + self.thread_id + ":" + uuid.uuid4().hex
-        args = list(command or ["claude"])
+        command = command or ["claude"]
+        args = list(command)
         args += ["--print", "--input-format", "stream-json", "--output-format", "stream-json",
                  "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"]
         native_id = options.get("nativeId") or options["threadId"]
@@ -59,7 +106,8 @@ class ClaudeConnection:
         if options.get("effort"):
             args += ["--effort", options["effort"]]
         if options.get("developerInstructions"):
-            args += ["--append-system-prompt", options["developerInstructions"]]
+            args += _prompt_arguments(command, store.database_path.parent / "prompts",
+                                      self.thread_id, options["developerInstructions"])
         env = {k: v for k, v in os.environ.items() if not k.startswith("ZELLIJ") and k not in {
             "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID", "AGENT_COORD_SESSION_ID",
             "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE",
@@ -68,6 +116,8 @@ class ClaudeConnection:
         # rejected it. Browser conversations should use the user's Claude login.
         env.pop("ANTHROPIC_API_KEY", None)
         env = client_environment(env, store.database_path, "claude", session_id=options["threadId"])
+        if options.get("developerInstructions"):
+            env["AGENT_COORD_APP_PROMPT"] = "1"
         projection = getattr(store, "provider_projection", None)
         if projection is not None:
             self.readers = []
@@ -285,17 +335,14 @@ class ClaudeRPC:
             if self.closed or options is None or thread_id in self.connections or thread_id in self.turns:
                 return False
             options = dict(options)
-        options["developerInstructions"] = self.store.threads.instructions(thread_id, caller_context=True)
+        options["developerInstructions"] = self.store.threads.instructions(thread_id)
         self._connection(thread_id, options)
         return True
 
     def _open_connection(self, thread_id, options):
         current = self.connections.get(thread_id)
-        # Instructions are fixed when Claude Code starts. Their saved thread
-        # context changes with nearly every checkpoint, while each prompt
-        # already receives the current context from the UserPromptSubmit hook.
-        # Restarting only for that put a full Claude Code start (plugins, MCP
-        # servers, session hooks) in front of the next message.
+        # Retained processes may still have the previous build's startup prefix.
+        # A compatible upgrade must not retire a healthy session for that alone.
         previous = {**self.options.get(thread_id, {}), "developerInstructions": None}
         if current and (current.process.poll() is not None or previous != {**options, "developerInstructions": None}):
             current.close()
@@ -518,7 +565,7 @@ class ClaudeRPC:
             if thread_id in self.turns:
                 raise CoordinationError("A Claude turn is already running.")
             options = {**self.options.get(thread_id, {}), **self._options(params)}
-            options["developerInstructions"] = self.store.threads.instructions(thread_id, caller_context=True)
+            options["developerInstructions"] = self.store.threads.instructions(thread_id)
             connection = self._connection(thread_id, options)
             user = {"id": params.get("_coordination_input_id") or str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
             turn = {"id": str(uuid.uuid4()), "items": [user], "status": "inProgress"}

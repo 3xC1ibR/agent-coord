@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import textwrap
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,17 +109,21 @@ def prepare_skills(store, cwd, *, home=None, bundled=None):
             if source == bundled:
                 bundle_snapshot = snapshot
             for name, description, path in entries:
-                inventory.setdefault(name, {"name": name, "description": description, "path": str(path)})
+                inventory.setdefault(name, (description, path))
     except (OSError, UnicodeError) as exc:
         raise CoordinationError(f"Cannot prepare Antigravity skills: {exc}") from exc
     coordination = bundle_snapshot / "agent-coordination/SKILL.md"
     if not coordination.is_file():
         raise CoordinationError(f"The bundled agent-coordination skill is missing: {bundled}. Reinstall Ribbon Field.")
-    instructions = (
-        "Available skills are listed below with readable absolute paths. When the user names a skill, "
-        "read its SKILL.md before acting and follow its workflow. Use the catalog's exact path; "
-        "resolve supporting files relative to that copy. Do not search the home directory for an installed skill. "
-        "If a requested skill is absent or cannot be read, explain that instead of silently skipping it.\n"
-        + json.dumps(sorted(inventory.values(), key=lambda item: item["name"].casefold()), ensure_ascii=False)
-    )
-    return SkillContext(coordination, instructions)
+    # Long private snapshot prefixes are identical across dozens of skills.
+    # Name each root once, keeping each entry directly resolvable on disk.
+    groups = {}
+    for name in sorted(inventory, key=str.casefold):
+        description, path = inventory[name]
+        sentence = re.split(r"(?<=[.!?])\s+", description, maxsplit=1)[0]
+        summary = textwrap.shorten(sentence, width=88, placeholder="…")
+        groups.setdefault(path.parent.parent, []).append(f"- {name}: {summary} ({path.parent.name}/SKILL.md)")
+    lines = ["Read a named skill from its listed directory before acting. Resolve its resources relative to SKILL.md."]
+    for root, entries in groups.items():
+        lines.extend([f"Directory: {root}", *entries])
+    return SkillContext(coordination, "\n".join(lines))

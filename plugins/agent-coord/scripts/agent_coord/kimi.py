@@ -17,6 +17,7 @@ import threading
 import uuid
 
 from .acp import ACPConnection
+from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
 from .kimi_setup import ensure_hooks, resolve_runtime
 from .kimi_usage import backfill_usage
@@ -86,6 +87,7 @@ class KimiRPC:
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
         self.closed = False
         with store._connection() as db:
+            self.initial_prompt = NativePromptState(store, "kimi", db)
             db.execute("CREATE TABLE IF NOT EXISTS kimi_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
 
     def _emit(self, method, thread_id, **params):
@@ -225,6 +227,7 @@ class KimiRPC:
             # Persist before setting changes so retries never replace a native conversation.
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO kimi_sessions VALUES (?, ?, ?)", (thread_id, native_id, options["cwd"]))
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
             if options.get("model"):
                 session = self._select(connection, native_id, session, "model", options["model"])
             if options.get("effort"):
@@ -311,7 +314,9 @@ class KimiRPC:
                 raise CoordinationError("A Kimi turn is already running.")
             self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
-            prompt = [{"type": "text", "text": coordination_bootstrap(self.store, thread_id)}]
+            prompt = []
+            if thread_id in self.initial_prompt.pending:
+                prompt.append({"type": "text", "text": coordination_bootstrap(self.store, thread_id)})
             for part in params["input"]:
                 if part["type"] == "text":
                     prompt.append({"type": "text", "text": part["text"]})
@@ -363,6 +368,7 @@ class KimiRPC:
 
         try:
             reason = future.result().get("stopReason", "end_turn")
+            self.initial_prompt.confirm(thread_id)
             error = journal.failure() if journal else None
             if error:
                 finish("failed", error)
@@ -401,6 +407,8 @@ class KimiRPC:
             # changes a successful turn into an interrupted, incomplete one.
             self.completed[thread_id] = copy.deepcopy(turn)
             self.requests = {key: value for key, value in self.requests.items() if value["thread"] != thread_id}
+        if len(turn["items"]) > 1:
+            self.initial_prompt.confirm(thread_id)
         self._capture_usage(thread_id)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 

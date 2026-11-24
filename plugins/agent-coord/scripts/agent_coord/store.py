@@ -852,6 +852,12 @@ class CoordinationStore:
                     ON sessions(bead_id) WHERE bead_id IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS sessions_cwd_idx ON sessions(cwd);
 
+                CREATE TABLE IF NOT EXISTS hook_startup_context (
+                    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                    native_id TEXT NOT NULL,
+                    PRIMARY KEY (session_id, native_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_session_id TEXT NOT NULL,
@@ -987,6 +993,10 @@ class CoordinationStore:
             session_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
             }
+            if "last_context_revision" not in session_columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN last_context_revision INTEGER NOT NULL DEFAULT 0")
+            if "last_context_json" not in session_columns:
+                connection.execute("ALTER TABLE sessions ADD COLUMN last_context_json TEXT")
             if "turn_active" not in session_columns:
                 connection.execute(
                     "ALTER TABLE sessions ADD COLUMN turn_active "

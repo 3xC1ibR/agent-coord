@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ from .store import (
     CoordinationError,
     CoordinationStore,
     normalize_target_path,
+    default_database_path,
 )
 from .usage import capture_delegation_usage
 from .write_policy import check_write
@@ -124,7 +125,7 @@ def _record_tool(
 def _ensure_registered(
     store: CoordinationStore, payload: dict[str, Any]
 ) -> dict[str, Any]:
-    session_id = (caller_environment().get("AGENT_COORD_SESSION_ID") if _client() in {"kimi", "muse"} else None) or payload.get("session_id")
+    session_id = payload.get("session_id")
     cwd = payload.get("cwd") or caller_directory()
     if not isinstance(session_id, str) or not session_id:
         raise CoordinationError("Hook input does not contain a session_id.")
@@ -208,10 +209,37 @@ def _capture_thread_usage(store, payload, session_id):
         return
 
 
-def handle(
-    payload: dict[str, Any], store: CoordinationStore | None = None
-) -> dict[str, Any]:
-    coordination = store or CoordinationStore()
+def _hook_identity(store, payload):
+    """Resolve provider-native hooks to their coordinating session before any mutation."""
+    owner = caller_environment().get("AGENT_COORD_SESSION_ID")
+    native = payload.get("session_id") or payload.get("sessionId")
+    parent = payload.get("parent_session_id") or payload.get("parent_thread_id")
+    transcript = Path(str(payload.get("agent_transcript_path") or payload.get("transcript_path") or ""))
+    subagent_transcript = transcript.parent.name == "subagents"
+    # A top-level Claude --agent selection also supplies agent_type.
+    agent = payload.get("agent_id") or payload.get("agentId")
+    if parent or subagent_transcript or payload.get("parent_tool_use_id") or (agent and agent != "main"):
+        transcript_owner = transcript.parent.parent.name if subagent_transcript else None
+        return owner or parent or transcript_owner or native, True
+    if not owner or native == owner:
+        return native, False
+    if native is None and _client() in {"antigravity", "kimi", "muse"}:
+        return owner, False
+
+    # Some app providers allocate a different native ID for the root itself.
+    # Only a recorded binding establishes that it may consume the app inbox.
+    table = {"claude": "claude_sessions", "kimi": "kimi_sessions",
+             "muse": "muse_sessions", "antigravity": "antigravity_sessions"}.get(_client())
+    if table and native:
+        with store.reading(), store._connection() as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                bound = db.execute(f"SELECT 1 FROM {table} WHERE thread_id=? AND native_id=?", (owner, native)).fetchone()
+                if bound:
+                    return owner, False
+    return owner, True
+
+
+def _normalize_tool(payload):
     if _client() == "muse":
         payload = dict(payload)
         payload["tool_name"] = {"write_file": "Write", "edit_file": "Edit"}.get(payload.get("tool_name"), payload.get("tool_name"))
@@ -221,50 +249,34 @@ def handle(
                 payload["tool_input"] = {"command": tool_input}
             elif isinstance(tool_input, dict):
                 payload["tool_input"] = {**tool_input, "command": tool_input.get("patch", tool_input.get("input", tool_input.get("command")))}
+    return payload
+
+
+def handle(
+    payload: dict[str, Any], store: CoordinationStore | None = None
+) -> dict[str, Any]:
+    coordination = store or CoordinationStore()
+    payload = _normalize_tool(payload)
     event = payload.get("hook_event_name")
     if not isinstance(event, str):
         raise CoordinationError("Hook input does not contain hook_event_name.")
-    owner = caller_environment().get("AGENT_COORD_SESSION_ID")
-    if _client() == "claude" and owner and payload.get("session_id") != owner:
-        try:
-            app_session = coordination.get_session(owner)
-            app_owner = app_session["client"] == "claude" and coordination.threads.is_browser_session(owner)
-        except CoordinationError:
-            app_owner = False
-        if app_owner:
-            try:
-                with coordination._connection() as db:
-                    native = db.execute("SELECT native_id FROM claude_sessions WHERE thread_id=?", (owner,)).fetchone()
-                native_id = native["native_id"] if native else None
-            except Exception:
-                native_id = None
-            if native_id and native_id == payload.get("session_id"):
-                # Claude may resume a native ID distinct from the stable app
-                # identity. Keep its hooks/inbox attached to the app thread.
-                payload = {**payload, "session_id": owner}
-            else:
-                # Native children (and as-yet-unverified native IDs) must not
-                # create phantom threads or drain/mutate the app's lifecycle.
-                if event == "PreToolUse" and payload.get("tool_name") in WRITE_TOOLS:
-                    paths, outside = _extract_paths(payload, app_session["cwd"])
-                    reason = check_write(coordination, owner, paths, has_outside=outside)
-                    if reason:
-                        return _deny(event, reason)
-                return {}
-    if _client() == "muse" and owner and payload.get("session_id") != owner:
-        # Native reminder/subagent hooks inherit the parent's configuration.
-        # They share its write scope, but must never drain its inbox or change
-        # its registered workspace or turn state.
+    owner, child = _hook_identity(coordination, payload)
+    if child:
         if event == "PreToolUse" and payload.get("tool_name") in WRITE_TOOLS:
-            session = coordination.get_session(owner)
-            paths, has_outside = _extract_paths(payload, session["cwd"])
-            reason = check_write(coordination, owner, paths, has_outside=has_outside)
-            if reason:
-                return _deny(event, reason)
+            with coordination.reading():
+                session = coordination.get_session(owner)
+                paths, outside = _extract_paths(payload, session["cwd"])
+                reason = check_write(coordination, owner, paths, has_outside=outside, record=False)
+            return _deny(event, reason) if reason else {}
         return {}
+    native_id = payload.get("session_id") or owner
+    payload = {**payload, "session_id": owner}
     session = _ensure_registered(coordination, payload)
     session_id = session["session_id"]
-    browser = coordination.threads.is_browser_session(session_id)
+    # Provider processes may fire SessionStart before thread/start responds
+    # with the ID needed to insert the browser_sessions row.
+    app_prompt = session["client"] in {"codex", "claude"} and caller_environment().get("AGENT_COORD_APP_PROMPT") == "1"
+    browser = app_prompt or coordination.threads.is_browser_session(session_id)
     from .message_delivery import MessageDelivery
     delivery = MessageDelivery(coordination)
     with coordination.reading(), coordination._connection() as db:
@@ -325,14 +337,10 @@ def handle(
             coordination.touch(session_id, "discussing", turn_active=None if browser else True)
         else:
             coordination.touch(session_id, turn_active=None if browser else True)
-        # Codex injects CODEX_THREAD_ID into tool shells, not necessarily hooks.
-        text = coordination.threads.instructions(
-            session_id, caller_context=session["client"] == "codex",
-            command=command_prefix(coordination.database_path),
-        )
         messages = _actionable_context(coordination, session_id, event, payload)
-        if messages:
-            text = messages + "\n\n" + text
+        changed = coordination.threads.observe_context(session_id)
+        metadata = "Updated coordination context: " + json.dumps(changed, sort_keys=True) if changed else ""
+        text = "\n\n".join(filter(None, (messages, metadata)))
         return _context(event, text) if text else {}
 
     if event == "SessionStart":
@@ -386,13 +394,14 @@ def handle(
         elif wake_warning:
             text += f" Zellij wake could not start: {wake_warning}"
         # Attach inherited scopes first so startup reports the effective state.
-        text = coordination_bootstrap(
-            coordination, session_id, caller_context=shell_context_ready, command=cli_path
-        ) + text
-        formatted = _actionable_context(coordination, session_id, event, payload)
-        if formatted:
-            text = formatted + "\n\n" + text
-        return _context(event, text)
+        if browser and session["client"] in {"antigravity", "kimi", "muse"}:
+            return _context(event, text.strip()) if text.strip() else {}
+        startup = coordination.threads.startup_context(session_id, native_id, lambda: coordination_bootstrap(
+            coordination, session_id, caller_context=shell_context_ready, command=cli_path,
+            include_thread_instructions=not (browser and session["client"] in {"codex", "claude"}),
+        ))
+        text = startup + text
+        return _context(event, text.strip()) if text.strip() else {}
 
     # Browser runtime events own turn liveness. Late tool/prompt hooks from an
     # interrupted turn must not resurrect it (nor may a Stop hook end a new one).
@@ -404,9 +413,14 @@ def handle(
     if event == "PreToolUse" and tool_name in WRITE_TOOLS:
         paths, has_outside = _extract_paths(payload, session["cwd"])
         reason = check_write(coordination, session_id, paths, has_outside=has_outside)
-        message_context = _actionable_context(coordination, session_id, event, payload)
         if reason:
+            # An inbox read or reservation cannot invalidate a confirmed denial.
+            try:
+                message_context = _actionable_context(coordination, session_id, event, payload)
+            except sqlite3.OperationalError:
+                message_context = ""
             return _deny(event, reason, message_context or None)
+        message_context = _actionable_context(coordination, session_id, event, payload)
         return _context(event, message_context) if message_context else {}
 
     message_context = _actionable_context(coordination, session_id, event, payload)
@@ -421,15 +435,12 @@ ANTIGRAVITY_WRITE_TOOLS = {
 }
 
 
-def handle_antigravity(payload, store=None):
+def handle_antigravity(payload, store=None, *, record=True):
     """Translate Google's vetoable PreToolUse hook, never ACP notifications."""
     coordination = store or CoordinationStore()
     session_id = caller_environment().get("AGENT_COORD_SESSION_ID")
     if not session_id:
         raise CoordinationError("Antigravity hook has no Ribbon Field session identity.")
-    session = coordination.get_session(session_id)
-    if session["client"] != "antigravity":
-        raise CoordinationError("Antigravity hook identity belongs to another provider.")
     call = payload.get("toolCall")
     if not isinstance(call, dict) or call.get("name") not in ANTIGRAVITY_WRITE_TOOLS:
         raise CoordinationError("Antigravity write hook received an unknown tool.")
@@ -438,22 +449,100 @@ def handle_antigravity(payload, store=None):
     # Validate before the sole-writer fast path; malformed native inputs must fail closed.
     if not isinstance(target, str) or not target.strip():
         raise CoordinationError("Antigravity write hook has no TargetFile.")
+    session = coordination.get_session(session_id)
+    if session["client"] != "antigravity":
+        raise CoordinationError("Antigravity hook identity belongs to another provider.")
     paths, has_outside = _extract_paths({"tool_input": {"path": target}}, session["cwd"])
-    reason = check_write(coordination, session_id, paths, has_outside=has_outside)
-    _record_tool(coordination, session_id, session["cwd"], call["name"], {"tool_input": {"path": target}})
+    _, child = _hook_identity(coordination, payload)
+    record = record and not child
+    reason = check_write(coordination, session_id, paths, has_outside=has_outside, record=record)
+    if record:
+        _record_tool(coordination, session_id, session["cwd"], call["name"], {"tool_input": {"path": target}})
     # Native PreToolUse does not inject inbox context. The adapter owns message delivery.
     return {"decision": "deny", "reason": reason} if reason else {"decision": "allow"}
 
 
-def main() -> int:
+def _read_only_pre_tool(payload, database):
+    from .browser_persistence import database_busy
+    from .hook_reads import hook_snapshot
+
+    try:
+        with hook_snapshot(database) as store:
+            if _client() == "antigravity":
+                return handle_antigravity(payload, store, record=False)
+            payload = _normalize_tool(payload)
+            owner, child = _hook_identity(store, payload)
+            if payload.get("tool_name") in WRITE_TOOLS:
+                if not isinstance(owner, str) or not owner:
+                    raise CoordinationError("Hook input does not contain a session_id.")
+                session = store.find_session(owner)
+                cwd = session["cwd"] if session else find_repository_root(payload.get("cwd") or caller_directory())
+                paths, outside = _extract_paths(payload, cwd)
+                if session:
+                    reason = check_write(store, owner, paths, has_outside=outside, record=False)
+                else:
+                    reason = store.unregistered_write_reason(cwd) if paths or not outside else None
+                if reason:
+                    return _deny("PreToolUse", reason)
+            if not child and _client() != "kimi":
+                message_id = store.pending_message(owner)
+                if message_id:
+                    return _context("PreToolUse", f"Coordination message {message_id} is pending. Read agent-coord inbox --unread.")
+    except sqlite3.OperationalError as error:
+        if not database_busy(error):
+            raise
+        print(f"Agent Coord PreToolUse: lease database busy; allowing this tool call ({error}).", file=sys.stderr)
+    return {"decision": "allow"} if _client() == "antigravity" else {}
+
+
+def _run_hook(payload):
+    from .browser_persistence import database_busy
+    from .runtime_requests import RuntimeRequestUnavailable, run_local_or_forward
+
+    native = _client() == "antigravity"
+    pre_tool = native or payload.get("hook_event_name") == "PreToolUse"
+    database = default_database_path()
+
+    def local():
+        if pre_tool and database.exists():
+            discovery = database.parent / ("." + database.name + ".runtime") / "discovery.json"
+            if discovery.exists():
+                # A stopped or changing runtime may briefly release the owner
+                # lock. Do not register, migrate, or deliver in its place.
+                return _read_only_pre_tool(payload, database)
+            # An exclusively locked standalone database must not enter schema
+            # initialization and retry migrations before a tool can proceed.
+            from .hook_reads import hook_snapshot
+            with hook_snapshot(database) as snapshot:
+                snapshot.connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        store = CoordinationStore(database)
+        if pre_tool:
+            with store.connection_timeout(250):
+                return handle_antigravity(payload, store) if native else handle(payload, store)
+        return handle(payload, store)
+
+    try:
+        return run_local_or_forward("hook", {"input": payload}, local, database,
+                                    timeout=1 if pre_tool else 45)
+    except (RuntimeRequestUnavailable, sqlite3.OperationalError) as error:
+        if not pre_tool or (isinstance(error, sqlite3.OperationalError) and not database_busy(error)):
+            raise
+        return _read_only_pre_tool(payload, database)
+
+
+def main(*, unavailable=None) -> int:
     payload: Any = None
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise CoordinationError("Hook input must be a JSON object.")
-        from .runtime_requests import run_local_or_forward
-        result = run_local_or_forward("hook", {"input": payload},
-            lambda: handle_antigravity(payload) if _client() == "antigravity" else handle(payload))
+        if unavailable is not None:
+            if _client() != "antigravity" and payload.get("hook_event_name") != "PreToolUse":
+                print(json.dumps({"error": str(unavailable)}), file=sys.stderr)
+                return 2
+            result = _read_only_pre_tool(payload, default_database_path())
+        else:
+            result = _run_hook(payload)
     except Exception as exc:  # noqa: BLE001 -- Hooks must return JSON, not a traceback.
         event = "PreToolUse"
         tool_name = None

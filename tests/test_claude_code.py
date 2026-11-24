@@ -21,7 +21,7 @@ for line in sys.stdin:
         if message["request"]["subtype"] == "disconnect":
             break
         response = {"args": sys.argv[1:], "parent": "CODEX_THREAD_ID" in os.environ,
-                    "client": os.environ.get("AGENT_COORD_CLIENT"),
+                    "client": os.environ.get("AGENT_COORD_CLIENT"), "app_prompt": os.environ.get("AGENT_COORD_APP_PROMPT"),
                     "session": os.environ.get("AGENT_COORD_SESSION_ID"), "path": os.environ.get("PATH"),
                     "auth_env": {name: os.environ[name] for name in (
                         "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR") if name in os.environ}}
@@ -79,6 +79,33 @@ class ClaudeTransportTests(unittest.TestCase):
         self.assertIn("--allow-dangerously-skip-permissions", args)
         self.assertEqual(args[args.index("--model") + 1], "sonnet")
         self.assertEqual(args[args.index("--effort") + 1], "high")
+
+    def test_prompt_file_is_private_atomic_and_reused_on_resume(self):
+        instructions = "Private instructions for this native session."
+        def prompt_path(**options):
+            result = self.connection(developerInstructions=instructions, **options).control("initialize")
+            self.assertEqual(result["app_prompt"], "1")
+            args = result["args"]
+            self.assertNotIn(instructions, args)
+            return Path(args[args.index("--append-system-prompt-file") + 1])
+        path = prompt_path()
+        self.assertEqual(path, self.root.resolve() / "prompts/test-session.txt")
+        self.assertEqual(path.read_text(), instructions)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        previous = path.stat()
+        self.assertEqual(prompt_path(resume=True), path)
+        self.assertEqual((path.stat().st_ino, path.stat().st_mtime_ns), (previous.st_ino, previous.st_mtime_ns))
+        instructions += " Revised."
+        prompt_path(resume=True)
+        self.assertNotEqual(path.stat().st_ino, previous.st_ino)
+        self.assertEqual(path.read_text(), instructions)
+
+    def test_older_cli_with_explicit_unknown_option_uses_inline_compatibility(self):
+        self.fixture.write_text("import sys\nif sys.argv[-1] == '--append-system-prompt-file':\n"
+                                "    sys.exit(\"error: unknown option '--append-system-prompt-file'\")\n" + CLI)
+        args = self.connection(developerInstructions="Static instructions").control("initialize")["args"]
+        self.assertEqual(args[args.index("--append-system-prompt") + 1], "Static instructions")
+        self.assertNotIn("--append-system-prompt-file", args)
 
     def test_native_fork_uses_snapshot_and_child_identity(self):
         connection = self.connection(forkPath=str(self.root / "snapshot.jsonl"))

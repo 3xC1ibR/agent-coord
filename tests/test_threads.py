@@ -370,13 +370,36 @@ class WorkThreadTests(unittest.TestCase):
         self.assertEqual(len(migrated["checkpoints"]), 2)
         self.assertEqual(CoordinationStore(self.store.database_path).threads.get("conversation")["title_source"], "agent")
 
+    def test_developer_prefix_survives_metadata_changes_and_resume(self):
+        before = self.threads.instructions("conversation").encode()
+        self.save(title="Progress", domain="runtime")
+        self.threads.update("conversation", title="User title", attention="later")
+        self.store.register(session_id="neighbor", client="codex", cwd=str(self.root))
+        self.threads.update("neighbor", domain="storage")
+        reopened = CoordinationStore(self.store.database_path)
+        self.assertEqual(reopened.threads.instructions("conversation").encode(), before)
+        self.assertEqual(self.threads.instructions().encode(), before)
+        snapshot = reopened.threads.context_snapshot("conversation")
+        self.assertEqual(snapshot["title"], "User title")
+        self.assertIn("storage", snapshot["workspace_domains"])
+
+    def test_context_observation_only_reports_changed_external_fields(self):
+        self.assertEqual(self.threads.observe_context("conversation", initial=True), {})
+        self.save(title="Agent title", domain="backend")
+        self.assertEqual(self.threads.observe_context("conversation"), {})
+        self.threads.update("conversation", title="New user title", domain="results")
+        self.store.begin_work(session_id="conversation", scopes=["src/**"])
+        self.assertEqual(self.threads.observe_context("conversation"), {
+            "title": "New user title", "domain": "results", "write_scope": ["src/**"]})
+        self.assertEqual(CoordinationStore(self.store.database_path).threads.observe_context("conversation"), {})
+
     def test_checkpoint_instructions_include_title_and_ownership(self):
         self.threads.update("conversation", title="My chosen title")
         instructions = self.threads.instructions("conversation")
         self.assertIn("optional title", instructions)
         self.assertIn("first meaningful checkpoint", instructions)
         self.assertIn("omit title on later checkpoints", instructions)
-        context = json.loads(instructions.split("Thread context (saved data): ", 1)[1])
+        context = self.threads.context_snapshot("conversation")
         self.assertEqual(context["title"], "My chosen title")
         self.assertEqual(context["title_source"], "user")
 

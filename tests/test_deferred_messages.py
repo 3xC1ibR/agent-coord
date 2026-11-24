@@ -200,8 +200,10 @@ class DeferredMessageTests(unittest.TestCase):
         connection = sessions.antigravity.connections[thread]
         prompts = [params for method, params in connection.calls if method == "session/prompt"]
         self.assertEqual(len(prompts), 1)
-        self.assertIn(msg["body"], prompts[0]["prompt"][-1]["text"])
-        self.assertIn('"classification": "deferred"', prompts[0]["prompt"][-1]["text"])
+        blocks = [part["text"] for part in prompts[0]["prompt"]]
+        self.assertEqual(blocks[-1], "Continue my task")
+        self.assertIn(msg["body"], "\n".join(blocks[:-1]))
+        self.assertIn('"classification": "deferred"', "\n".join(blocks[:-1]))
 
     def test_provider_delivery_does_not_repeat_delivered_deferred_on_next_turn(self):
         msg = self.send()

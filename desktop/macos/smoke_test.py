@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -87,10 +88,86 @@ def stopped(pid: int) -> bool:
     return False
 
 
+def smoke_processes(directory, previous=None):
+    """Identify private runtime roots and their descendants, including detached groups."""
+    database = directory / "state.sqlite3"
+    transport = directory / ".state.sqlite3.runtime/provider-transport"
+    output = subprocess.check_output(
+        ["ps", "-axww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
+        text=True, errors="replace", timeout=5)
+    rows = {}
+    owned = {}
+    for line in output.splitlines():
+        fields = line.split(None, 9)
+        if len(fields) < 10 or fields[3].startswith("Z"):
+            continue
+        pid, parent, group = map(int, fields[:3])
+        born, command = tuple(fields[4:9]), fields[9]
+        rows[pid] = (parent, group, born)
+        native = any(flag in command for flag in ("--runtime-supervise ", "--runtime-serve "))
+        if ((native and f" --db {database} " in command + " ")
+                or ("agent_coord.provider_transport " in command and f" --directory {transport} " in command + " ")
+                or (previous or {}).get(pid) == (group, born)):
+            owned[pid] = (group, born)
+    while True:
+        children = {pid: (group, born) for pid, (parent, group, born) in rows.items()
+                    if parent in owned and pid not in owned}
+        if not children:
+            return owned
+        owned.update(children)
+
+
+def stop_smoke_runtime(directory):
+    sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
+    from agent_coord import desktop_runtime
+
+    database = directory / "state.sqlite3"
+    runtime = desktop_runtime.runtime_directory(database)
+    owned = smoke_processes(directory)
+
+    def survivors():
+        nonlocal owned
+        owned = smoke_processes(directory, owned)
+        return owned
+
+    def wait(seconds):
+        deadline = time.monotonic() + seconds
+        while survivors() and time.monotonic() < deadline:
+            time.sleep(.1)
+        return not owned
+
+    try:
+        discovery = runtime / "discovery.json"
+        if discovery.is_file():
+            desktop_runtime.control(json.loads(discovery.read_bytes()), "stop")
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"Native smoke runtime stop: {error}", file=sys.stderr)
+    finally:
+        try:
+            desktop_runtime.stop_retained_transport(runtime, database)
+        except (OSError, ValueError, RuntimeError) as error:
+            print(f"Native smoke transport stop: {error}", file=sys.stderr)
+        if not wait(2):
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                for pid, (group, _) in survivors().items():
+                    try:
+                        if pid == group:
+                            os.killpg(group, sig)
+                        else:
+                            os.kill(pid, sig)
+                    except ProcessLookupError:
+                        continue
+                if wait(2):
+                    break
+            else:
+                raise RuntimeError(f"Disposable smoke processes survived cleanup: {sorted(owned)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, default=ROOT / "build/macos/Ribbon Field.app")
     parser.add_argument("--report", type=Path, default=ROOT / "build/macos/smoke.json")
+    parser.add_argument("--timeout", type=float, default=110, help="Seconds allowed for each native smoke run.")
     parser.add_argument("--files-only", action="store_true", help="Run focused native file-browser checks.")
     parser.add_argument("--sessions-only", action="store_true", help="Run focused native session-switching checks.")
     parser.add_argument("--detach-only", action="store_true", help="Run focused native conversation-detachment checks.")
@@ -107,7 +184,7 @@ def main() -> int:
     report.unlink(missing_ok=True)
     # The macOS Unix-domain socket address has a 104-byte limit, including the directory.
     temporary = tempfile.TemporaryDirectory(prefix="ribbon-native-smoke-", dir="/private/tmp" if args.origins_only else None)
-    smoke_directory = Path(temporary.name)
+    smoke_directory = Path(temporary.name).resolve()
     command = [str(executable), "--smoke-test", str(report), "--smoke-directory", str(smoke_directory)]
     if args.files_only:
         command.append("--smoke-files-only")
@@ -138,7 +215,7 @@ def main() -> int:
             ) as app:
                 observation = executor.submit(observe_window_moves, app, address) if args.origins_only else None
                 try:
-                    _, errors = app.communicate(timeout=110)
+                    _, errors = app.communicate(timeout=args.timeout)
                 except subprocess.TimeoutExpired:
                     app.kill()
                     _, errors = app.communicate(timeout=5)
@@ -159,18 +236,8 @@ def main() -> int:
                 elif current["backend_pid"] != first["backend_pid"] or current["url"] != first["url"]:
                     raise RuntimeError("Native relaunch did not reconnect to the same runtime")
     finally:
-        # A timed-out native process no longer owns the runtime lifetime. Clean
-        # up only this test's authenticated discovery, never a live app or PID.
-        sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
-        from agent_coord import desktop_runtime
-        discovery = smoke_directory / ".state.sqlite3.runtime/discovery.json"
-        if discovery.exists():
-            record = json.loads(discovery.read_text())
-            desktop_runtime.control(record, "stop")
-            for _ in range(150):
-                if stopped(record["pid"]):
-                    break
-                time.sleep(.1)
+        # Quit keeps detached runtimes alive, including on a native timeout.
+        stop_smoke_runtime(smoke_directory)
         temporary.cleanup()
     result = json.loads(report.read_text())
     if result.get("error"):

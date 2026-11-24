@@ -160,7 +160,7 @@ class CallerIdentityTests(unittest.TestCase):
                                ("move-parent",)).fetchone()[0]
         self.assertEqual(actor, "child")
 
-    def test_fork_resume_instructions_identify_child_and_warn_about_parent(self):
+    def test_fork_uses_static_prefix_and_child_identity_in_startup_context(self):
         from test_codex_app_server import BrowserSessions, FakeCodex
         sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(sessions.close)
@@ -169,9 +169,14 @@ class CallerIdentityTests(unittest.TestCase):
         sessions.read(child)
         resume = next(params for method, params in sessions.rpc.calls if method == "thread/resume")
         instructions = resume["developerInstructions"]
-        self.assertIn("Your current Agent Coord session ID is " + child, instructions)
-        self.assertIn("This is a fork of " + parent, instructions)
-        self.assertIn("Do not use the parent's identity", instructions)
+        from agent_coord.context import coordination_bootstrap
+        prefix = next(params["developerInstructions"] for method, params in sessions.rpc.calls if method == "thread/fork")
+        self.assertEqual(instructions, prefix)
+        self.assertNotIn(parent, instructions)
+        bootstrap = coordination_bootstrap(self.store, child, include_thread_instructions=False)
+        self.assertIn("registered with agent-coord as " + child, bootstrap)
+        self.assertIn("This is a fork of " + parent, bootstrap)
+        self.assertIn("Do not use the parent's identity", bootstrap)
 
 
 if __name__ == "__main__":

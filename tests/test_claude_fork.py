@@ -92,7 +92,9 @@ class ClaudeForkTests(unittest.TestCase):
         options = self.sessions.claude.connections[child].options
         self.assertEqual(options["forkPath"], str(self.fork_path(child)))
         self.assertEqual(options["threadId"], child)
-        self.assertIn('"title": "Fork of Source"', options["developerInstructions"])
+        self.assertEqual(options["developerInstructions"], self.store.threads.instructions(child))
+        self.assertNotIn("Fork of Source", options["developerInstructions"])
+        self.assertEqual(self.store.threads.context_snapshot(child)["title"], "Fork of Source")
         self.assertNotIn("Parent plan", options["developerInstructions"])
         self.assertEqual(len(self.sessions.read(parent)["thread"]["turns"]), 1)
 

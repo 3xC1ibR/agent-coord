@@ -1840,6 +1840,12 @@ class BrowserSessionTests(unittest.TestCase):
         self.sessions.send(thread_id, {"message": "Investigate database performance."})
         self.sessions.send(thread_id, {"message": "Consider another option."})
         self.assertEqual(self.sessions.work_thread(thread_id)["original_request"], "Investigate database performance.")
+        self.sessions.checkpoint_work_thread(thread_id, {"phase": "investigation", "summary": "Review the options."})
+        self.sessions.loaded.discard(thread_id)
+        self.sessions.read(thread_id)
+        resumed = next(params for method, params in self.sessions.rpc.calls if method == "thread/resume")
+        self.assertEqual(options["developerInstructions"], resumed["developerInstructions"])
+        self.assertEqual(options["developerInstructions"], self.store.threads.instructions(thread_id))
 
     def test_later_and_checkpoint_survive_server_restart_and_archive_restore(self):
         thread_id = self.create()
@@ -2518,13 +2524,14 @@ import sys,json,os
 for line in sys.stdin:
  m=json.loads(line)
  if 'id' in m:
-  print(json.dumps({'id':m['id'],'result':{k:os.environ.get(k) for k in ('AGENT_COORD_SESSION_ID','CODEX_THREAD_ID','CLAUDE_ENV_FILE','PATH','AGENT_COORD_DB')}}),flush=True)
+  print(json.dumps({'id':m['id'],'result':{k:os.environ.get(k) for k in ('AGENT_COORD_SESSION_ID','CODEX_THREAD_ID','CLAUDE_ENV_FILE','PATH','AGENT_COORD_DB','AGENT_COORD_APP_PROMPT')}}),flush=True)
 ''')
         with patch.dict("os.environ", {"AGENT_COORD_SESSION_ID": "parent", "CODEX_THREAD_ID": "parent", "CLAUDE_ENV_FILE": "/parent/file"}):
             result = client.request("environment")
         self.assertIsNone(result["AGENT_COORD_SESSION_ID"])
         self.assertIsNone(result["CODEX_THREAD_ID"])
         self.assertIsNone(result["CLAUDE_ENV_FILE"])
+        self.assertEqual(result["AGENT_COORD_APP_PROMPT"], "1")
         self.assertEqual(result["AGENT_COORD_DB"], str(self.store.database_path))
         self.assertTrue(Path(result["PATH"].split(":")[0], "agent-coord").is_file())
 

@@ -177,6 +177,7 @@ class KimiTests(unittest.TestCase):
         self.assertFalse(self.sessions.kimi.connections)
         resumed = self.start(thread)
         self.assertEqual(resumed.native_id, connection.native_id)
+        self.assertEqual(resumed.calls[-1][1]["prompt"], [{"type": "text", "text": "Hello"}])
         self.assertIn("session/resume", [method for method, _ in resumed.calls])
 
     def test_load_fallback_ignores_replayed_history(self):
@@ -186,6 +187,7 @@ class KimiTests(unittest.TestCase):
         with patch.object(FakeKimi, "initialize", return_value={"agentCapabilities": {"loadSession": True}}):
             connection = self.start(thread)
         self.assertIn("session/load", [method for method, _ in connection.calls])
+        self.assertIn("AGENTS.md", connection.calls[-1][1]["prompt"][0]["text"])
         self.assertEqual([item["type"] for item in self.sessions.read(thread)["thread"]["turns"][-1]["items"]], ["userMessage"])
 
     def test_approval_ids_are_scoped_and_only_native_choices_are_accepted(self):
@@ -517,8 +519,12 @@ class KimiTransportAndHookTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_native_hook_uses_ribbon_identity_delivers_context_and_guards_writes(self):
+        self.store.register(session_id="ribbon-thread", client="kimi", cwd=str(self.root))
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE kimi_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT, cwd TEXT)")
+            db.execute("INSERT INTO kimi_sessions VALUES (?, ?, ?)", ("ribbon-thread", "native-kimi-id", str(self.root)))
         result = self.hook("UserPromptSubmit", prompt="Make a change")
-        self.assertIn("agent-coord checkpoint", result["message"])
+        self.assertEqual(result, {})
         self.assertEqual(self.store.get_session("ribbon-thread")["client"], "kimi")
         with self.assertRaises(CoordinationError):
             self.store.get_session("native-kimi-id")

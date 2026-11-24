@@ -159,6 +159,7 @@ class MuseTests(unittest.TestCase):
         connection = self.start(thread)
         self.assertIn("session/resume", [m for m, _ in connection.calls])
         self.assertEqual(connection.native_id, thread)
+        self.assertEqual(connection.calls[-1][1]["input"], [{"type": "text", "text": "Hello"}])
 
     def test_images_and_coordination_identity_are_native_input(self):
         thread = self.create()
@@ -482,7 +483,7 @@ class MuseSetupTests(unittest.TestCase):
         command = hooks["UserPromptSubmit"][-1]["hooks"][0]["command"]
         result = subprocess.run(command, shell=True, env={"PATH": os.defpath}, text=True, capture_output=True, check=True,
             input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "ribbon", "cwd": str(self.root), "prompt": "Hello"}))
-        self.assertIn("checkpoint", result.stdout)
+        self.assertEqual(json.loads(result.stdout), {})
         self.assertEqual(self.store.get_session("ribbon")["client"], "muse")
         with self.assertRaises(CoordinationError):
             self.store.get_session("native")

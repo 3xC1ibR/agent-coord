@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
 from .antigravity_skills import prepare_skills
+from .native_prompt import NativePromptState
 from .context import client_environment, cli_path, coordination_bootstrap
 from .conversation_sync import ConversationSync
 from .message_delivery import MessageDelivery
@@ -175,6 +176,7 @@ class AntigravityRPC:
         # Turns a backend update is stopping; their late requests are refused.
         self.update_stopping = set()
         with store._connection() as db:
+            self.initial_prompt = NativePromptState(store, "antigravity", db)
             db.execute("CREATE TABLE IF NOT EXISTS antigravity_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL)")
 
     def _emit(self, method, thread_id, **params):
@@ -277,7 +279,6 @@ class AntigravityRPC:
             current = None
         if current:
             return current
-        skills = prepare_skills(self.store, options["cwd"])
         with self.store._connection() as db:
             row = db.execute("SELECT native_id FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
         connection = None
@@ -311,6 +312,7 @@ class AntigravityRPC:
             # never silently create a replacement native conversation.
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO antigravity_sessions VALUES (?, ?)", (thread_id, native_id))
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
             self.native[thread_id] = native_id
             if row:
                 try:
@@ -341,7 +343,8 @@ class AntigravityRPC:
                 connection.request("session/set_mode", {"sessionId": native_id, "modeId": mode})
             self.effective_permissions[thread_id] = mode
             self.options[thread_id] = dict(options)
-            self.skill_contexts[thread_id] = skills
+            if thread_id in self.initial_prompt.pending:
+                self.skill_contexts[thread_id] = prepare_skills(self.store, options["cwd"])
             return connection
         except Exception:
             self.connections.pop(thread_id, None)
@@ -402,9 +405,15 @@ class AntigravityRPC:
                 raise CoordinationError("An Antigravity turn is already running.")
             self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
-            skills = self.skill_contexts[thread_id]
-            prompt = [{"type": "text", "text": coordination_bootstrap(
-                self.store, thread_id, skill_path=skills.coordination_skill) + "\n\n" + skills.instructions}]
+            prompt = []
+            initial = thread_id in self.initial_prompt.pending
+            changes = self.store.threads.observe_context(thread_id, initial=initial)
+            if initial:
+                skills = self.skill_contexts[thread_id]
+                prompt.append({"type": "text", "text": coordination_bootstrap(
+                    self.store, thread_id, skill_path=skills.coordination_skill) + "\n\n" + skills.instructions})
+            elif changes:
+                prompt.append({"type": "text", "text": "Updated coordination context: " + json.dumps(changes, sort_keys=True)})
             for part in params["input"]:
                 if part["type"] == "text":
                     prompt.append({"type": "text", "text": part["text"]})
@@ -417,7 +426,7 @@ class AntigravityRPC:
                 "\n".join(part["text"] for part in params["input"] if part["type"] == "text"),
                 allow_consent=not params.get("_coordination_delivery", False))
             if notice:
-                prompt[0]["text"] += "\n\n" + notice
+                prompt.insert(0, {"type": "text", "text": notice})
             self.turns[thread_id] = turn
             self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
@@ -459,6 +468,7 @@ class AntigravityRPC:
                          termination={"origin": origin, "reason": reason, "execution": execution})
         try:
             result = future.result()
+            self.initial_prompt.confirm(thread_id)
             reason = result.get("stopReason", "end_turn")
             error = self._runtime_failure(thread_id)
             if error:
@@ -512,7 +522,7 @@ class AntigravityRPC:
     def _submit_prompt(self, thread_id, turn_id, connection, prompt, *, supplied=False):
         batch = None if supplied else self.delivery.prepare(thread_id, turn_id)
         if batch:
-            prompt = [*prompt, {"type": "text", "text": batch["text"]}]
+            prompt = [{"type": "text", "text": batch["text"]}, *prompt]
         with self.lock:
             state = self.delivery_turns.get(thread_id)
             if self.closed or not state or state["id"] != turn_id:
@@ -558,6 +568,8 @@ class AntigravityRPC:
             # send resumes the saved native session in a fresh process. Never
             # replay a failed prompt automatically: its tools may have run.
             connection = self.connections.pop(thread_id, None) if status == "failed" else None
+        if len(turn["items"]) > 1:
+            self.initial_prompt.confirm(thread_id)
         if connection:
             connection.close()
         self.conversation_sync.finish(thread_id, turn)

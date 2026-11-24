@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coor
 from agent_coord.app_control import AppControl
 from agent_coord.checkpoint_mcp import update_checkpoint
 from agent_coord.cli import _parser, run
+from agent_coord.context import coordination_bootstrap
 from agent_coord.context_lifecycle import (MAX_REPORT_CHARS, REPORTING_INSTRUCTIONS,
                                           snapshot_for_assignment, validate_report)
 from agent_coord.message_delivery import MessageDelivery
@@ -174,12 +175,12 @@ class ContextLifecycleTests(unittest.TestCase):
         self.assertIsNone(self.snapshot(checkpoint_id=99999))
 
     def test_all_app_agents_receive_guidance_and_can_report_assignments(self):
-        self.assertIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions("worker"))
+        self.assertIn(REPORTING_INSTRUCTIONS, coordination_bootstrap(self.store, "worker"))
         for child in ("direct", "dispatched"):
             with self.subTest(child=child):
                 self.store.threads.start_turn(child, turn_id="assignment-turn")
                 assignment = self.assign(child)
-                self.assertIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions(child))
+                self.assertIn(REPORTING_INSTRUCTIONS, coordination_bootstrap(self.store, child))
                 saved = self.store.threads.checkpoint(child, {"phase": "investigation", "summary": "Result.",
                     "context_lifecycle": self.report(assignment["id"])})
                 reply = self.store.reply_message(sender_session_id=child, message_id=assignment["id"], body="Result")
@@ -215,7 +216,7 @@ class ContextLifecycleTests(unittest.TestCase):
     def test_terminal_sessions_keep_existing_behavior_and_reports_need_a_turn(self):
         report = self.report()
         del report["assignment_message_id"]
-        self.assertNotIn(REPORTING_INSTRUCTIONS, self.store.threads.instructions("peer"))
+        self.assertNotIn(REPORTING_INSTRUCTIONS, coordination_bootstrap(self.store, "peer"))
         self.store.threads.start_turn("peer", turn_id="terminal-turn")
         with self.assertRaisesRegex(CoordinationError, "only supported for app agents"):
             self.store.threads.checkpoint("peer", {"phase": "investigation", "summary": "Result.",

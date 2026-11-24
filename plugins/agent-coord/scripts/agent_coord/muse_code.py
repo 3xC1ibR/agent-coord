@@ -20,6 +20,7 @@ import time
 import uuid
 
 from .acp import ACPConnection
+from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
 from .muse_setup import SCHEMA_FINGERPRINT, TESTED_VERSION, host_config, resolve_runtime
 from .muse_usage import MuseUsage
@@ -115,6 +116,7 @@ class MuseRPC:
         self.permission_catalogs = {}
         self.closed = False
         with store._connection() as db:
+            self.initial_prompt = NativePromptState(store, "muse", db)
             db.execute("CREATE TABLE IF NOT EXISTS muse_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
         self.usage = MuseUsage(store, on_event)
 
@@ -255,6 +257,7 @@ class MuseRPC:
             # Preserve the native identity even when a subsequent setting fails.
             with self.store._connection() as db:
                 db.execute("INSERT OR REPLACE INTO muse_sessions VALUES (?, ?, ?)", (thread_id, native_id, options["cwd"]))
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
             # Approval mode alone does not change the filesystem/network policy.
             # Prove the native profile was committed before admitting any turn.
             state = session.get("permissionState") or {}
@@ -352,15 +355,17 @@ class MuseRPC:
                 raise CoordinationError("A Muse turn is already running.")
             self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
-            # Explicit identity also works in native tools that sanitize their environment.
-            command = shlex.join(["env", f"AGENT_COORD_SESSION_ID={thread_id}", f"AGENT_COORD_DB={self.store.database_path}", "agent-coord"])
-            context = coordination_bootstrap(self.store, thread_id, command=command)
-            if not self.options[thread_id]["yolo"] and not self.store.database_path.resolve().is_relative_to(Path(params["cwd"]).resolve()):
-                context += ("\nFor Agent Coord CLI calls, set the native bash tool's sandbox_permissions to "
-                            "require_escalated so Muse can ask for approval to access the coordination database "
-                            "outside this workspace. An ordinary sandboxed-command approval does not grant "
-                            "that filesystem access.")
-            inputs = [{"type": "text", "text": context}, *self._input(params["input"])]
+            inputs = self._input(params["input"])
+            if thread_id in self.initial_prompt.pending:
+                # Explicit identity also works in native tools that sanitize their environment.
+                command = shlex.join(["env", f"AGENT_COORD_SESSION_ID={thread_id}", f"AGENT_COORD_DB={self.store.database_path}", "agent-coord"])
+                context = coordination_bootstrap(self.store, thread_id, command=command)
+                if not self.options[thread_id]["yolo"] and not self.store.database_path.resolve().is_relative_to(Path(params["cwd"]).resolve()):
+                    context += ("\nFor Agent Coord CLI calls, set the native bash tool's sandbox_permissions to "
+                                "require_escalated so Muse can ask for approval to access the coordination database "
+                                "outside this workspace. An ordinary sandboxed-command approval does not grant "
+                                "that filesystem access.")
+                inputs.insert(0, {"type": "text", "text": context})
             turn = {"id": command_id(), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
             if not self._start_turn(thread_id, turn):
@@ -370,6 +375,7 @@ class MuseRPC:
                     "input": inputs, "displayText": "\n".join(p.get("text", "[Image]") for p in params["input"])})
                 if result.get("turnId") != turn["id"] or result.get("disposition") not in {"started", "queued"}:
                     raise CoordinationError("Muse did not start the expected turn. Review the native session before retrying.")
+                self.initial_prompt.confirm(thread_id)
             except Exception as exc:
                 self._shutdown(thread_id)
                 self._finish(thread_id, "failed", str(exc))
