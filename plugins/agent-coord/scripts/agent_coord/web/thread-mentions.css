@@ -1,15 +1,15 @@
-.thread-mentions { position: absolute; bottom: 100%; left: 0; right: 0; z-index: 30; max-height: min(320px, 40dvh); overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px #0003; }
+.thread-mentions { position: absolute; bottom: 100%; left: 0; right: 0; z-index: var(--layer-popover); max-height: min(320px, 40dvh); overflow: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); }
 .thread-mentions[hidden] { display: none; }
-.thread-mentions > button { display: block; width: 100%; text-align: left; padding: 10px 14px; border: 0; border-radius: 0; background: transparent; color: var(--ink); }
-.thread-mentions > button[aria-selected="true"] { background: var(--tint); }
-.thread-mentions small { display: block; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; margin-top: 3px; }
-.thread-references { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 12px; }
-.thread-reference { font-size: 11px; max-width: 100%; overflow-wrap: anywhere; }
+.thread-mentions > button { display: block; width: 100%; text-align: left; padding: var(--space-3) var(--space-4); border: 0; border-radius: 0; background: transparent; color: var(--ink); }
+.thread-mentions > button[aria-selected="true"] { background: var(--hover-bg); }
+.thread-mentions small { display: block; color: var(--muted); font-size: var(--text-xs); overflow-wrap: anywhere; margin-top: var(--space-1); }
+.thread-references { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-3); }
+.thread-reference { font-size: var(--text-xs); max-width: 100%; overflow-wrap: anywhere; }
 #schedule-form .mention-editor { position: relative; }
 #schedule-form .thread-references { padding: 0; }
-@media (max-width: 700px) { .thread-mentions > button { min-height: 44px; } .thread-reference { min-height: 36px; } }
+@media (max-width: 700px) { .thread-mentions > button { min-height: var(--hit-target); } .thread-reference { min-height: var(--control-md); } }
 
-.message-thread-references { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; margin-top: 8px; white-space: normal; }
+.message-thread-references { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); font-size: var(--text-xs); margin-top: var(--space-2); white-space: normal; }
 
 .file-mention-preview { max-width: min(900px, 90vw); max-height: 85dvh; overflow: auto; }
 .file-mention-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }

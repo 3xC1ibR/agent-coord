@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const {AsksUI, AsksCopy} = require("../plugins/agent-coord/scripts/agent_coord/web/asks.js");
 const {Element, makeDocument} = require("./web_dom_stub.js");
 
-const IDS = ["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "sidebar-backdrop", "menu-toggle",
+const IDS = ["open-asks-view", "asks-entry-label", "asks-count", "asks-dialog", "sidebar-backdrop", "menu-toggle",
   "asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters", "asks-filter-project", "asks-filter-kind",
   "asks-filter-since", "asks-notice", "asks-error", "asks-status", "asks-list"];
 function setup(open, {config = {askKinds: true}} = {}) {
@@ -36,7 +36,6 @@ const snoozedBlocking = {...item, id: 9, question: "Confirm account", blocking: 
 test("the entry is named from the copy and counts open asks that are not snoozed", async () => {
   const {ui, $, state} = setup([blocking, quiet, snoozedBlocking]);
   assert.equal($("asks-entry-label").textContent, AsksCopy.viewName);
-  assert.equal($("open-asks").getAttribute("aria-label"), AsksCopy.viewName);
   assert.equal($("asks-title").textContent, AsksCopy.viewName);
   assert.equal($("asks-count").hidden, true);
   await ui.refresh();
@@ -44,7 +43,6 @@ test("the entry is named from the copy and counts open asks that are not snoozed
   assert.equal($("asks-count").textContent, "2");
   assert.ok($("asks-count").classList.contains("asks-count-blocking"));
   assert.equal($("open-asks-view").title, "2 asks waiting for you · 1 blocking");
-  assert.equal($("open-asks").title, $("open-asks-view").title);
   assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName + ": 2 asks waiting for you · 1 blocking");
   // The dialog is closed, so no rows are built for a background refresh.
   assert.equal($("asks-list").byClass("ask-row").length, 0);
@@ -60,19 +58,18 @@ test("the entry is named from the copy and counts open asks that are not snoozed
   assert.equal($("open-asks-view").getAttribute("aria-label"), AsksCopy.viewName);
 });
 
-test("the sidebar entry and the question-mark button both open the view and start its refresh cycle", async () => {
-  const {$, timers, calls, ui} = setup([blocking, quiet]);
-  for (const id of ["open-asks-view", "open-asks"]) {
-    let prevented = false;
-    await $(id).onclick({preventDefault() { prevented = true; }});
-    assert.equal(prevented, true, id);
-    assert.equal($("asks-dialog").open, true);
-    assert.deepEqual($("asks-list").byClass("ask-row").map(row => row.dataset.id), ["7", "8"]);
-    $("asks-dialog").close();
-    assert.equal(ui.viewer.visible, false);
-  }
-  assert.deepEqual(calls.filter(call => call.path === "config").length, 2);
-  // One live timer while open; closing clears it.
+test("the sidebar entry opens Queue and it polls only while visible and disconnected", async () => {
+  const {$, timers, calls, ui, open} = setup([blocking, quiet]);
+  await open();
+  assert.equal($("asks-dialog").open, true);
+  assert.deepEqual($("asks-list").byClass("ask-row").map(row => row.dataset.id), ["7", "8"]);
+  assert.equal(calls.filter(call => call.path === "config").length, 1);
+  ui.setEventsConnected(true);
+  assert.deepEqual(timers, [null]);
+  ui.setEventsConnected(false);
+  assert.equal(typeof timers.at(-1), "function");
+  $("asks-dialog").close();
+  assert.equal(ui.viewer.visible, false);
   assert.deepEqual(timers, [null, null]);
   $("sidebar-backdrop").hidden = false;
   await $("open-asks-view").onclick({preventDefault() {}});

@@ -1,0 +1,21 @@
+{
+  "viewports": {
+    "desktop": [1440, 900],
+    "mobile": [390, 844]
+  },
+  "color_schemes": ["light", "dark"],
+  "states": ["default", "empty", "streaming", "long-error"],
+  "surfaces": ["list", "focus", "atlas", "dispatcher", "conversation", "tiled", "queue"],
+  "surface_notes": {
+    "atlas/mobile": "Atlas explicitly falls back at 720px. The capture records the rendered fallback.",
+    "dispatcher/mobile": "The empty state opens Chat with the mobile control. Populated states show the actual activity rail.",
+    "dispatcher/streaming": "A real persisted routing receipt points to a conversation progressing through provider events.",
+    "dispatcher/long-error": "The activity rail shows a long blocked conversation and a separate failed routing receipt.",
+    "conversation/empty": "A saved conversation with no transcript.",
+    "tiled/empty": "Two saved conversations with no transcript.",
+    "tiled/streaming": "One visible conversation renders a live provider message.",
+    "tiled/long-error": "One visible conversation renders a failed long transcript and its error.",
+    "queue/empty": "No open, resolved, or snoozed asks.",
+    "queue/long-error": "A failed resolution leaves the long ask and the entered text visible."
+  }
+}

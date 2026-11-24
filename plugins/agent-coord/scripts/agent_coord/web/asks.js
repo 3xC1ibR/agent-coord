@@ -31,23 +31,16 @@
       history: "Resolved asks",
       earlier(count) { return count + " earlier in the " + copy.viewName + "'s " + copy.sections.resolved + " section."; },
     },
-    // A reply in the user's own words. It goes to the asking conversation as the user's message and leaves the ask open.
     reply: {
-      placeholder: "Reply in your own words…",
-      label: "Reply",
-      send: "Send reply",
-      sendTitle: "Send this to the agent. The ask stays open.",
-      answer: "Answer with my text",
+      placeholder: "Answer in your own words…",
+      label: "Answer",
+      answer: "Answer",
       answerTitle: "Record this as your answer and close the ask.",
-      // Shown once something is typed: what each control does with the text.
-      hint: "Send reply keeps the ask open. Choosing a resolution closes it with this text attached.",
-      converse: "Reply in conversation",
-      converseTitle: "Open the conversation with this ask referenced in your message.",
-      // The same control inside the asking conversation, where the message box is just below.
-      converseHere: "Quote in message",
-      converseHereTitle: "Put this ask and your text in the message below.",
+      hint: "Enter answers the ask. Shift+Enter discusses it and keeps it open.",
+      discuss: "Discuss in thread",
+      discussTitle: "Send this as a message in the thread and keep the ask open.",
       mark: age => "You replied " + (age === "just now" ? age : age + " ago"),
-      external: "This thread runs outside Ribbon Field, so a reply cannot reach it from here. Choose a resolution to send your text as its note.",
+      external: "This thread runs outside Ribbon Field. Use Answer or choose a resolution to send your text.",
       /* How a reply names its ask to the agent: number, title and that it is still open. */
       reference(ask) {
         const title = splitQuestion(ask.question).title;
@@ -272,25 +265,27 @@
       if (ask.context) element.append(...this.passage(ask.context, "ask-context"));
 
       const legacy = this.legacy;
-      const kind = ask.kind || "decision";
       const resolutions = ask.resolutions || ["answered", "dismissed"];
-      const decision = kind === "decision";
+      const decision = !ask.kind || ask.kind === "decision";
       const form = this.node("form", "", "ask-resolve");
-      // Every ask takes a reply in the user's own words. The same text is the note when a resolution is chosen.
       const input = this.node("input", "", "ask-note"); input.type = "text"; input.maxLength = 4000;
       input.placeholder = copy.reply.placeholder;
       input.setAttribute("aria-label", copy.reply.label + ": " + ask.question);
-      const send = this.node("button", copy.reply.send, "ask-send"); send.type = "submit";
-      send.title = copy.reply.sendTitle;
+      const answer = this.node("button", copy.reply.answer, "ask-send"); answer.type = "submit";
+      answer.title = copy.reply.answerTitle;
+      answer.setAttribute("aria-keyshortcuts", "Enter");
+      const discuss = this.button(copy.reply.discuss, () => discussText(), "quiet ask-reply-discuss");
+      discuss.title = copy.reply.discussTitle;
+      discuss.setAttribute("aria-keyshortcuts", "Shift+Enter");
       const reply = this.node("div", "", "ask-reply");
-      reply.append(input, send);
+      reply.append(input, answer, discuss);
       const hint = this.node("p", copy.reply.hint, "ask-hint"); hint.hidden = true;
       // What the user last replied, while the ask stays open.
       const replied = this.node("p", "", "ask-unblocks ask-replied");
       const repliedWhen = this.node("span", "", "ask-label"), repliedText = this.node("span", "");
       replied.append(repliedWhen, repliedText);
       const error = this.node("p", "", "ask-row-error"); error.setAttribute("role", "alert"); error.hidden = true;
-      const controls = [input, send];
+      const controls = [input, answer, discuss];
       const record = {element, controls, error, input};
       // A folded row keeps its title and meta line; what was typed in it stays.
       record.fold = folded => {
@@ -301,46 +296,41 @@
       };
       const text = () => input.value.trim();
       const note = () => text() ? {note: text()} : {};
-      // Once there is text, say what Send reply and a resolution each do with it.
       record.sync = () => { hint.hidden = !text(); };
       input.oninput = record.sync;
       const resolveWith = resolution => () => this.resolve(ask, {resolution, ...note()}, record);
-      // Enter sends the reply and never picks a resolution for the user.
+      const discussText = () => text() ? this.reply(ask, text(), record) : this.converse(ask, "", record);
+      const answerText = () => {
+        if (!text()) { input.focus?.(); return; }
+        return this.resolve(ask, legacy ? {answer: text()} : {resolution: "answered", answer: text()}, record);
+      };
+      input.onkeydown = event => {
+        if (event.key !== "Enter") return;
+        // Enter confirms the current IME candidate before it can act on an ask.
+        if (event.isComposing || event.keyCode === 229) return;
+        event.preventDefault();
+        if (event.altKey || event.ctrlKey || event.metaKey || event.repeat) return;
+        return event.shiftKey ? discussText() : answerText();
+      };
       form.onsubmit = event => {
         event?.preventDefault?.();
-        if (!text()) { input.focus?.(); return; }
-        return this.reply(ask, text(), record);
+        return answerText();
       };
-      // One row of controls: the kind's resolutions at a fixed left edge, quiet text controls after them.
       const entry = this.node("div", "", "ask-entry");
       const later = this.node("div", "", "ask-later");
       if (decision) {
-        // A decision closes on one of its options, or on the typed text as its answer.
-        for (const option of ask.options) {
+        for (const option of ask.options || []) {
           const choice = this.button(option, () => this.resolve(ask,
             legacy ? {option} : {resolution: "answered", option, ...note()}, record), "ask-option");
           controls.push(choice); entry.append(choice);
         }
-        const answer = this.button(copy.reply.answer, () => {
-          if (!text()) { input.focus?.(); return; }
-          return this.resolve(ask, legacy ? {answer: text()} : {resolution: "answered", answer: text()}, record);
-        }, "ask-affirm");
-        answer.title = copy.reply.answerTitle;
-        controls.push(answer); entry.append(answer);
       } else {
-        const [affirm, ...others] = resolutions.filter(resolution => resolution !== "dismissed");
-        const primary = this.button(copy.resolve[affirm] || affirm, resolveWith(affirm), "ask-affirm");
-        controls.push(primary); entry.append(primary);
-        for (const resolution of others) {
+        for (const resolution of resolutions.filter(value => value !== "answered" && value !== "dismissed")) {
           const other = this.button(copy.resolve[resolution] || resolution, resolveWith(resolution), "quiet");
           controls.push(other); entry.append(other);
         }
       }
       form.append(reply, hint);
-      const converse = this.button(thread ? copy.reply.converse : copy.reply.converseHere,
-        () => this.converse(ask, text(), record), "ask-text-control");
-      converse.title = thread ? copy.reply.converseTitle : copy.reply.converseHereTitle;
-      controls.push(converse); later.append(converse);
       if (legacy) {
         // Snooze and dismissal need the updated backend.
       } else if (snoozedSection) {
@@ -453,6 +443,7 @@
       this.resolved = [];
       this.loaded = false;
       this.resolvedLoaded = false;
+      this.threadResolvedAt = new Map();
       this.failure = null;
       this.sequence = 0;
       this.records = new Map();
@@ -641,13 +632,16 @@
     async resolve(ask, body, record) {
       const saved = await this.submit(ask, record, "asks/" + encodeURIComponent(ask.id), body);
       if (!saved) return;
+      ++this.sequence; // An open-list request started before the write may still carry this ask.
       this.open = this.open.filter(item => item.id !== ask.id);
-      if (this.resolvedLoaded) this.resolved = [{...ask, ...saved, stale: false, overdue: false, snoozed: false}, ...this.resolved];
+      this.resolved = [{...ask, ...saved, stale: false, overdue: false, snoozed: false},
+        ...this.resolved.filter(item => item.id !== ask.id)];
       this.render();
     }
     async snooze(ask, until, record) {
       const saved = await this.submit(ask, record, "asks/" + encodeURIComponent(ask.id) + "/snooze", {until});
       if (!saved) return;
+      ++this.sequence;
       this.open = this.open.map(item => item.id === ask.id
         ? {...item, snoozed_until: saved.snoozed_until, snoozed: saved.snoozed_until != null} : item);
       this.render();
@@ -768,7 +762,8 @@
       this.render();
       // Nothing else keeps the resolved log current, and it changes rarely.
       const {source} = this;
-      const due = source.clock() - (source.resolvedReadAt ?? -Infinity) >= RESOLVED_REREAD_MILLISECONDS;
+      const lastRead = Math.max(source.resolvedReadAt ?? -Infinity, source.threadResolvedAt.get(thread) ?? -Infinity);
+      const due = source.clock() - lastRead >= RESOLVED_REREAD_MILLISECONDS;
       return thread && this.history && due ? source.readResolved() : Promise.resolve();
     }
     fold() {
@@ -898,8 +893,8 @@
      on the navigation toggle, and the open conversation's strip. */
   class AsksUI {
     constructor({document, api, view = globalThis, navigate, onError, copyText, clock, kinds, replyRecords,
-                 openComposer, threadInfo, messageSent, storage, requestId}) {
-      Object.assign(this, {document, api, view, navigate, onError, openComposer});
+                 openComposer, threadInfo, messageSent, storage, requestId, connected}) {
+      Object.assign(this, {document, api, view, navigate, onError, openComposer, connected});
       const $ = id => document.getElementById(id);
       this.entry = $("open-asks-view");
       this.label = $("asks-entry-label");
@@ -907,10 +902,8 @@
       // While the navigation is closed its entry is out of sight, so the toggle carries the count.
       this.toggle = $("menu-toggle");
       this.toggleBadge = $("asks-toggle-count");
-      this.shortcut = $("open-asks");
       this.dialog = $("asks-dialog");
       if (this.label) this.label.textContent = copy.viewName;
-      this.shortcut?.setAttribute("aria-label", copy.viewName);
       this.viewer = new AsksView({document, api,
         openThread: id => this.follow("agentcoord://thread/" + encodeURIComponent(id)),
         navigate: url => this.follow(url), close: () => this.dialog.close(),
@@ -925,14 +918,42 @@
       const render = this.viewer.render.bind(this.viewer);
       // Every change to the list, including an in-place resolution, also moves the counts and the strip.
       this.viewer.render = () => { render(); this.updateBadge(); this.thread.render(); };
-      for (const control of [this.entry, this.shortcut]) {
-        if (control) control.onclick = event => { event?.preventDefault?.(); return this.open(); };
-      }
+      if (this.entry) this.entry.onclick = event => { event?.preventDefault?.(); return this.open(); };
       this.dialog.addEventListener?.("close", () => this.closed());
       this.updateBadge();
     }
     get items() { return this.viewer.open; }
-    refresh() { return this.viewer.refresh(); }
+    refresh(options) { return this.viewer.refresh(options); }
+    hydrateThread(thread, items) {
+      if (!Array.isArray(items)) return;
+      const {viewer} = this;
+      const resolved = new Map(viewer.resolved.map(ask => [ask.id, ask]));
+      const open = [];
+      for (const ask of items) {
+        if (ask.session_id !== thread) continue;
+        if (["resolved", "answered"].includes(ask.status)) resolved.set(ask.id, ask);
+        else if ((!ask.status || ask.status === "open") && !resolved.has(ask.id)) open.push(ask);
+      }
+      viewer.open = [...viewer.open.filter(ask => ask.session_id !== thread), ...open];
+      viewer.resolved = [...resolved.values()].sort((a, b) => Date.parse(b.resolved_at) - Date.parse(a.resolved_at) || b.id - a.id);
+      viewer.threadResolvedAt.set(thread, viewer.clock());
+      viewer.render();
+    }
+    setEventsConnected(connected) {
+      this.eventsConnected = connected;
+      this.syncTimer();
+    }
+    syncTimer() {
+      if ((this.eventsConnected ?? this.connected?.()) || !this.viewer.visible) {
+        this.view.clearInterval?.(this.timer);
+        this.timer = null;
+      } else if (this.timer == null) {
+        this.timer = this.view.setInterval?.(() => {
+          if (this.eventsConnected ?? this.connected?.()) this.syncTimer();
+          else if (!this.document.hidden) this.refresh({background: true});
+        }, REFRESH_MILLISECONDS);
+      }
+    }
     /* Show one conversation's asks in its strip; no thread hides the strip. */
     showThread(thread) { return this.thread.setThread(thread); }
     updateBadge() {
@@ -945,7 +966,7 @@
         badge.classList?.toggle("asks-count-blocking", blocking > 0);
       }
       const title = copy.entryTitle(count, blocking);
-      for (const control of [this.entry, this.shortcut]) if (control) control.title = title;
+      if (this.entry) this.entry.title = title;
       this.entry?.setAttribute("aria-label", count ? copy.viewName + ": " + title : copy.viewName);
       // The toggle keeps its own name; the count is its description.
       if (count) this.toggle?.setAttribute("aria-description", title);
@@ -956,10 +977,7 @@
       if (backdrop && !backdrop.hidden) backdrop.click();
       this.viewer.setVisible(true);
       if (!this.dialog.open) this.dialog.showModal();
-      this.view.clearInterval?.(this.timer);
-      this.timer = this.view.setInterval?.(() => {
-        if (!this.document.hidden) this.refresh();
-      }, REFRESH_MILLISECONDS);
+      this.syncTimer();
       try {
         // A backend from before kinds serves this view until its update is applied.
         const config = await this.api("config");
@@ -981,8 +999,8 @@
       return true;
     }
     closed() {
-      this.view.clearInterval?.(this.timer);
       this.viewer.setVisible(false);
+      this.syncTimer();
       const visible = this.entry?.getClientRects?.().length;
       (visible ? this.entry : this.document.getElementById("menu-toggle"))?.focus?.({preventScroll: true});
       this.refresh();

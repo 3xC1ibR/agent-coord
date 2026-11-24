@@ -14,7 +14,7 @@ from .attention import ClassificationError, load_config
 from .dispatch_routing import RoutingPolicy, build_state, classify
 from .dispatch_snapshot import read_snapshot
 from .store import CoordinationError
-from .workspaces import resolve_workspace
+from .workspaces import matches_workspace, resolve_workspace, workspace_members
 
 
 def channel(cwd):
@@ -129,7 +129,7 @@ def suggestions(runtime, body):
 
 
 def submit(runtime, body):
-    if set(body) - {"cwd", "message", "destination", "requestId", "settings"}:
+    if set(body) - {"cwd", "message", "destination", "requestId", "settings", "project_id"}:
         raise CoordinationError("Send work accepts only the typed request and destination.")
     cwd = directory(runtime, body)
     message = runtime.sessions._text(body.get("message"), "Request", 100000)
@@ -139,6 +139,11 @@ def submit(runtime, body):
         raise CoordinationError("Choose a conversation, New conversation, or Ask dispatcher.")
     if set(destination) != ({"kind", "id"} if destination["kind"] == "thread" else {"kind"}):
         raise CoordinationError("Invalid destination.")
+    project = body.get("project_id")
+    if project is not None:
+        runtime.sessions._text(project, "Workspace ID", 200)
+        if destination["kind"] != "thread":
+            raise CoordinationError("Workspace membership applies to an existing conversation.")
     settings = body.get("settings")
     if "settings" in body:
         if destination["kind"] != "new":
@@ -152,29 +157,51 @@ def submit(runtime, body):
         runtime.sessions._creation_settings({**settings, "cwd": cwd})
     if destination["kind"] == "thread":
         runtime.sessions._text(destination["id"], "Destination ID", 200)
-        target = runtime.sessions._record(destination["id"])
-        if target["cwd"] != cwd or runtime.settings(destination["id"])["enabled"]:
-            raise CoordinationError("Choose a normal conversation in this project.")
     saved = {"message": message, "images": [], "mentions": [], "windowId": None,
              "sendWork": destination}
     if settings is not None:
         saved["sendWorkSettings"] = settings
+    if project is not None:
+        saved["sendWorkProjectId"] = project
     payload = json.dumps(saved, sort_keys=True)
     owner = channel(cwd)
-    with runtime.store._connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        prior = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? AND request_id=?", (owner, key)).fetchone()
-        if prior:
-            if prior["body_json"] != payload:
-                raise CoordinationError("This requestId already belongs to different input.")
-            return {"receipt": status(runtime, {"cwd": cwd, "id": prior["id"]}), "replayed": True}
-        cursor = db.execute("""INSERT INTO dispatch_requests
-            (dispatcher_id,request_id,body_json,cwd,state,created_at) VALUES (?,?,?,?,'pending',?)""",
-                            (owner, key, payload, cwd, time.time()))
-        identity = cursor.lastrowid
-        runtime.transition(db, identity, "pending")
-    runtime.wake()
-    return {"receipt": status(runtime, {"cwd": cwd, "id": identity}), "replayed": False}
+    receipt_query = "SELECT id, body_json FROM dispatch_requests WHERE dispatcher_id=? AND request_id=?"
+    with runtime.store.reading(), runtime.store._connection() as db:
+        prior = db.execute(receipt_query, (owner, key)).fetchone()
+    if prior is None:
+        if destination["kind"] == "thread":
+            require_destination(runtime, destination["id"], cwd, project)
+        with runtime.store.database_operation("send_work.reserve", priority="foreground"), runtime.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute(receipt_query, (owner, key)).fetchone()
+            if prior is None:
+                cursor = db.execute("""INSERT INTO dispatch_requests
+                    (dispatcher_id,request_id,body_json,cwd,state,created_at) VALUES (?,?,?,?,'pending',?)""",
+                                    (owner, key, payload, cwd, time.time()))
+                identity = cursor.lastrowid
+                runtime.transition(db, identity, "pending")
+    if prior is not None:
+        if prior["body_json"] != payload:
+            raise CoordinationError("This requestId already belongs to different input.")
+        identity = prior["id"]
+    else:
+        runtime.wake()
+    return {"receipt": status(runtime, {"cwd": cwd, "id": identity}), "replayed": prior is not None}
+
+
+def require_destination(runtime, target, cwd, project):
+    sessions = runtime.sessions
+    sessions._authorize_history(target)
+    sessions._record(target)
+    thread = sessions.work_thread(target, history=False)
+    if project is None:
+        member = workspace_members({"project_cwd": [cwd]})(thread)
+    else:
+        launch = thread["project_launch_cwd"]
+        member = workspace_members({"project": [project]})(thread) and (
+            launch is None or matches_workspace(launch, sessions.cwd))
+    if not member or thread["dispatcher"]:
+        raise CoordinationError("Choose a normal conversation in this project.")
 
 
 def status(runtime, body):
@@ -224,7 +251,9 @@ def _execute(runtime, item):
     runtime.update(identity, "routing", target_id=target,
                    decision_json=json.dumps({"action": destination["kind"], "thread_id": target, "reason": "user_selected"}))
     with runtime.sessions._thread_lock(target):
-        if runtime.sessions._record(target)["cwd"] != cwd:
+        if destination["kind"] == "thread":
+            require_destination(runtime, target, cwd, body.get("sendWorkProjectId"))
+        elif runtime.sessions._record(target)["cwd"] != cwd:
             raise CoordinationError("The destination moved to another project. Choose it again.")
         # An explicit selection never falls back to a different recipient.
         runtime.sessions.queue.enqueue(target, body, dispatch_id=identity)

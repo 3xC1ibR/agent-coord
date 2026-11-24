@@ -16,6 +16,7 @@ from pathlib import Path
 import threading
 import uuid
 
+from . import acp_state
 from .acp import ACPConnection
 from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
@@ -38,7 +39,8 @@ class KimiConnection(ACPConnection):
         removed = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE"}
         env = {k: v for k, v in os.environ.items() if k not in removed and not k.startswith("ZELLIJ")}
         env = client_environment(env, store.database_path, "kimi", session_id=options.get("threadId"))
-        super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+        super().__init__(callback, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="kimi", thread_id=options.get("threadId"))
 
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": 1,
@@ -219,7 +221,11 @@ class KimiRPC:
                 else:
                     raise CoordinationError("This Kimi runtime cannot resume saved sessions. Update Kimi Code CLI.")
                 params["sessionId"] = row["native_id"]
+            if method == "session/load":
+                acp_state.begin_replay(self, thread_id)
             session = connection.request(method, params)
+            if method == "session/load":
+                acp_state.finish_replay(self, thread_id)
             native_id = row["native_id"] if row else session.get("sessionId")
             if not isinstance(native_id, str) or not native_id:
                 raise CoordinationError("Kimi did not return a native session identity.")
@@ -332,7 +338,8 @@ class KimiRPC:
             try:
                 self.journals[thread_id] = PromptJournal(self.native[thread_id], self.options[thread_id]["cwd"])
                 future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-                future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
+                if not getattr(connection, "channel", None):
+                    future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc))
                 raise
@@ -439,6 +446,8 @@ class KimiRPC:
             return
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+        if thread_id not in self.turns and acp_state.replay_update(self, thread_id, update):
+            return
         if kind == "usage_update":
             # Kimi sends this after settling session/prompt, outside display
             # turns. The generation and native-session checks still apply.
@@ -455,6 +464,9 @@ class KimiRPC:
                 if content.get("type") != "text":
                     return
                 item_type = "agentMessage" if kind == "agent_message_chunk" else "reasoning"
+                if acp_state.stream_deltas(self):
+                    acp_state.append_text_delta(self, thread_id, turn, item_type, content.get("text", ""))
+                    return
                 item = turn["items"][-1] if turn["items"] else {}
                 if item.get("type") != item_type:
                     item = {"id": str(uuid.uuid4()), "type": item_type,
@@ -465,6 +477,8 @@ class KimiRPC:
                 else:
                     item["summary"][0] += content.get("text", "")
             elif kind in {"tool_call", "tool_call_update"}:
+                if acp_state.stream_deltas(self) and acp_state.append_tool_delta(self, thread_id, turn, update):
+                    return
                 item_id = update.get("toolCallId")
                 if not item_id:
                     return
@@ -579,6 +593,10 @@ class KimiRPC:
             self._capture_usage(thread_id)
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.connections):
             self._finish(thread_id, "interrupted")

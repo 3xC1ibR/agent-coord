@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SCRIPTS = ROOT / "plugins/agent-coord/scripts"
 BUNDLE_ID = "com.agentcoord.desktop"
+SMOKE_BUNDLE_ID = BUNDLE_ID + ".smoke"
 APP_NAME = "Ribbon Field"
 BUNDLE_NAME = APP_NAME + ".app"
 LEGACY_BUNDLE_NAME = "Agent Coord.app"
@@ -25,7 +26,7 @@ LEGACY_BUNDLE_NAME = "Agent Coord.app"
 EXECUTABLE_NAME = "Agent Coord"
 
 
-def check_destination(destination: Path) -> None:
+def check_destination(destination: Path, bundle_id: str = BUNDLE_ID) -> None:
     if destination.is_symlink():
         raise ValueError(f"Refusing to replace a symbolic link: {destination}")
     if not destination.exists():
@@ -33,7 +34,7 @@ def check_destination(destination: Path) -> None:
     try:
         result = subprocess.run(["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-",
                                  str(destination / "Contents/Info.plist")], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip() == BUNDLE_ID:
+        if result.returncode == 0 and result.stdout.strip() == bundle_id:
             return
     except (OSError, ValueError):
         pass
@@ -93,8 +94,8 @@ def legacy_installation(destination: Path) -> Path | None:
     return None
 
 
-def replace_app(source: Path, destination: Path, *, legacy: Path | None = None) -> None:
-    check_destination(destination)
+def replace_app(source: Path, destination: Path, *, legacy: Path | None = None, bundle_id: str = BUNDLE_ID) -> None:
+    check_destination(destination, bundle_id)
     check_not_running(destination)
     if legacy is not None:
         check_destination(legacy)
@@ -127,6 +128,26 @@ def register_app(destination: Path) -> None:
     # development bundle version stayed the same.
     subprocess.run(["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
                     "-f", str(destination)], check=True)
+
+
+def stage_legacy_web_entry(web: Path, snapshot: dict[str, str]) -> None:
+    distribution = web / "dist"
+    index = (distribution / "index.html").read_bytes()
+    for extension, alias in (("js", "app.js"), ("css", "styles.css")):
+        suffix = extension.encode("ascii")
+        assets = set(re.findall(rb"/dist/(app-([a-f0-9]{20})\." + suffix + rb")(?=[\"'])", index))
+        if len(assets) != 1:
+            raise ValueError(f"The workspace distribution must reference one hashed .{extension} asset.")
+        filename, expected_digest = assets.pop()
+        data = (distribution / filename.decode("ascii")).read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest[:20].encode("ascii") != expected_digest:
+            raise ValueError(f"The workspace asset does not match its content hash: {filename.decode('ascii')}")
+        (web / alias).write_bytes(data)
+        snapshot["agent_coord/web/" + alias] = digest
+        index = index.replace(b"/dist/" + filename, b"/" + alias.encode("ascii"))
+    (web / "index.html").write_bytes(index)
+    snapshot["agent_coord/web/index.html"] = hashlib.sha256(index).hexdigest()
 
 
 def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]:
@@ -170,7 +191,12 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
     # asset allowlist. Load new modules through established URLs until its safe
     # idle handover, rather than requiring new HTTP routes to boot the interface.
     web = resources / "backend/agent_coord/web"
-    if (web / "index.html").is_file():
+    if (web / "dist/index.html").is_file():
+        # Retained runtimes can serve these aliases through their existing
+        # allowlist while the new coordinator is staged. New runtimes still
+        # serve the canonical distribution and immutable hashed assets.
+        stage_legacy_web_entry(web, snapshot)
+    elif (web / "index.html").is_file():
         index = (web / "index.html").read_text()
         modules = ("html-preview.js", "response-actions.js", "permission-menu.js")
         scripts = []
@@ -190,7 +216,8 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=ROOT / "build/macos" / BUNDLE_NAME)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--smoke-harness", action="store_true", help="Build the separate, disposable native UI test app.")
     parser.add_argument("--install", action="store_true", help="Also install into ~/Applications.")
     parser.add_argument("--install-dir", type=Path, default=Path.home() / "Applications")
     parser.add_argument("--python", default=sys.executable, help="Python 3.10+ used by the app.")
@@ -210,6 +237,10 @@ def main() -> int:
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("Building the native app requires macOS and Xcode Command Line Tools.")
+    if args.smoke_harness and (args.install or args.dmg or args.notary_profile or args.update_feed or args.update_archive):
+        parser.error("--smoke-harness is only for testing and cannot install, notarize or package a release.")
+    bundle_id = SMOKE_BUNDLE_ID if args.smoke_harness else BUNDLE_ID
+    bundle_name = "Ribbon Field Smoke.app" if args.smoke_harness else BUNDLE_NAME
     try:
         args.sign_identity = resolve_signing_identity(args.sign_identity, install=args.install)
     except (ValueError, subprocess.CalledProcessError) as exc:
@@ -245,11 +276,16 @@ def main() -> int:
     subprocess.run(["xcrun", "--find", "swiftc"], check=True, stdout=subprocess.DEVNULL)
     if not args.standalone and not shutil.which("codex"):
         parser.error("Install Codex and make it available on PATH before building the app.")
-    output = args.output.expanduser().absolute()
+    web_builder = ROOT / "scripts/build_web.py"
+    if web_builder.is_file():
+        subprocess.run([sys.executable, str(web_builder)], cwd=ROOT, check=True)
+        if not (SCRIPTS / "agent_coord/web/dist/index.html").is_file():
+            raise ValueError("The web build did not produce its distribution index.")
+    output = (args.output or ROOT / "build/macos" / bundle_name).expanduser().absolute()
     destination = args.install_dir.expanduser().absolute() / BUNDLE_NAME
     legacy = legacy_installation(destination) if args.install else None
     for path in {output, *([destination] if args.install else []), *([legacy] if legacy else [])}:
-        check_destination(path)
+        check_destination(path, bundle_id)
         check_not_running(path)
 
     sys.path.insert(0, str(SCRIPTS))
@@ -258,7 +294,7 @@ def main() -> int:
     database = (args.database or default_database_path()).expanduser().absolute()
     with tempfile.TemporaryDirectory(prefix="agent-coord-build-") as scratch:
         scratch = Path(scratch)
-        app = scratch / BUNDLE_NAME
+        app = scratch / bundle_name
         contents = app / "Contents"
         resources = contents / "Resources"
         binaries = contents / "MacOS"
@@ -296,16 +332,17 @@ def main() -> int:
         (resources / "backend-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
         shutil.copyfile(ROOT / "LICENSE", resources / "LICENSE")
         info = {
-                "CFBundleIdentifier": BUNDLE_ID, "CFBundleName": APP_NAME,
+                "CFBundleIdentifier": bundle_id, "CFBundleName": APP_NAME,
                 "CFBundleDisplayName": APP_NAME, "CFBundleExecutable": EXECUTABLE_NAME,
                 "CFBundlePackageType": "APPL", "CFBundleShortVersionString": args.version,
                 "CFBundleVersion": args.build_number, "CFBundleIconFile": "AppIcon",
                 "LSMinimumSystemVersion": "12.0", "NSHighResolutionCapable": True,
                 "NSPrincipalClass": "NSApplication",
-                "CFBundleURLTypes": [{"CFBundleURLName": BUNDLE_ID, "CFBundleURLSchemes": ["agentcoord"],
-                                      "CFBundleTypeRole": "Viewer"}],
                 "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
             }
+        if not args.smoke_harness:
+            info["CFBundleURLTypes"] = [{"CFBundleURLName": BUNDLE_ID, "CFBundleURLSchemes": ["agentcoord"],
+                                        "CFBundleTypeRole": "Viewer"}]
         info.update(compatibility)
         info.update(updater_info)
         sparkle_tools = None
@@ -320,10 +357,12 @@ def main() -> int:
         from sparkle import bundle_runtime_metadata
         bundle_runtime_metadata(app)
         environment = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
+        smoke_sources = ["-D", "RIBBON_SMOKE_HARNESS", str(HERE / "SmokeHarness.swift")] if args.smoke_harness else []
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O",
                         "-target", f"{args.arch}-apple-macosx12.0", str(HERE / "App.swift"),
                         str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
-                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), str(HERE / "IntegratedTitlebar.swift"), *linker_flags,
+                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), str(HERE / "IntegratedTitlebar.swift"),
+                        *smoke_sources, *linker_flags,
                         "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),
@@ -340,7 +379,7 @@ def main() -> int:
             from sparkle import package_update
             package_update(app, args.update_archive.expanduser().absolute(), tools=sparkle_tools,
                            key_file=args.update_private_key_file, architecture=args.arch, channel=args.update_channel)
-        replace_app(app, output, legacy=legacy if args.install and output == destination else None)
+        replace_app(app, output, legacy=legacy if args.install and output == destination else None, bundle_id=bundle_id)
     if args.install and destination != output:
         replace_app(output, destination, legacy=legacy)
     if args.install:

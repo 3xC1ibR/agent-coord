@@ -32,3 +32,6 @@ dummy-experiment.txt
 
 # Private production incident record in the primary checkout
 /docs/rf-performance-reliability-and-operational-excellence.md
+
+# Workspace frontend build dependencies
+/node_modules/

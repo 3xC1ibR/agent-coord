@@ -9,6 +9,7 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 function setup() {
   const elements = new Map();
   const c = {
+    document: {hidden: false}, setTimeout: () => Symbol("elapsed timer"), clearTimeout() {},
     $: id => {
       if (!elements.has(id)) elements.set(id, {
         value: "", focus() { c.focused = id; }, select() { c.selectedText = id; },
@@ -365,6 +366,7 @@ test("the header menu lists visible thread actions and runs the original control
     {textContent: "Move to Later", hidden: true, disabled: false, click() {}},
     {textContent: "Close thread", title: "", hidden: false, disabled: false, clicks: 0, click() { this.clicks++; }},
   ];
+  for (const button of buttons) button.getAttribute = () => null;
   const c = {document: {querySelectorAll: selector => selector === ".session-actions .thread-menu-action" ? buttons : []}};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function headerMenuItems("), source.indexOf('$("thread-actions").onclick')), c);

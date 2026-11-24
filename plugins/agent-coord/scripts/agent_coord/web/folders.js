@@ -1,19 +1,22 @@
 "use strict";
 
-// Only the active project supplies the launch directory. Views may select a
+// Only the active workspace supplies the launch directory. Views may select a
 // group, but repository metadata and filters never choose a workspace.
 function newThreadContext(organization, filters, folder) {
   const project = organization.projects.find(item => item.id === filters.project);
   if (filters.project && filters.project !== "__none__" && !project)
     throw new Error("This group is unavailable. Choose another group.");
-  if (project?.cwd && project.cwd !== folder?.cwd)
-    throw new Error("This group belongs to another project. Choose a group in this project.");
   return {cwd: folder?.cwd || "", project_id: project?.id || null};
 }
 
-function inProject(thread, cwd) {
-  return !!cwd && ((thread.project_cwd || thread.cwd) === cwd || thread.orchestration_workspaces?.includes(cwd) === true);
+function inProject(thread, workspace) {
+  const cwd = typeof workspace === "string" ? workspace : workspace?.cwd;
+  const projectId = workspace?.project_id;
+  return Boolean(cwd && (projectId && thread.project_id === projectId || (thread.project_cwd || thread.cwd) === cwd ||
+    thread.project_launch_cwd === cwd || thread.orchestration_workspaces?.includes(cwd)));
 }
+
+const workspaceName = workspace => workspace.name || workspace.cwd.split("/").filter(Boolean).pop() || "/";
 
 class WorkingFolders {
   constructor({storage, fallbackStorage, preferences, key = "browser", scope = "", api, onChange}) {
@@ -147,15 +150,15 @@ class ProjectTabs {
     let selectedCounts = {};
     for (const project of this.folders.projects) {
       const option = this.doc.createElement("option"), selected = project.cwd === this.folders.selected?.cwd;
-      const counts = threadViews.badges(threads.filter(t => inProject(t, project.cwd)), {});
+      const counts = threadViews.badges(threads.filter(t => inProject(t, project)), {});
       if (selected) selectedCounts = counts;
       option.value = project.cwd;
-      option.textContent = (project.cwd.split("/").filter(Boolean).pop() || "/") + (selected ? "" :
+      option.textContent = workspaceName(project) + (selected ? "" :
         (counts.attention ? " · " + counts.attention + " need attention" : "") +
         (counts.active ? " · Working" : counts.completed ? " · New responses" : ""));
       picker.append(option);
     }
-    const open = this.doc.createElement("option"); open.value = "__open__"; open.textContent = "Open project…";
+    const open = this.doc.createElement("option"); open.value = "__open__"; open.textContent = "Open workspace…";
     picker.append(open);
     picker.value = this.folders.selected?.cwd || "";
     const attention = this.doc.getElementById("mobile-project-attention"), activity = this.doc.getElementById("mobile-project-activity");
@@ -185,7 +188,8 @@ class ProjectTabs {
     this.threads = threads;
     const tabs = this.doc.getElementById("view-tabs");
     const signature = JSON.stringify([this.folders.projects, this.folders.selected?.cwd,
-      threads.map(t => [t.thread_id, t.project_cwd, t.orchestration_workspaces, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
+      threads.map(t => [t.thread_id, t.project_cwd || t.cwd, t.project_launch_cwd, t.orchestration_workspaces,
+        t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.renderMobilePicker(threads);
@@ -199,12 +203,12 @@ class ProjectTabs {
       tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", String(selected));
       tab.setAttribute("aria-controls", "welcome"); tab.tabIndex = selected ? 0 : -1;
       tab.title = project.cwd;
-      label.className = "view-tab-name"; label.textContent = project.cwd.split("/").filter(Boolean).pop() || "/";
+      label.className = "view-tab-name"; label.textContent = workspaceName(project);
       const icon = this.doc.createElement("span"); icon.className = "project-folder-icon";
       icon.setAttribute("aria-hidden", "true");
       icon.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2.5 5.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2h6a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 16 16H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>';
       tab.append(icon, label);
-      const counts = threadViews.badges(threads.filter(t => inProject(t, project.cwd)), {});
+      const counts = threadViews.badges(threads.filter(t => inProject(t, project)), {});
       if (counts.attention) {
         const badge = this.doc.createElement("span"); badge.className = "view-attention"; badge.textContent = String(counts.attention); tab.append(badge);
       }
@@ -214,7 +218,7 @@ class ProjectTabs {
       }
       tab.onclick = () => this.activate(project.cwd).catch(this.onError);
       const close = this.doc.createElement("button"); close.type = "button"; close.className = "project-tab-close"; close.textContent = "×";
-      close.setAttribute("aria-label", "Close project " + project.cwd); close.title = "Close project tab; agents keep running";
+      close.setAttribute("aria-label", "Close workspace " + workspaceName(project)); close.title = "Close workspace tab; agents keep running";
       close.onclick = () => this.close(project.cwd).catch(this.onError);
       wrapper.append(tab, close); tabs.append(wrapper);
       if (focused === project.cwd) tab.focus({preventScroll: true});

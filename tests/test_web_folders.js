@@ -288,11 +288,11 @@ test("phones switch, open, and close projects from one header picker", async () 
     render() { this.renderMobilePicker([{project_cwd: "/p/b", needs_attention: true}, {project_cwd: "/p/a", needs_attention: true}]); }});
   tabs.bindMobilePicker(); tabs.render();
   const picker = ids["mobile-project"];
-  assert.deepEqual(picker.children.map(o => [o.value, o.textContent]), [["/p/a", "a"], ["/p/b", "b · 1 need attention"], ["__open__", "Open project…"]]);
+  assert.deepEqual(picker.children.map(o => [o.value, o.textContent]), [["/p/a", "a"], ["/p/b", "b · 1 need attention"], ["__open__", "Open workspace…"]]);
   assert.equal(picker.value, "/p/a");
   assert.equal(ids["mobile-project-attention"].textContent, "1"); assert.equal(ids["mobile-project-attention"].hidden, false);
   picker.value = "__open__"; picker.onchange();
-  assert.equal(opened, 1); assert.equal(picker.value, "/p/a", "Open project… must not stay selected");
+  assert.equal(opened, 1); assert.equal(picker.value, "/p/a", "Open workspace… must not stay selected");
   picker.value = "/p/b"; picker.onchange(); await new Promise(setImmediate);
   assert.equal(folders.selected.cwd, "/p/b");
   ids["view-menu"].attrs.open = ""; ids["mobile-close-project"].onclick(); await new Promise(setImmediate);

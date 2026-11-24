@@ -351,12 +351,16 @@ def enable_zellij_wake(
         return target
 
     wrapper = Path(__file__).resolve().parents[1] / "agent-coord"
+    # Standalone bundles expose a shell launcher beside the Python entry point.
+    if wrapper.with_suffix(".py").is_file():
+        wrapper = wrapper.with_suffix(".py")
     log_directory = store.database_path.parent / "wake"
     log_directory.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(session_id.encode()).hexdigest()[:16]
     log_path = log_directory / f"zellij-{digest}.log"
     command = [
         sys.executable,
+        "-B",
         str(wrapper),
         "--db",
         str(store.database_path),

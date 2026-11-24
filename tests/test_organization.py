@@ -121,7 +121,8 @@ class OrganizationTests(unittest.TestCase):
         self.assertIsNone(groups[empty["id"]]["cwd"])
         self.assertEqual(reopened.create_project("launch", str(self.repo))["id"], legacy["id"])
         for id, thread in before.items():
-            self.assertEqual(self.store.threads.get(id), thread)
+            self.assertIsNone(thread["project_launch_cwd"])
+            self.assertEqual(self.store.threads.get(id), {**thread, "project_launch_cwd": str(self.repo)})
         self.assertEqual(OrganizationStore(self.store).list(), reopened.list())
 
     def test_legacy_group_migration_preserves_ids_when_scoped_name_exists(self):
@@ -152,7 +153,8 @@ class OrganizationTests(unittest.TestCase):
         removed = self.organization.delete_project(group["id"], expected_count=2)
         self.assertEqual(removed["id"], group["id"])
         for id, thread in before.items():
-            self.assertEqual(self.store.threads.get(id, history=True), {**thread, "project_id": None, "project_name": None})
+            self.assertEqual(self.store.threads.get(id, history=True),
+                             {**thread, "project_id": None, "project_name": None, "project_launch_cwd": None})
             self.assertEqual(self.store.get_session(id), sessions[id])
         updated = next(view for view in views.list() if view["id"] == saved["id"])
         self.assertEqual(updated, {**saved, "filters": {**saved["filters"], "project": ""}, "version": saved["version"] + 1})

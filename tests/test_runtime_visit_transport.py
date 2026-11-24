@@ -6,12 +6,13 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
 import test_ui
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord import runtime_interaction_gateway as gateway
+from historical_gateway import runtime_interaction_gateway as gateway
 
 
 class VisitTransportTests(unittest.TestCase):

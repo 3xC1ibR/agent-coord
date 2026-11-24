@@ -200,7 +200,9 @@ class UsageHTTPTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.store = CoordinationStore(Path(temp.name) / "state.sqlite3")
-        self.sessions = SimpleNamespace(store=self.store, cwd=temp.name, admission=AdmissionGate())
+        from workspace_http_fixture import minimal_browser_sessions
+
+        self.sessions = minimal_browser_sessions(self.store, temp.name, admission=AdmissionGate())
         self.collect = Mock(return_value={"windows": [{"id": "5h", "label": "5-hour", "used_percent": 20, "resets_at": None}]})
         self.limits = limits.ProviderLimits(self.sessions, collectors={"claude": self.collect})
         with patch("agent_coord.ui.ProviderLimits", return_value=self.limits):

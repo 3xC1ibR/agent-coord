@@ -11,6 +11,7 @@
   };
   const entries = value => Array.isArray(value) ? value.filter(pair => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") : [];
   const pairs = value => value?.entries ? [...value.entries()] : [];
+  const paneInput = record => record?.api?.input || record?.frame?.contentDocument?.getElementById("message");
   const pick = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, copy(value[key])]));
   const tab = value => pick(value, ["thread_id", "title", "conversation_id", "tree_root", "tree_open", "project_cwd", "cwd", "client", "browser_session", "attention"]);
   const usefulStorageKey = key => typeof key === "string" && ["agent-coord.folder.", "agent-coord.thread-tabs.",
@@ -47,8 +48,10 @@
   // apply per draft, not per window. A native snapshot must not truncate them.
   const images = values => Array.isArray(values) ? values.filter(value => typeof value?.url === "string")
     .map(value => pick(value, ["name", "url"])) : [];
-  const draft = value => ({...pick(value, ["text", "mentions", "scroll", "following", "selectionStart", "selectionEnd", "disclosures"]),
-    images: images(value?.images)});
+  const draft = (value, includeContent = true) => ({
+    ...pick(value, ["scroll", "following", "selectionStart", "selectionEnd", "disclosures"]),
+    ...(includeContent ? {...pick(value, ["text", "mentions"]), images: images(value?.images)} : {}),
+  });
   function layout(value) {
     if (!Array.isArray(value?.groups) || !value.groups.length ||
         value.groups.some(group => !Array.isArray(group) || !group.length || group.some(id => typeof id !== "string"))) return null;
@@ -80,11 +83,53 @@
     const storage = name => { try { return view[name]; } catch { return null; } };
     let pending = null, ready = false, restoring = false, restored = false, timer = null, last = "", interacted = false, dirtyAt = null, nextImage = 0;
     const imageIds = new Map();
-    const touched = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
+    let compatibilityStore, storageError;
+    const compatibilityWrites = new Set();
+    const compatibilityImages = new Map(), changedComposers = new Set();
+    const touched = new Set(), checkpointedComposers = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
     const currentState = () => { try { return getState(); } catch { return null; } };
     const currentViews = () => { try { return getViews(); } catch { return null; } };
     const currentNavigation = () => { try { return getNavigation(); } catch { return null; } };
     const currentDraftId = s => s?.selected === "new-session" ? s.newSessionDraft?.draftId || "new-session" : s?.selected;
+    function composerStore() {
+      if (storageError) return null;
+      if (view.agentCoordComposerDrafts) return view.agentCoordComposerDrafts;
+      const scope = view.agentCoordDesktop?.windowId;
+      if (scope && view.indexedDB && view.ComposerDrafts) {
+        return compatibilityStore ||= view.ComposerDrafts.create({scope});
+      }
+      return null;
+    }
+    function storageFailure(error) { storageError = error; onError(error); changed(); }
+    function persistCompatibility(id, patch, explicitEdit = false) {
+      if (!id || restoring && !explicitEdit || view.agentCoordComposerDrafts) return;
+      const store = composerStore();
+      if (!store) return;
+      const write = store.write(id, patch);
+      compatibilityWrites.add(write);
+      write.then(() => compatibilityWrites.delete(write), error => {
+        compatibilityWrites.delete(write);
+        storageFailure(error);
+      });
+    }
+    function persistCompatibilityImages(s) {
+      if (!s || restoring || view.agentCoordComposerDrafts || !composerStore()) return;
+      const drafts = s.attachments?.drafts;
+      for (const id of new Set([...compatibilityImages.keys(), ...Array.from(drafts?.keys() || [])])) {
+        const current = images(drafts?.get(id)), previous = compatibilityImages.get(id) || [];
+        if (current.length === previous.length &&
+          current.every((image, index) => image.name === previous[index].name && image.url === previous[index].url)) continue;
+        if (current.length) compatibilityImages.set(id, current);
+        else compatibilityImages.delete(id);
+        persistCompatibility(id, {images: current});
+      }
+    }
+    function persistCompatibilityText(s, key) {
+      const id = key === "new-session" ? s?.newSessionDraft?.draftId || key : key;
+      if (s?.sending?.size) { changedComposers.add(key); return; }
+      const text = s?.drafts.get(key) || "";
+      persistCompatibility(id, {text, mentions: s?.mentions?.snapshot(id, text) || []});
+    }
     function changed() {
       if (!ready || restoring || pending && !restored) return;
       view.clearTimeout(timer);
@@ -102,12 +147,12 @@
         return result;
       };
     }
-    function watchMap(map) {
+    function watchMap(map, onMutation = changed) {
       if (!map || hooked.has(map)) return;
       hooked.add(map);
       const set = map.set, remove = map.delete, clear = map.clear;
-      map.set = function (key, value) { const before = this.get(key); set.call(this, key, value); if (before !== value) changed(); return this; };
-      map.delete = function (key) { const removed = remove.call(this, key); if (removed) changed(); return removed; };
+      map.set = function (key, value) { const before = this.get(key); set.call(this, key, value); if (before !== value) onMutation(key); return this; };
+      map.delete = function (key) { const removed = remove.call(this, key); if (removed) onMutation(key); return removed; };
       map.clear = function () { const size = this.size; clear.call(this); if (size) changed(); };
     }
     function bindDocument(document) {
@@ -117,8 +162,21 @@
         const s = currentState();
         if (event.type === "input" || event.type === "change") {
           const composer = document !== doc || ["message", "model-picker", "effort-picker"].includes(event.target?.id);
-          const id = !composer ? null : document === doc ? currentDraftId(s) : view.agentCoordPanes?.from(document.defaultView)?.thread?.thread_id;
+          const pane = event.target?.closest?.("[data-pane-composer]")?.closest?.("[data-thread-id]");
+          const id = pane ? view.agentCoordPanes?.from(pane)?.thread?.thread_id
+            : !composer ? null
+            : document === doc ? currentDraftId(s) : view.agentCoordPanes?.from(document.defaultView)?.thread?.thread_id;
           if (id) { touched.add(id); if (s?.selected === "new-session") touched.add("new-session"); }
+          if (id && event.target?.id === "message") {
+            const text = event.target.value;
+            persistCompatibility(id, {text, mentions: s?.mentions?.snapshot(id, text) || []}, true);
+            if (composerStore() && !checkpointedComposers.has(id)) {
+              checkpointedComposers.add(id);
+              // The first edit can immediately precede Quit. Save selection
+              // and routing metadata after this input event's handlers settle.
+              view.setTimeout(flush, 0);
+            }
+          }
           if (event.target?.id?.startsWith("send-work-")) touched.add("send-work");
         }
         // A focus click is not a request to abandon the saved workspace.
@@ -135,23 +193,41 @@
         changed();
       }, true);
     }
+    function restorePaneSelection(record) {
+      const id = record?.thread?.thread_id, input = paneInput(record), saved = record?.workspaceSelection;
+      if (input && saved && !touched.has(id)) input.setSelectionRange(saved.start, saved.end);
+      if (record?.api) {
+        delete record.workspaceSelection;
+        paneWaiters.get(id)?.(); paneWaiters.delete(id);
+      }
+    }
     function installHooks() {
       const s = currentState();
       if (!s) return;
-      for (const map of [s.drafts, s.attachments?.drafts, s.mentions?.drafts]) watchMap(map);
+      watchMap(s.drafts, key => { persistCompatibilityText(s, key); changed(); });
+      watchMap(s.attachments?.drafts, () => { persistCompatibilityImages(s); changed(); });
+      watchMap(s.mentions?.drafts);
+      const sending = s.sending;
+      if (sending && !hooked.has(sending)) {
+        hooked.add(sending);
+        watch(sending, "delete", () => {
+          if (sending.size) return;
+          for (const key of changedComposers) persistCompatibilityText(s, key);
+          changedComposers.clear();
+          changed();
+        });
+      }
       watchMap(view.agentCoordSendWork?.drafts);
-      if (s.attachments && !hooked.has(s.attachments)) { hooked.add(s.attachments); watch(s.attachments, "onChange"); }
+      if (s.attachments && !hooked.has(s.attachments)) {
+        hooked.add(s.attachments);
+        watch(s.attachments, "onChange", () => { persistCompatibilityImages(s); changed(); });
+      }
       const panes = view.agentCoordPanes;
       if (panes && !hooked.has(panes)) {
         hooked.add(panes);
         for (const name of ["focus", "show", "hide", "tile", "moveThread", "maximize", "close", "draft"]) watch(panes, name);
-        watch(panes, "attach", source => {
-          const record = panes.from(source), id = record?.thread?.thread_id;
-          const input = record?.frame?.contentDocument?.getElementById("message"), saved = record?.workspaceSelection;
-          if (input && saved && !touched.has(id)) input.setSelectionRange(saved.start, saved.end);
-          if (record) delete record.workspaceSelection;
-          paneWaiters.get(id)?.(); paneWaiters.delete(id); changed();
-        });
+        watch(panes, "attach", source => { restorePaneSelection(panes.from(source)); changed(); });
+        watch(panes, "ensureFrame", record => restorePaneSelection(record));
       }
     }
     function preload(snapshot) {
@@ -160,7 +236,7 @@
       writeStorage(storage("sessionStorage"), snapshot.sessionStorage);
       writeStorage(storage("localStorage"), snapshot.localStorage);
     }
-    function capture() {
+    function capture({durable = false} = {}) {
       // Native quit can arrive during asynchronous app boot or restoration. Keep
       // the last complete snapshot instead of replacing it with a half-built UI.
       if (pending && (!ready || !restored || restoring)) {
@@ -187,21 +263,26 @@
         return result;
       }
       const s = currentState(), tabs = s?.threadTabs, views = currentViews(), panes = view.agentCoordPanes;
+      const store = durable && composerStore();
       const result = {version: 1, sessionStorage: readStorage(storage("sessionStorage"))};
       if (!s?.config || !tabs) return result;
+      if (view.location?.origin) result.origin = view.location.origin;
       const localKey = key => usefulStorageKey(key) && (key === s.folders?.key ||
         key.startsWith(tabs.baseKey + ":") || views?.baseKey && (key === views.baseKey || key.startsWith(views.baseKey + ":") || key.startsWith(views.baseKey + ".")));
       result.localStorage = readStorage(storage("localStorage"), localKey);
-      const texts = new Map(s.drafts), imageDrafts = new Map(pairs(s.attachments?.drafts).map(([id, value]) => [id, images(value)]));
-      const mentions = new Map(pairs(s.mentions?.drafts).map(([id, value]) => [id, {text: value.text, refs: copy(value.refs || [])}]));
+      const texts = new Map(store ? [] : s.drafts);
+      const imageDrafts = new Map(store ? [] : pairs(s.attachments?.drafts).map(([id, value]) => [id, images(value)]));
+      const mentions = new Map(store ? [] : pairs(s.mentions?.drafts).map(([id, value]) => [id, {text: value.text, refs: copy(value.refs || [])}]));
       const positions = new Map(pairs(s.conversationPositions));
       for (const [id, entry] of pairs(s.conversations)) positions.set(id, pick(entry, ["scroll", "following"]));
       let composer = null;
       if (s.selected && !panes?.active) {
         const field = $("message"), id = currentDraftId(s);
         if (field) {
-          texts.set(s.selected, field.value);
-          mentions.set(id, {text: field.value, refs: s.mentions?.snapshot(id, field.value) || []});
+          if (!store) {
+            texts.set(s.selected, field.value);
+            mentions.set(id, {text: field.value, refs: s.mentions?.snapshot(id, field.value) || []});
+          }
           composer = {id: s.selected, selectionStart: field.selectionStart, selectionEnd: field.selectionEnd};
         }
         positions.set(s.selected, {scroll: s.timelineScroll?.position() ?? $("timeline")?.scrollTop ?? 0,
@@ -210,15 +291,21 @@
       const records = pairs(panes?.records).map(([id, record]) => {
         const value = panes.active ? record.api?.exportDraft() || record.initialDraft || panes.getDraft?.(id) || {}
           : panes.getDraft?.(id) || record.initialDraft || record.api?.exportDraft() || {};
-        const saved = draft(value);
+        const saved = draft(value, !store);
         if (typeof saved.text === "string") {
           texts.set(id, saved.text); imageDrafts.set(id, saved.images);
           mentions.set(id, {text: saved.text, refs: saved.mentions || []});
         }
-        const input = record.frame?.contentDocument?.getElementById("message");
+        const input = paneInput(record);
         if (input) Object.assign(saved, {selectionStart: input.selectionStart, selectionEnd: input.selectionEnd});
         return [id, {thread: tab(record.thread), draft: saved}];
       });
+      if (store) {
+        const ids = new Set([currentDraftId(s), ...s.drafts.keys(), ...Array.from(s.attachments?.drafts.keys() || []),
+          ...Array.from(s.mentions?.drafts.keys() || []), ...records.map(([id]) => id)]);
+        if (s.newSessionDraft?.draftId) ids.delete("new-session");
+        result.composerIds = [...ids].filter(Boolean);
+      }
       const sendWork = view.agentCoordSendWork;
       const workDrafts = new Map(pairs(sendWork?.drafts).map(([cwd, value]) => [cwd, workDraft(value)]));
       if (sendWork?.cwd) workDrafts.set(sendWork.cwd, workDraft({message: sendWork.input.value, locked: sendWork.locked, draft: sendWork.draft}));
@@ -245,7 +332,7 @@
       view.clearTimeout(timer); timer = null; dirtyAt = null;
       if (!ready || restoring || pending && !restored) return;
       try {
-        const snapshot = capture(), usedImages = new Set();
+        const snapshot = capture({durable: true}), usedImages = new Set();
         const encoded = JSON.stringify(snapshot, (key, value) => {
           if (key !== "url" || typeof value !== "string" || !value.startsWith("data:image/")) return value;
           if (!imageIds.has(value)) imageIds.set(value, ++nextImage);
@@ -257,6 +344,49 @@
         Promise.resolve(onSave?.(snapshot)).catch(error => { last = ""; onError(error); });
       } catch (error) { onError(error); }
     }
+
+    async function checkpoint() {
+      // Local writes and submission staging may be queued behind another
+      // IndexedDB transaction. Order the metadata behind those commits.
+      await view.agentCoordDrainComposerWrites?.();
+      while (compatibilityWrites.size) await Promise.all([...compatibilityWrites]);
+      if (storageError) throw storageError;
+      if (!ready || restoring || pending && !restored) return null;
+      if (!composerStore()) throw new Error("The window's local draft storage is unavailable.");
+      return capture({durable: true});
+    }
+    async function restoreComposers(snapshot, store) {
+      const texts = new Map(entries(snapshot.drafts)), attachments = new Map(entries(snapshot.images));
+      const mentions = new Map(entries(snapshot.mentions));
+      const newId = snapshot.newSessionDraft?.draftId || "new-session";
+      const normalize = id => id === "new-session" ? newId : id;
+      const ids = new Set([...texts.keys(), ...attachments.keys(), ...mentions.keys()].map(normalize));
+      const paneDrafts = new Map(entries(snapshot.panes?.records).map(([id, value]) => [id, value.draft]));
+      for (const [id, value] of paneDrafts) if (typeof value?.text === "string") ids.add(id);
+      const durableIds = new Set(Array.isArray(snapshot.composerIds) ? snapshot.composerIds.filter(id => typeof id === "string" && id) : []);
+      // Only a live handoff owns the destination composer. A saved snapshot
+      // can predate edits already committed at this origin.
+      const changedOrigin = snapshot.originTransfer === true &&
+        snapshot.origin && view.location?.origin && snapshot.origin !== view.location.origin;
+      const result = await Promise.all([...new Set([...ids, ...durableIds])].map(async id => {
+        if (durableIds.has(id)) return [id, await store.read(id)];
+        const text = texts.get(id === newId ? "new-session" : id) ?? paneDrafts.get(id)?.text ?? "";
+        const images = attachments.get(id) ?? paneDrafts.get(id)?.images ?? [];
+        const refs = mentions.get(id)?.refs ?? paneDrafts.get(id)?.mentions ?? [];
+        const value = {text, images, mentions: refs};
+        if (changedOrigin) { await store.write(id, value); return [id, value]; }
+        return [id, await store.seed(id, value)];
+      }));
+      const recovered = new Map(result.filter(([, value]) => value));
+      for (const [id, value] of recovered) compatibilityImages.set(id, value.images);
+      const panes = snapshot.panes && {...snapshot.panes, records: entries(snapshot.panes.records).map(([id, value]) => {
+        const stored = recovered.get(id);
+        return [id, stored ? {...value, draft: {...value.draft, ...stored}} : value];
+      })};
+      return {...snapshot, panes, drafts: [...recovered].map(([id, value]) => [id === newId ? "new-session" : id, value.text]),
+        images: [...recovered].map(([id, value]) => [id, value.images]),
+        mentions: [...recovered].map(([id, value]) => [id, {text: value.text, refs: value.mentions}])};
+    }
     function restoreMap(target, values, accept = () => true, preserve = false) {
       for (const [id, value] of entries(values)) if (!touched.has(id) && accept(value) && (!preserve || !target.has(id))) target.set(id, copy(value));
     }
@@ -267,6 +397,9 @@
       if (!ready || !s?.threadTabs || !snapshot || typeof snapshot !== "object") return false;
       restoring = true;
       try {
+        const store = composerStore();
+        try { if (store) snapshot = await restoreComposers(snapshot, store); }
+        catch (error) { storageFailure(error); }
         const tabs = s.threadTabs, views = currentViews(), panes = view.agentCoordPanes;
         const currentInput = $("message");
         // Retain actual edits even if they arrived before native's ready reply.
@@ -318,8 +451,12 @@
             const record = panes.record({...tab(value.thread), thread_id: id});
             const saved = draft(value.draft || {});
             record.initialDraft = saved;
-            if (record.api) attempt(() => { record.api.restoreDraft(saved); record.initialDraft = null; });
             if (Number.isFinite(saved.selectionStart)) record.workspaceSelection = {start: saved.selectionStart, end: saved.selectionEnd};
+            if (record.api) attempt(() => {
+              record.api.restoreDraft(saved);
+              record.initialDraft = null;
+              restorePaneSelection(record);
+            });
           }
           for (const value of panes.layouts.values()) for (const id of value.groups.flat()) if (!panes.records.has(id)) panes.record({thread_id: id, title: "Conversation"});
         }
@@ -359,10 +496,10 @@
           else doc.body.classList.toggle("chat-expanded", snapshot.chatExpanded);
         }
         attempt(() => render?.()); attempt(() => s.resizeComposer?.()); attempt(() => currentNavigation()?.remember?.());
-        // Visible pane documents boot independently. The shell's attach signal
-        // confirms restoreDraft ran; stacked, unopened tabs retain initialDraft.
+        // Older retained interfaces have independently loaded pane documents.
+        // In-process panes apply the draft synchronously during mounting.
         const awaiting = [];
-        if (!interacted && snapshot.panes?.active && panes?.active) for (const id of panes.layout.tabs) {
+        if (!interacted && snapshot.panes?.active && panes?.active && typeof panes.attach === "function") for (const id of panes.layout.tabs) {
           const record = panes.records.get(id);
           if (!record?.frame || record.api) continue;
           awaiting.push(new Promise((resolve, reject) => {
@@ -377,11 +514,19 @@
         // Draft maps were installed before navigation/rendering. A stale view
         // or deleted thread must not disable all later recovery saves.
         onError(error); restored = true; return true;
-      } finally { restoring = false; installHooks(); changed(); }
+      } finally {
+        restoring = false;
+        installHooks();
+        const id = currentDraftId(s), field = $("message");
+        if (id && field && touched.has(id)) persistCompatibility(id,
+          {text: field.value, mentions: s.mentions?.snapshot(id, field.value) || []});
+        persistCompatibilityImages(s);
+        changed();
+      }
     }
     bindDocument(doc);
     view.addEventListener("pagehide", flush);
-    return {preload, capture, restore, changed, storageChanged, bindDocument, flush,
+    return {preload, capture, restore, changed, storageChanged, bindDocument, flush, checkpoint,
       busy() {
         const s = currentState();
         return Boolean(s?.sending?.size || view.agentCoordSendWork?.sending ||
@@ -389,7 +534,17 @@
           pairs(view.agentCoordPanes?.records).some(([, record]) => record.api?.canTransfer?.() === false &&
             !record.frame?.contentDocument?.querySelector("dialog[open]")));
       },
-      ready() { ready = true; installHooks(); if (!pending) { restored = true; changed(); } }};
+      ready() {
+        ready = true;
+        installHooks();
+        if (!pending) {
+          restored = true;
+          // Save the window's composer identities before an early Quit can
+          // leave its independently committed drafts without a window index.
+          if (composerStore()) flush();
+          else changed();
+        }
+      }};
   }
   const api = {create, usefulStorageKey};
   if (typeof module !== "undefined" && module.exports) module.exports = api;

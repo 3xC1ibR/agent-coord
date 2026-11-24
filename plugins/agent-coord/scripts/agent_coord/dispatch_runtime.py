@@ -142,9 +142,13 @@ class DispatchRuntime:
             raise CoordinationError("Routing request not found.")
         return self.receipt(row)
 
-    def receipts(self, thread_id):
+    def receipts(self, thread_id, *, limit=None):
         with self.store.reading(), self.store._connection() as db:
-            rows = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? ORDER BY id", (thread_id,)).fetchall()
+            if limit is None:
+                rows = db.execute("SELECT * FROM dispatch_requests WHERE dispatcher_id=? ORDER BY id", (thread_id,)).fetchall()
+            else:
+                rows = reversed(db.execute("""SELECT * FROM dispatch_requests WHERE dispatcher_id=?
+                    ORDER BY id DESC LIMIT ?""", (thread_id, limit)).fetchall())
             result = [self.receipt(row) for row in rows]
             for item in result:
                 if item["target_id"]:
@@ -263,7 +267,12 @@ class DispatchRuntime:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
             stage = time.perf_counter()
-            refresh_messages(self.store, cwd=item["cwd"])
+            from .search_store import active_search
+            external = active_search(self.store)
+            if external is None:
+                refresh_messages(self.store, cwd=item["cwd"])
+            else:
+                external.flush()
             timings["index_refresh"] = round((time.perf_counter() - stage) * 1000, 1)
             stage = time.perf_counter()
             snapshot = read_snapshot(self.store.database_path, cwd=item["cwd"])

@@ -99,6 +99,8 @@ def system_performance_snapshot():
 class DatabaseWriter:
     def __init__(self):
         self.condition = threading.Condition()
+        self.commit_condition = threading.Condition()
+        self.commit_generation = 0
         self.owner = None
         self.connections = []
         self.queue = []
@@ -122,6 +124,11 @@ class DatabaseWriter:
         self.slow_writer_scopes = []
         self.slow_writer_scope_capacity = 16
         self.admission_timeout_records = deque(maxlen=16)
+
+    def committed(self):
+        with self.commit_condition:
+            self.commit_generation += 1
+            self.commit_condition.notify_all()
 
     def _next(self):
         foreground = [entry for entry in self.queue if entry[1] == "foreground"]

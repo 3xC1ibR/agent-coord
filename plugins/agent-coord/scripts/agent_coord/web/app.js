@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {config: null, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), phaseScroll: new Map(), commandFeedback: new Map(), busy: false, listSignature: ""};
+const state = {config: null, sessions: [], organization: {repositories: [], projects: []}, selected: null, detail: null, drafts: new Map(), closing: new Set(), pinning: new Set(), updatingThreads: new Set(), groupExpansion: new Map(), commandFeedback: new Map(), listSignature: ""};
 window.HTMLPreview?.bind(document, () => state.selected);
 state.threadActions = createThreadActions(document, window);
 let notifications;
@@ -8,7 +8,7 @@ let savedViews;
 let navigation;
 let conversationSearch;
 state.sourceWindowId = window.agentCoordDesktop?.windowId || crypto.randomUUID();
-state.paneMode = window.parent !== window && new URLSearchParams(location.search).get("pane") === "1";
+state.paneMode = false;
 if (state.paneMode) state.sourceWindowId = window.parent.agentCoordSourceWindowId || state.sourceWindowId;
 window.agentCoordSourceWindowId = state.sourceWindowId;
 window.agentCoordFocusMessage = focusAgentMessage;
@@ -62,11 +62,24 @@ async function api(path, body, requestOptions = {}) {
       // On page exit a keepalive fetch must be registered before the page dies.
       if (path === "activity/events" && state.config?.interactionContinuity && !options.keepalive && globalThis.navigator?.locks) {
         response = await navigator.locks.request("ribbon-field-activity-write", () => fetch(address, options));
+      } else if (path === "config" && read && globalThis.agentCoordInitialConfig) {
+        const initial = globalThis.agentCoordInitialConfig;
+        delete globalThis.agentCoordInitialConfig;
+        response = await initial || await fetch(address, options);
       } else response = await fetch(address, options);
-      if (response.status === 401 && location.protocol === "https:") location.reload();
+      if (response.status === 401 && location.protocol === "https:") window.dispatchEvent(new Event("agent-coord-pairing-required"));
       if (response.status === 304 && entity?.value) return entity.value;
-      let result;
-      try { result = await response.json(); }
+      let result, snapshotBytes;
+      try {
+        const historyRead = read && /^(sessions|conversations)\/[^/]+(?:$|\?|\/open$|\/turns\/)/.test(path);
+        if (historyRead) snapshotBytes = Number(response.headers?.get("Content-Length"));
+        if (historyRead && response.text && (!(snapshotBytes > 0) || response.headers?.get("Content-Encoding"))) {
+          const text = await response.text();
+          // Bound the uncompressed UTF-8 payload even when a proxy changes transfer encoding.
+          snapshotBytes = 3 * text.length;
+          result = JSON.parse(text);
+        } else result = await response.json();
+      }
       catch (error) {
         unreadable = true;
         console.warn("Unreadable API response", {path, status: response.status,
@@ -82,6 +95,9 @@ async function api(path, body, requestOptions = {}) {
       if (!response.ok) throw Object.assign(new Error(result.error || "Request failed"), {status: response.status, code: result.code});
       if (response.headers?.get("X-Ribbon-Transfer-Read-Source") === "serving") result.transferReadSource = "serving";
       if (response.headers?.get("X-Ribbon-Untargeted-Input") === "1") result.acceptsUntargetedInput = true;
+      if (read && result && typeof result === "object" && (result.thread || result.recent_turns || result.turn)) {
+        if (snapshotBytes > 0) result.snapshotBytes = snapshotBytes;
+      }
       if (entity) Object.assign(entity, {tag: response.headers?.get("ETag") || null, value: result});
       return result;
     } catch (error) {
@@ -104,7 +120,7 @@ async function openMentionFile(ref) {
   dialog.addEventListener("close", ()=>dialog.remove());document.body.append(dialog);dialog.showModal();
 }
 async function action(fn, button) { if (button) button.disabled = true; try { await fn(); } catch (error) { showError(error); } finally { if (button) button.disabled = false; } }
-async function refreshList({background = false, afterMutation = false, priority = background ? "low" : "auto"} = {}) {
+async function refreshList({background = false, afterMutation = false, priority = background ? "low" : "auto", initialDefinitions} = {}) {
   if (state.paneMode) { refreshDecisionsIfDue(background); window.parent.agentCoordPanes?.requestList({background, afterMutation}); return; }
   const view = $("view").value, pending = state.listRefresh;
   // Polls and streamed events must not keep superseding a slow inventory read.
@@ -116,7 +132,7 @@ async function refreshList({background = false, afterMutation = false, priority 
   refreshDecisionsIfDue(background);
   const refresh = {view, request: ++listRequest};
   state.listRefresh = refresh;
-  refresh.promise = loadThreadList(view, refresh.request, {background, priority});
+  refresh.promise = loadThreadList(view, refresh.request, {background, priority, initialDefinitions});
   try { return await refresh.promise; }
   finally { if (state.listRefresh === refresh) state.listRefresh = null; }
 }
@@ -132,15 +148,16 @@ function refreshDecisionsAndSchedules(background = false) {
   state.schedules?.refresh({background}).catch(showError);
   state.asks?.refresh({background}).catch(showError);
 }
-async function loadThreadList(view, request, {background = false, priority = "auto"} = {}) {
+async function loadThreadList(view, request, {background = false, priority = "auto", initialDefinitions} = {}) {
   const entities = state.inventoryEntities ||= {open: {}, closed: {}};
   // Groups, repositories and saved views change by explicit action; a
   // background refresh reads them at most once a minute.
   const companions = !background || !state.organization || Date.now() - (state.organizationReadAt || 0) >= ORGANIZATION_REFRESH_INTERVAL;
   // Open threads feed every tab's badges, including while browsing a Closed view.
-  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open, priority}),
+  const [open, closed, organization, views] = await Promise.all([initialDefinitions?.open || api("threads?archived=false", undefined, {entity: entities.open, priority}),
     view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed, priority}) : null,
-    companions ? api("organization", undefined, {priority}) : null, companions ? api("views", undefined, {priority}) : null]);
+    companions ? initialDefinitions?.organization || api("organization", undefined, {priority}) : null,
+    companions ? initialDefinitions?.views || api("views", undefined, {priority}) : null]);
   if (request !== listRequest || view !== $("view").value) return;
   if (companions) state.organizationReadAt = Date.now();
   // An unchanged list (304) needs no reprocessing or redraw; relative times
@@ -149,9 +166,10 @@ async function loadThreadList(view, request, {background = false, priority = "au
     if (Date.now() - (state.listRenderedAt || 0) >= 30000) { state.listRenderedAt = Date.now(); renderList(); }
     return;
   }
+  state.inventoryRevision = (state.inventoryRevision || 0) + 1;
   state.inventoryOpen = open; state.inventoryClosed = closed;
-  state.sessions = (closed || open).data.map(overlayPendingAttention);
   state.viewThreads = open.data.map(overlayPendingAttention);
+  state.sessions = closed ? closed.data.map(overlayPendingAttention) : state.viewThreads;
   state.agentTreeController?.inventory(state.viewThreads, closed?.data);
   state.threadTabs?.update([...(state.conversationWindow ? state.sessions : state.viewThreads), ...(closed?.data || [])]);
   state.dispatchWorkspace?.update(state.viewThreads, state.detail);
@@ -165,8 +183,10 @@ async function loadThreadList(view, request, {background = false, priority = "au
     select.dataset.signature = signature;
     select.replaceChildren(new Option(field === "repository" ? "All repositories" : "All groups", ""),
       new Option(field === "repository" ? "No repository" : "No group", threadOrganization.NONE));
+    const nameCounts = new Map();
+    for (const item of choices) nameCounts.set(item.name, (nameCounts.get(item.name) || 0) + 1);
     for (const item of choices) {
-      const duplicates = choices.filter(other => other.name === item.name).length > 1;
+      const duplicates = nameCounts.get(item.name) > 1;
       const option = new Option(item.name + (duplicates && item.root ? " · " + item.root : ""), item.id);
       option.title = item.root || item.name; select.append(option);
     }
@@ -196,7 +216,7 @@ function syncDispatcherOverview() {
   // opens it implicitly or changes the user's saved overview filters.
 }
 async function startDispatcher() {
-  if (!state.dispatchReady || state.dispatchStarting || state.busy || !state.folders?.selected?.cwd) return;
+  if (!state.dispatchReady || state.dispatchStarting || !state.folders?.selected?.cwd) return;
   const cwd = state.folders.selected.cwd, revision = state.navigationRevision;
   state.dispatchStarting = true; syncDispatcherOverview();
   try {
@@ -233,7 +253,7 @@ $("dispatcher-permissions").onclick = event => openSessionPermissions(event);
 function sessionContext() {
   return newThreadContext(state.organization, {project: $("project").value}, state.folders?.selected);
 }
-function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected?.cwd)); }
+function threadsInProject(threads) { return threads.filter(thread => inProject(thread, state.folders?.selected)); }
 async function switchProject({restoreConversation = true, preserveRollUp = false, awaitInventory = true, renderOverview = true} = {}) {
   const cwd = state.folders.selected?.cwd || "";
   if (state.projectCwd === cwd) { renderFolders(); return; }
@@ -582,7 +602,7 @@ function threadCard(thread, compact = false, inAttention = false) {
     if (childCount) addAction("⑂ " + childCount + (childCount === 1 ? " agent" : " agents"), "agent-tree",
       () => state.agentTreeController.open(thread.thread_id));
     const endActions = node("div", null, "card-end-actions");
-    if (thread.can_handle_response) addAction("Dismiss", "handle", () => markThreadHandled(thread), endActions);
+    if (threadGrouping.actionFor?.(thread) === "dismiss") addAction("Dismiss", "handle", () => markThreadHandled(thread), endActions);
     if (thread.snooze_due) addAction("Dismiss reminder", "resume-snooze", () => resumeThreadSnooze(thread), endActions);
     if (endActions.children.length) actions.append(endActions);
     const titleActions = node("div", null, "card-title-actions");
@@ -625,9 +645,7 @@ function threadMenuItems(thread, {inbox = false} = {}) {
     items.push({label: "Change supervisor…", run: () => openSupervisorDialog(thread)});
   if (thread.attention === "later") items.unshift({label: "Move to Now", run: () => action(() => toggleThreadLater(thread))});
   if (inbox && thread.attention !== "archived") {
-    // Inbox rows have no Dismiss button. Live approvals and blocking questions resolve only by answering.
-    if (thread.unread_result || thread.unread) items.unshift({label: "Mark as read", run: () => action(() => markThreadRead(thread))});
-    if (thread.can_handle_response && !["approval", "question"].includes(WorkingSet.requestOf(thread)))
+    if (threadGrouping.actionFor?.(thread) === "dismiss")
       items.unshift({label: "Dismiss from Attention", run: () => action(() => markThreadHandled(thread))});
   }
   return items;
@@ -669,99 +687,15 @@ function renderClosedToggle() {
   $("show-closed").setAttribute("aria-pressed", String(archived));
   $("show-closed").title = archived ? "Return to open threads" : "Show closed threads";
 }
-function createOverviewMotion() {
-  const running = new Map(), reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
-  let previousView;
-  const stop = () => { for (const motion of running.values()) motion.stop(); running.clear(); };
-  // Floating copies must never lag behind scrolling, resizing, or navigation.
-  window.addEventListener("scroll", stop, {capture: true, passive: true});
-  window.addEventListener("resize", stop, {passive: true});
-  reduced.addEventListener("change", stop);
-  function cards() {
-    return [...$("overview").querySelectorAll("[data-card-thread]")].map(card => {
-      const group = card.closest("[data-group]").dataset.group;
-      // A pin is a separate card; the other copy can move between work stages.
-      return {card, id: JSON.stringify([card.dataset.cardThread, group === "pinned"]), group,
-        rect: card.getBoundingClientRect()};
-    });
-  }
-  function visible(item) {
-    const r = item.rect, board = item.card.closest(".phase-board"), clip = board?.getBoundingClientRect();
-    return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 &&
-      r.bottom <= window.innerHeight && r.right <= window.innerWidth &&
-      (!clip || r.left >= clip.left && r.right <= clip.right);
-  }
-  function floatingCopy(card, rect) {
-    const copy = card.cloneNode(true), originals = [card, ...card.querySelectorAll("*")];
-    // Preserve the destination's appearance outside its grid/Attention ancestors.
-    [copy, ...copy.querySelectorAll("*")].forEach((el, index) => {
-      const computed = getComputedStyle(originals[index]);
-      for (const property of computed) el.style.setProperty(property, computed.getPropertyValue(property));
-      el.removeAttribute("id");
-      el.removeAttribute("data-thread");
-      el.removeAttribute("data-card-thread");
-      el.style.pointerEvents = "none";
-    });
-    copy.setAttribute("aria-hidden", "true");
-    copy.inert = true;
-    Object.assign(copy.style, {position: "fixed", left: rect.left + "px", top: rect.top + "px",
-      width: rect.width + "px", height: rect.height + "px", margin: "0", zIndex: "20",
-      transformOrigin: "top left", transition: "none"});
-    document.body.append(copy);
-    return copy;
-  }
-  return {
-    capture(view) {
-      const enabled = previousView === view && !$("welcome").hidden && !reduced.matches &&
-        typeof Element.prototype.animate === "function";
-      previousView = view;
-      const before = new Map();
-      if (enabled) for (const item of cards()) {
-        const flight = running.get(item.id);
-        if (flight?.copy) item.rect = flight.copy.getBoundingClientRect();
-        if (visible(item)) before.set(item.id, {...item, continuing: Boolean(flight)});
-      }
-      stop();
-      return before;
-    },
-    play(before) {
-      const after = cards();
-      if (!after.some(item => before.has(item.id) &&
-        (before.get(item.id).group !== item.group || before.get(item.id).continuing))) return;
-      for (const item of after) {
-        const old = before.get(item.id);
-        if (!old || !visible(item)) continue;
-        const dx = old.rect.left - item.rect.left, dy = old.rect.top - item.rect.top;
-        if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
-        const timing = {duration: 380, easing: "cubic-bezier(.22, 1, .36, 1)"};
-        const animations = [];
-        let copy;
-        if (old.group !== item.group || old.continuing) {
-          copy = floatingCopy(item.card, item.rect);
-          const from = `translate(${dx}px, ${dy}px) scale(${old.rect.width / item.rect.width}, ${old.rect.height / item.rect.height})`;
-          animations.push(copy.animate([{transform: from}, {transform: "none"}], timing));
-          const fade = {duration: timing.duration, easing: "linear"};
-          animations.push(copy.animate([{opacity: 1}, {opacity: 1, offset: .8}, {opacity: 0}], fade));
-          animations.push(item.card.animate([{opacity: 0}, {opacity: 0, offset: .8}, {opacity: 1}], fade));
-        } else {
-          animations.push(item.card.animate([{transform: `translate(${dx}px, ${dy}px)`}, {transform: "none"}], timing));
-        }
-        const motion = {copy, stop() { animations.forEach(animation => animation.cancel()); copy?.remove(); }};
-        running.set(item.id, motion);
-        animations[0].onfinish = () => {
-          if (running.get(item.id) !== motion) return;
-          running.delete(item.id); motion.stop();
-        };
-      }
-    },
-  };
-}
 function renderList() {
   globalThis.agentCoordSendWork?.syncOverview();
   if (state.paneMode) { renderStatus(); return; }
   if (state.dispatchDock) syncDispatcherOverview();
   renderClosedToggle();
-  savedViews?.render(threadsInProject(state.viewThreads || state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id)));
+  const workspaceThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id));
+  const openThreads = state.viewThreads && state.viewThreads !== state.sessions ?
+    threadsInProject(state.viewThreads).filter(t => !state.pendingCloses?.has(t.thread_id)) : workspaceThreads;
+  savedViews?.render(openThreads);
   if (conversationSearch?.update()) {
     if ($("atlas-overview")) $("atlas-overview").hidden = true;
     if ($("working-set-overview")) $("working-set-overview").hidden = true;
@@ -769,11 +703,12 @@ function renderList() {
     renderStatus(); return;
   }
   const query = $("search").value.trim().toLocaleLowerCase();
-  const workspaceThreads = threadsInProject(state.sessions).filter(t => !state.pendingCloses?.has(t.thread_id));
-  const projectThreads = workspaceThreads.filter(t => threadOrganization.matches(t, "", $("project").value));
+  const project = $("project").value;
+  const projectThreads = workspaceThreads.filter(t => threadOrganization.matches(t, "", project));
   const workingSet = state.overviewLayout?.mode === "working-set";
-  const matchesView = t => threadViews.matches(workingSet && t.attention === "later" && ["active", "completed"].includes($("view").value) ? {...t, attention: "now"} : t,
-    {show: $("view").value, phase: $("phase-filter").value, search: query});
+  const filters = {show: $("view").value, phase: $("phase-filter").value, search: query};
+  const includeLater = workingSet && ["active", "completed"].includes(filters.show);
+  const matchesView = t => threadViews.matches(includeLater && t.attention === "later" ? {...t, attention: "now"} : t, filters);
   const threads = projectThreads.filter(matchesView);
   // The map keeps neighboring groups available while the tabs own selection.
   const groupPages = workingSet || state.overviewLayout?.mode === "list";
@@ -783,8 +718,11 @@ function renderList() {
   const groupBy = $("group-by").value;
   $("group-by-domain").setAttribute("aria-pressed", String(groupBy === "domain"));
   const viewId = (state.projectCwd || "") + ":" + (savedViews?.activeId || "all");
-  const boardVisible = !$("welcome").hidden && !["atlas", "working-set", "list"].includes(state.overviewLayout?.mode);
-  const signature = JSON.stringify([boardVisible, state.overviewLayout?.mode, threads, upcoming, state.selected, [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query, $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId, Math.floor(Date.now() / 60000)]);
+  const signature = JSON.stringify([state.inventoryRevision || 0, state.overviewLayout?.mode,
+    threads.map(t => t.thread_id), upcoming.map(s => [s.id, s.version]), state.selected,
+    [...(state.closing || [])], [...state.pinning], [...state.updatingThreads], archived, query,
+    $("phase-filter").value, $("view").value, $("repository").value, $("project").value, groupBy, viewId,
+    Math.floor(Date.now() / 60000)]);
   $("back-home").setAttribute("aria-current", state.selected && !state.dispatchDock?.active ? "false" : "page");
   const projects = new Set(threads.map(t => t.project_id).filter(Boolean)).size;
   const stopped = (state.viewThreads || []).filter(t => t.wake_pause_kind === "stop" && t.attention !== "archived").length;
@@ -795,18 +733,15 @@ function renderList() {
   $("results-count").textContent = threads.length + (threads.length === 1 ? " thread" : " threads") +
     " · " + projects + (projects === 1 ? " group" : " groups") +
     (upcoming.length ? " · " + upcoming.length + (upcoming.length === 1 ? " scheduled prompt" : " scheduled prompts") : "");
-  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads); renderStatus(); state.dispatchDock?.flush(); return; }
+  if (signature === state.listSignature) { if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads); if (state.selected || state.statusThread) renderStatus(); state.dispatchDock?.flush(); return; }
   state.listSignature = signature;
-  state.overviewMotion ||= createOverviewMotion();
-  const motionBefore = state.overviewMotion.capture(JSON.stringify([viewId, groupBy, query,
-    $("view").value, $("phase-filter").value, $("repository").value, $("project").value, state.selected]));
   const focused = document.activeElement?.dataset.thread;
   const focusAction = document.activeElement?.dataset.action;
   const focusGroup = document.activeElement?.closest("[data-group]")?.dataset.group;
-  const focusArea = document.activeElement?.closest("#sessions") ? $("sessions") : $("overview");
+  const focusArea = document.activeElement?.closest("#sessions") ? $("sessions") : $("welcome");
   // Rebuilding the board can clamp the scrollers while their content is empty.
   // Capture the current position on every render, including background updates.
-  const scrollPositions = [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft}));
+  const scrollPositions = state.sidebarCards ? [$("welcome"), $("sessions")].map(el => ({el, top: el.scrollTop, left: el.scrollLeft})) : [];
   $("sessions").replaceChildren(); $("overview").replaceChildren();
   const agentTree = agentThreadTree(threads);
   const priorSidebar = state.sidebarCards || new Map();
@@ -818,7 +753,7 @@ function renderList() {
     // A leaf's compact button depends on its own record and selection. Keep
     // separate nodes if the same thread appears in more than one group.
     const key = JSON.stringify([group, thread.thread_id]);
-    const revision = JSON.stringify([thread, state.selected === thread.thread_id]);
+    const revision = [thread.metadata_revision ?? state.inventoryRevision, state.selected === thread.thread_id, thread.pinned, thread.quiet, thread.attention, thread.unread_result].join("|");
     const previous = priorSidebar.get(key);
     const card = previous?.revision === revision ? previous : {revision, node: agentThreadCard(thread, agentTree, true)};
     state.sidebarCards.set(key, card);
@@ -826,108 +761,37 @@ function renderList() {
   }
   const groups = threadGrouping.groupThreads(agentTree.roots);
   const filtered = Boolean(query || $("phase-filter").value || ["attention", "completed"].includes($("view").value) || $("repository").value || $("project").value);
-  function addGroup(key, label, items, parent, description = "", sidebarItems = items) {
-    if (sidebarItems.length) {
-      const section = node("section", null, "thread-group " + key), heading = groupHeading(label);
-      section.setAttribute("aria-label", label);
-      if (key === "priority") heading.className += " sr-only";
-      section.append(heading);
-      for (const thread of sidebarItems) section.append(sidebarCard(thread, key));
-      $("sessions").append(section);
-    }
-    if (!boardVisible) return;
-    const overview = node("section", null, "thread-group " + key), overviewHeading = groupHeading(label);
-    overview.setAttribute("aria-label", label);
-    overview.dataset.group = key;
-    overview.dataset.empty = String(items.length === 0);
-    if (key === "priority") overviewHeading.className += " sr-only";
-    overview.append(overviewHeading);
-    if (description) overview.append(node("p", description, "group-description"));
-    const cards = node("div", null, "thread-cards");
-    for (const thread of items) {
-      const card = agentThreadCard(thread, agentTree, false, key === "priority" || groupBy === "domain" && threadGrouping.awaitsUser(thread));
-      card.dataset.cardThread = thread.thread_id;
-      cards.append(card);
-    }
-    if (!items.length) cards.append(node("p", "—", "stage-empty"));
-    overview.append(cards);
-    parent.append(overview);
+  function addGroup(key, label, items) {
+    if (!items.length) return;
+    const section = node("section", null, "thread-group " + key), heading = groupHeading(label);
+    section.setAttribute("aria-label", label);
+    if (key === "priority") heading.className += " sr-only";
+    section.append(heading);
+    for (const thread of items) section.append(sidebarCard(thread, key));
+    $("sessions").append(section);
   }
   state.schedules?.renderUpcoming($("overview"), upcoming);
   if (groupBy === "domain") {
-    const pinned = agentTree.roots.filter(thread => thread.pinned && thread.attention === "now");
-    const pinnedIds = new Set(pinned.map(thread => thread.thread_id));
-    if (pinned.length) addGroup("pinned", "Pinned", pinned, $("overview"), "", []);
-    const board = node("div", null, "organization-board");
-    board.setAttribute("aria-label", "Work domains");
-    for (const group of threadOrganization.groupThreads(agentTree.roots, "domain")) {
-      const ordered = [...group.threads].sort((a, b) => threadGrouping.activityAt(b) - threadGrouping.activityAt(a) || a.thread_id.localeCompare(b.thread_id));
-      const unpinned = ordered.filter(thread => !pinnedIds.has(thread.thread_id));
-      addGroup(group.key, group.label, unpinned, board, "", ordered);
-      if (!unpinned.length) board.lastElementChild?.remove();
-    }
-    $("overview").append(board);
-  } else if (archived) {
-    if (groups.closed.length) addGroup("closed", "Closed", groups.closed, $("overview"), "Conversations removed from your workspace. Reopen one whenever you need it.");
-  } else if ($("view").value === "later") {
-    if (groups.later.length) addGroup("later", "Later", groups.later, $("overview"), "Set aside for another time. Pick up from the last checkpoint when you’re ready.");
-  } else {
-    const pinned = threads.filter(thread => thread.pinned && thread.attention === "now");
-    const pinnedIds = new Set(pinned.map(thread => thread.thread_id));
-    const attentionThreads = groups.priority.filter(thread => !pinnedIds.has(thread.thread_id));
-    if (pinned.length) addGroup("pinned", "Pinned", pinned, $("overview"), "", []);
-    if (groups.priority.length) {
-      const attention = node("section", null, "attention-panel");
-      attention.setAttribute("aria-label", "Attention queue");
-      // Pinned owns the overview card; all attention items remain in navigation.
-      addGroup("priority", "Attention", attentionThreads, attention, "", groups.priority);
-      if (attentionThreads.length) $("overview").append(attention);
-    }
-    const board = node("div", null, groupBy === "phase" ? "phase-board" : "organization-board");
-    board.setAttribute("aria-label", "Work stages");
-    const organized = groupBy === "phase" ? groups.phases : threadOrganization.groupThreads(groups.phases.flatMap(group => group.threads), groupBy);
-    for (const group of organized) {
-      const unpinned = group.threads.filter(thread => !pinnedIds.has(thread.thread_id));
-      addGroup(group.key, group.label, unpinned, board, group.detail || "", group.threads);
-    }
-    $("overview").append(board);
-    if (groupBy === "phase") {
-      // Keep each view's place through polling and updates while a thread is open.
-      board.onscroll = () => {
-        if (board.isConnected && !$("welcome").hidden && board.clientWidth) state.phaseScroll.set(viewId, board.scrollLeft);
-      };
-      board.scrollLeft = state.phaseScroll.get(viewId) || 0;
-    }
+    for (const group of threadOrganization.groupThreads(agentTree.roots, "domain"))
+      addGroup(group.key, group.label, group.threads);
+  } else if (archived) addGroup("closed", "Closed", groups.closed);
+  else if ($("view").value === "later") addGroup("later", "Later", groups.later);
+  else {
+    addGroup("priority", "Attention", groups.priority);
+    const organized = groupBy === "phase" ? groups.phases :
+      threadOrganization.groupThreads(groups.phases.flatMap(group => group.threads), groupBy);
+    for (const group of organized) addGroup(group.key, group.label, group.threads);
   }
-  if (!threads.length && !upcoming.length) {
+  if (!threads.length && !upcoming.length)
     $("sessions").append(node("p", filtered ? "No matching threads" : "Nothing here yet", "empty"));
-    const empty = node("div", null, "empty-state");
-    const emptyProject = !query && !$("phase-filter").value && !$("repository").value && $("view").value === "active" && !projectThreads.length
-      && state.organization.projects.find(project => project.id === $("project").value);
-    const title = emptyProject ? "No open threads in " + emptyProject.name : filtered ? "No matching threads" : archived ? "No closed threads yet" : $("view").value === "later" ? "Nothing set aside" : "Start with an idea";
-    const copy = emptyProject ? "Start a new session here, or browse existing threads and choose Add to group." : filtered ? "Try another search or clear your filters." : archived ? "Closed threads stay here. Reopen one whenever you want to continue." : $("view").value === "later" ? "Move a thread to Later to keep its context out of your current workspace." : "Open a session and give your next idea a place to begin.";
-    empty.append(node("h3", title), node("p", copy));
-    if (filtered || !archived) {
-      const button = node("button", emptyProject ? "Browse existing threads" : filtered ? "Clear filters" : "New session ↗", "quiet");
-      button.onclick = () => action(filtered ? async () => { $("search").value = ""; $("phase-filter").value = ""; $("repository").value = ""; $("project").value = ""; if (!archived) $("view").value = "active"; await savedViews?.persist(); await refreshList(); } : newSession);
-      empty.append(button);
-    }
-    if (emptyProject) {
-      const button = node("button", "New session", "primary");
-      button.onclick = () => action(newSession);
-      empty.append(button);
-    }
-    $("overview").append(empty);
-  }
   for (const {el, top, left} of scrollPositions) { el.scrollTop = top; el.scrollLeft = left; }
-  state.overviewMotion.play(motionBefore);
   state.dispatchDock?.flush();
   if (focused) {
     const candidates = [...focusArea.querySelectorAll("[data-thread]")].filter(el => el.dataset.thread === focused && el.dataset.action === focusAction);
     const target = candidates.find(el => el.closest("[data-group]")?.dataset.group === focusGroup) || candidates[0];
     target?.focus({preventScroll: true});
   }
-  renderStatus();
+  if (state.selected || state.statusThread) renderStatus();
   if (state.overviewLayout) renderOverviewLayout(threads, upcoming, workingThreads);
   globalThis.threadHover?.refresh();
 }
@@ -936,7 +800,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
   if (!host) return;
   const atlas = state.overviewLayout?.mode === "atlas";
   const workingSet = state.overviewLayout?.mode === "working-set", workingHost = $("working-set-overview");
-  const list = state.overviewLayout?.mode === "list", listHost = $("thread-list-overview");
+  const list = !atlas && !workingSet, listHost = $("thread-list-overview");
   // Scheduled prompts remain available above every overview representation.
   $("overview").hidden = (atlas || workingSet || list) && !upcoming.length;
   $("overview").classList.toggle("atlas-schedules-only", atlas || workingSet || list);
@@ -944,7 +808,7 @@ function renderOverviewLayout(threads, upcoming = [], workingThreads = threads) 
   if (list && listHost && !$("welcome").hidden) {
     state.threadList ||= WorkingSet.createList({document,
       onOpen: id => action(() => select(id)),
-      onRead: thread => action(() => markThreadRead(thread)),
+      onDismiss: thread => action(() => markThreadHandled(thread)),
       onClose: thread => action(() => toggleThreadClosed(thread)),
       onMenu: (thread, anchor, event) => state.threadActions.showMenu(anchor, thread.title, threadMenuItems(thread, {inbox: true}), event)});
     const view = savedViews?.activeId || "all";
@@ -978,7 +842,7 @@ function upcomingSchedules(query) {
   return state.schedules?.upcoming({matches: item => {
     const thread = state.sessions.find(thread => thread.thread_id === item.target_thread_id);
     const context = thread || {...item.settings, cwd: item.cwd};
-    return inProject(context, state.folders?.selected?.cwd) && threadViews.matches(
+    return inProject(context, state.folders?.selected) && threadViews.matches(
       {...context, attention: "later", title: [thread?.title, item.message, item.cwd].filter(Boolean).join(" ")},
       {show: "later", phase: $("phase-filter").value, project: $("project").value,
         repository: $("repository").value, search: query});
@@ -1121,13 +985,29 @@ function conversationEntry(id) {
   const entry = cache.get(id) || {detail: null, nodes: null, scroll: position?.scroll || 0,
     following: position?.following ?? true, revision: 0, pending: null};
   cache.delete(id); cache.set(id, entry);
-  // Retain only a few recently viewed transcripts and their rendered nodes.
-  while (cache.size > 4) {
-    const expired = [...cache.keys()].find(key => key !== state.selected);
-    cache.delete(expired);
-    state.outgoing?.release?.(expired);
+  // Bound retained representations by their uncompressed network bytes as well
+  // as entry count. Active panes and the currently open document can exceed
+  // the retained budget while a reader inspects an unusually large output.
+  let bytes = 0;
+  for (const record of cache.values()) bytes += record.retainedBytes || 0;
+  for (const [key, retired] of cache) {
+    if (cache.size <= 64 && bytes <= 32 * 1024 * 1024) break;
+    if (key === id || key === state.selected || globalThis.agentCoordPanes?.layout?.tabs.includes(key)) continue;
+    bytes -= retired.retainedBytes || 0;
+    clearTimeout(retired.retryTimer);
+    retired.viewport?.dispose();
+    globalThis.OpenUIThread?.release?.(key);
+    cache.delete(key);
+    if (!state.submissionQueue?.lanes.has(key)) state.outboxDiscoveries?.delete(key);
+    state.outgoing?.release?.(key);
   }
   return entry;
+}
+function replaceTimelineContent(content) {
+  if (globalThis.OpenUIThread) {
+    OpenUIThread.park($("timeline"));
+    OpenUIThread.reconcileChildren($("timeline"), [content]);
+  } else $("timeline").replaceChildren(content);
 }
 function retainConversation() {
   if (!state.selected || !state.detail || isSessionDraft()) return;
@@ -1136,47 +1016,75 @@ function retainConversation() {
   entry.detail = state.detail;
   // A streamed update may be waiting for its paint. Do not retain older DOM
   // beside the newer model and later mistake it for an up-to-date transcript.
-  entry.nodes = state.timelineRender?.id === state.selected || state.responseActions?.pending ? null : [...$("timeline").childNodes];
-  // Detached iframe documents reload. Rebuild interactive transcripts on a
-  // cached-tab restore rather than restoring disposed preview nodes.
-  if (entry.nodes?.some(item => item.dataset?.openuiKey)) entry.nodes = null;
+  entry.nodes = state.timelineRender?.id === state.selected || state.responseActions?.pending ? null : [...$("timeline").childNodes].filter(child => !child.dataset?.openuiParked);
   entry.scroll = state.timelineScroll?.position() ?? $("timeline").scrollTop;
   entry.following = state.timelineScroll?.following ?? true;
+  entry.viewport?.suspend();
+  globalThis.OpenUIThread?.park?.($("timeline"));
   // Keep lightweight reading positions even after the bounded transcript cache evicts a tab.
   (state.conversationPositions ||= new Map()).set(state.selected, {scroll: entry.scroll, following: entry.following});
 }
 function sameConversation(first, second) {
-  if (first && JSON.stringify(first.acceptedMessages) !== JSON.stringify(second.acceptedMessages)) return false;
-  if (first && first.transferReadSource !== second.transferReadSource) return false;
-  if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
-    JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
-  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.reviews, first.work_thread.browser_session, first.work_thread.client]) ===
-    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
+  if (!first || first.revisionEpoch !== second.revisionEpoch) return false;
+  if (!["history_revision", "stream_seq", "metadata_revision"].every(key =>
+      Number.isSafeInteger(first[key]) && first[key] === second[key])) return false;
+  return first.thread.beforeSeq === second.thread.beforeSeq && first.thread.turns.length === second.thread.turns.length &&
+    first.thread.historyUnavailable === second.thread.historyUnavailable && first.transferReadSource === second.transferReadSource;
+}
+// Pages and requested output live with the bounded conversation cache. A recent
+// snapshot replaces its suffix; it must not discard turns the reader opened.
+function mergeHistoryWindow(entry, thread, older = false) {
+  const previous = entry.detail?.thread;
+  if (previous && (older || entry.historyLoaded)) {
+    const recent = older ? previous : thread, earlier = older ? thread : previous;
+    const ids = new Set((recent.turns || []).map(turn => turn.id));
+    const overlap = (earlier.turns || []).findIndex(turn => ids.has(turn.id));
+    const prefix = overlap < 0 ? earlier.turns || [] : earlier.turns.slice(0, overlap);
+    thread = {...recent, turns: [...prefix, ...recent.turns],
+      beforeSeq: prefix.length || older ? earlier.beforeSeq : recent.beforeSeq,
+      earlierTurns: prefix.length || older ? earlier.earlierTurns : recent.earlierTurns};
+  }
+  if (entry.expandedOutput) {
+    const retained = new Set();
+    thread = {...thread, turns: (thread.turns || []).map(turn => ({...turn, items: (turn.items || []).map(item => {
+      const key = JSON.stringify([turn.id, item.id]), full = entry.expandedOutput.get(key);
+      if (!full) return item;
+      if (item === full.item || JSON.stringify(item) === full.preview || JSON.stringify(item) === JSON.stringify(full.item)) {
+        retained.add(key); return full.item;
+      }
+      return item; // A changed preview invalidates an older full-output read.
+    })}))};
+    for (const key of entry.expandedOutput.keys()) if (!retained.has(key)) entry.expandedOutput.delete(key);
+  }
+  return thread;
+}
+function historyPage(result, id, before = null) {
+  const page = result?.thread;
+  if (!page || page.id !== id || !Array.isArray(page.turns) || !Number.isSafeInteger(page.beforeSeq) ||
+      page.beforeSeq < 0 || !Number.isSafeInteger(page.earlierTurns) || page.earlierTurns < 0 ||
+      before !== null && page.beforeSeq >= before) throw new Error("Could not read the requested conversation page. Try again.");
+  return page;
+}
+async function bridgeHistoryWindow(id, thread, target, options) {
+  // More than one page can arrive while this tab is away. Fill that gap before
+  // joining the retained prefix, so accepted turns never disappear between them.
+  while (thread.earlierTurns && !thread.turns.some(turn => turn.id === target)) {
+    const before = thread.beforeSeq;
+    const page = historyPage(await api(sessionPath(id) + "?before_seq=" + before + "&limit=40", undefined, options), id, before);
+    const ids = new Set(thread.turns.map(turn => turn.id));
+    thread = {...thread, beforeSeq: page.beforeSeq, earlierTurns: page.earlierTurns,
+      turns: [...page.turns.filter(turn => !ids.has(turn.id)), ...thread.turns]};
+  }
+  return thread;
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
-  // A conversation's tab belongs only to its own project, including a tab opened
-  // before the project was known or saved in the wrong project by an earlier version.
-  const removeMisplacedTab = () => {
-    const tabs = state.threadTabs, index = tabs?.items?.findIndex(item => item.thread_id === id) ?? -1;
-    if (index < 0) return;
-    tabs.items.splice(index, 1);
-    if (tabs.selected === id) tabs.selected = null;
-    tabs.save?.(true); tabs.render?.();
-  };
+  state.initializeConversationView?.();
   const activitySource = state.paneMode || globalThis.agentCoordPanes?.active ? "programmatic" : state.activity?.source();
   const previousTab = state.threadTabs?.selected;
   state.projectScratchpad?.hideTab();
   state.navigationRevision = (state.navigationRevision || 0) + 1;
   state.mobileChat?.close();
   if (id === "new-session") return newSession();
-  if ((!tabId || tabId === id) && !state.paneMode && !state.conversationWindow) {
-    const known = state.sessions?.find(thread => thread.thread_id === id) || state.conversations?.get(id)?.detail?.work_thread;
-    const related = known?.orchestration_workspaces?.includes(state.projectCwd);
-    if (!related && known?.project_cwd && known.project_cwd !== state.folders?.selected?.cwd) removeMisplacedTab();
-    if (stayInProject && !related && (known?.project_cwd || known?.cwd) && (known.project_cwd || known.cwd) !== state.projectCwd) return;
-    const cwd = known?.project_cwd || known?.cwd;
-    if (!related && cwd && cwd !== state.folders?.selected?.cwd) await openProjectDirectory(cwd, {preserveRollUp: rollUp, forConversation: true});
-  }
   $("conversation").classList.remove("session-draft");
   if (!rollUp) state.rollUp?.stop();
   if (dock && globalThis.agentCoordPanes?.active) globalThis.agentCoordPanes.leave();
@@ -1186,16 +1094,17 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   savedViews?.remember();
   setNavigation(false);
   if (state.selected) state.drafts.set(state.selected, $("message").value);
-  retainConversation();
+  if (id !== state.selected) retainConversation();
   state.selected = id;
   state.updateSubmissions?.select(id);
   if (!state.paneMode) state.activity?.select(id, activitySource);
-  state.scratchpad?.select(id);
+  state.scratchpad?.select(id, {snapshot: state.conversations?.get(id)?.detail?.scratchpad,
+    defer: state.config?.conversationOpen === 1});
   if (dock) state.threadTabs?.suspend();
   else if (!tabId || !state.threadTabs?.selectConversation?.(tabId, id))
     state.threadTabs?.open(state.sessions?.find(thread => thread.thread_id === id)
-      || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"});
-  state.dispatchDock?.hide();
+      || state.conversations?.get(id)?.detail?.work_thread || {thread_id: id, title: "Conversation"}, state.agentTreeController?.tree);
+  if (state.dispatchDock?.active) state.dispatchDock.hide();
   if (dock) {
     setChatExpanded(false);
     state.dispatchDock.show(id, state.folders.selected.cwd);
@@ -1205,49 +1114,98 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   $("message").value = state.drafts.get(id) || "";
   const cached = conversationEntry(id);
   cached.refreshFailures = 0;
+  if (cached.detail?.revisionEpoch && cached.detail.revisionEpoch !== state.config?.conversationRevisionEpoch) {
+    cached.detail = cached.nodes = null;
+    cached.viewport?.dispose(); delete cached.viewport;
+    globalThis.OpenUIThread?.release?.(id);
+  }
+  if (state.durableDrafts && !cached.draftLoad) {
+    cached.draftLoad = restoreLocalDraft(id).then(restored => { if (!restored) cached.draftLoad = null; }, error => {
+      cached.draftLoad = null; showError(error);
+    });
+  }
+  const opening = cached.opening = {};
   cached.refreshError = null;
-  cached.requestsRefreshing = true;
+  const current = state.streamHealthy && cached.detail?.revisionEpoch === state.config?.conversationRevisionEpoch &&
+    ["history_revision", "stream_seq", "metadata_revision"].every(key => Number.isSafeInteger(cached.detail?.[key])) && cached.validatedRevision === cached.revision &&
+    !state.searchTarget && !state.messageTarget && !cached.detail?.deferReadAcknowledgment;
+  cached.requestsRefreshing = !current;
   notifications?.syncFocus();
   state.detail = cached.detail;
   state.detailRefreshing = !cached.detail;
   state.titleEdit = null;
   state.attachments?.highlight(false);
-  renderStatus();
+  if (!cached.detail) renderStatus();
   if (navigation) navigation.remember();
   else history.replaceState(null, "", "#" + encodeURIComponent(id));
   $("welcome").hidden = true;
   $("conversation").hidden = false;
   state.agentTreeController?.bind({preservePanel: !!tabId && tabId === previousTab, dock});
   if (typeof layoutContext === "function") layoutContext();
-  $("requests").replaceChildren();
-  $("thread-context").hidden = true;
-  renderTitle();
+  if (!cached.detail) {
+    $("requests").replaceChildren();
+    $("thread-context").hidden = true;
+    renderTitle();
+  }
   $("page-location").textContent = dock ? "Dispatcher" : "Thread";
   delete $("requests").dataset.signature;
   if (cached.detail) {
-    renderThread();
     if (cached.nodes) {
       if (state.timelineThread !== id) {
-        $("timeline").replaceChildren(...cached.nodes);
+        if (globalThis.OpenUIThread && !(current && OpenUIThread.restore?.($("timeline"), cached.nodes))) OpenUIThread.commit($("timeline"), {childNodes: cached.nodes}, {
+          thread: id, theme: document.documentElement.dataset.theme || "light",
+          disabled: !cached.detail.work_thread.browser_session || cached.detail.work_thread.attention === "archived",
+          onAction: text => sendOpenUIResponse(id, text)});
+        else if (!globalThis.OpenUIThread) $("timeline").replaceChildren(...cached.nodes);
         state.timelineScroll?.afterRender(cached.following);
       }
       state.timelineThread = id;
+      cached.viewport?.resume();
     } else renderTimeline();
     if (state.timelineScroll) {
-      if (cached.following) state.timelineScroll.latest();
-      else state.timelineScroll.restore(cached.scroll);
+      if (!cached.following) state.timelineScroll.restore(cached.scroll);
     } else $("timeline").scrollTop = cached.scroll;
-    renderQueuedMessages(); renderStatus();
+    if (current) hydrateConversationControls(id, cached.detail);
+    renderThread(); renderRequests(); renderQueuedMessages(); renderStatus();
+    if (focus && cached.detail.work_thread.browser_session && !state.mobileChat?.matches)
+      $("message").focus({preventScroll: true});
   } else {
-    $("timeline").replaceChildren(node("p", "Opening session…", "empty"));
+    replaceTimelineContent(node("p", "Opening session…", "empty"));
     state.timelineThread = null;
     state.timelineScroll?.reset();
   }
   const restorePosition = !cached.detail && state.conversationPositions?.get(id);
-  // Draw the opened conversation before redrawing the overview beside it.
-  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(renderList, 0));
+  // Selection changes two sidebar highlights. The overview is out of view and
+  // will render the latest inventory and filters when the reader returns.
+  if (state.sidebarCards && !dock) {
+    for (const element of $("sessions").querySelectorAll('[aria-current="true"],[aria-current][data-thread="' + CSS.escape(id) + '"]')) {
+      const selected = element.dataset.thread === id;
+      element.setAttribute("aria-current", String(selected));
+      element.classList.toggle("selected", selected);
+    }
+    $("back-home").setAttribute("aria-current", "false");
+  } else if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(renderList, 0));
   else renderList();
-  const fresh = await refreshDetail({markSeen: false});
+  if (!cached.detail && !cached.accessDenied && state.snapshotCache) {
+    state.snapshotCache.read(id).then(snapshot => {
+      if (!snapshot || state.selected !== id || cached.opening !== opening || cached.detail || state.conversations.get(id) !== cached) return;
+      // Disk may belong to a previous coordinator epoch or workspace. Paint
+      // inert transcript rows without installing provider or action metadata.
+      const content = node("div");
+      content.dataset.provisionalThread = id;
+      const items = (snapshot.thread?.turns || []).slice(-12).flatMap(turn => turn.items || [])
+        .filter(item => item.type === "userMessage" || item.type === "agentMessage").slice(-12);
+      for (const item of items) {
+        const row = node("article", null, item.type === "userMessage" ? "message user" : "message agent");
+        row.append(node("div", itemText(item).slice(0, 8192), "text"));
+        content.append(row);
+      }
+      if (!items.length) for (const message of (snapshot.coordinationMessages || []).slice(-12))
+        content.append(node("article", (message.body || "").slice(0, 8192), "message"));
+      if (content.childElementCount) { replaceTimelineContent(content); updateOutgoing(id); }
+    }).catch(() => {});
+  }
+  const fresh = current || await refreshDetail({markSeen: false});
   if (state.selected !== id) return;
   if (restorePosition && !restorePosition.following) {
     if (state.timelineScroll) state.timelineScroll.restore(restorePosition.scroll);
@@ -1255,41 +1213,34 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   }
   // Streamed updates can invalidate the snapshot without changing the provider.
   // Load its controls even when another detail refresh is already scheduled.
-  if (state.detail?.work_thread.browser_session && state.detail.transferReadSource !== "saved") loadSessionModels();
+  if (state.detail?.work_thread.browser_session && state.detail.transferReadSource !== "saved" && !Array.isArray(state.detail.models)) loadSessionModels();
   if (fresh === false) return;
   if (state.paneMode) return;
   const displayed = state.detail.work_thread;
-  if ((!tabId || tabId === id) && !state.conversationWindow && !displayed.orchestration_workspaces?.includes(state.projectCwd)
-      && displayed.project_cwd && state.folders && displayed.project_cwd !== state.folders.selected?.cwd) {
-    removeMisplacedTab();
-    if (stayInProject) { goHome({restoreDispatcher: false}); return; }
-    await openProjectDirectory(displayed.project_cwd, {preserveRollUp: rollUp, forConversation: true});
-    return select(id, {rollUp});
-  }
   const checkpoint = displayed.checkpoint?.id || 0, completion = displayed.turn_completion?.id || 0;
-  if (!dock && !state.detail?.deferReadAcknowledgment &&
+  if (!dock && !globalThis.document?.hidden && globalThis.document?.hasFocus?.() !== false && !state.detail?.deferReadAcknowledgment &&
       (checkpoint > (displayed.seen_checkpoint_id || 0) || completion > (displayed.seen_completion_id || 0))) {
     await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion},
       {headers: {Prefer: "return=minimal"}}).catch(showError);
   }
   // The conversation is already displayed. Ancillary failures remain visible,
   // but must not abort startup before navigation and native restoration finish.
-  if (refreshInventory) await refreshList().catch(showError);
+  if (refreshInventory && !state.config?.conversationOpen) refreshList({background: true}).catch(showError);
   if (state.selected !== id) return;
   if (state.detail?.work_thread.browser_session) {
     if (focus) (state.mobileChat?.matches && !dock ? $("timeline") : $("message")).focus({preventScroll: true});
   } else $("session-name").focus({preventScroll: true});
 }
-async function refreshDetail({markSeen = true, background = false} = {}) {
-  state.schedules?.refresh({background: true}).catch(showError);
-  const id = state.selected;
-  if (!id || isSessionDraft()) return;
+async function refreshDetail({markSeen = true, background = false, threadId = state.selected} = {}) {
+  if (!state.config?.conversationOpen) state.schedules?.refresh({background: true}).catch(showError);
+  const id = threadId;
+  if (!id || id === "new-session") return;
   const entry = conversationEntry(id);
   if (entry.pending) return entry.pending;
   clearTimeout(entry.retryTimer);
   entry.retryTimer = null;
   entry.pending = (async () => {
-    const revision = entry.revision;
+    const revision = entry.revision, epoch = state.config?.conversationRevisionEpoch, initialSequence = entry.lastEventSeq;
     const streamedItems = entry.streamedItems = new Map();
     entry.streamedUsage = false;
     const attentionRevision = state.attentionMutations?.get(id)?.revision || 0;
@@ -1298,14 +1249,33 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const options = {signal: controller.signal, priority: background ? "low" : "auto"};
-    // Opening transfers the latest turns with shortened tool output. A search
-    // result or message link, earlier turns, or full output need everything;
-    // the conversation then keeps its complete history while it is cached.
-    if (state.searchTarget?.thread === id || state.messageTarget?.thread === id) entry.completeHistory = entry.allTurns = true;
-    const sessionOptions = entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
+    const paged = !!state.config?.conversationHistoryPages;
+    const searchTarget = state.searchTarget?.thread === id && state.searchTarget;
+    const messageTarget = state.messageTarget?.thread === id && state.messageTarget || entry.pendingMessageTarget;
+    if (searchTarget || messageTarget) {
+      entry.allTurns = true;
+      if (!paged) entry.completeHistory = true;
+    }
+    const sessionOptions = !paged && entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
     let work, detail;
     try {
-      if (state.config?.conversationSnapshotControls) {
+      if (state.config?.conversationOpen === 1 && !entry.completeHistory) {
+        let snapshot;
+        try { snapshot = await api("conversations/" + encodeURIComponent(id) + "/open", undefined, sessionOptions); }
+        catch (error) {
+          if (![404, 503].includes(error.status)) throw error;
+          snapshot = {legacyDetailRequired: true};
+        }
+        detail = {...snapshot, thread: snapshot.recent_turns};
+        delete detail.recent_turns;
+        if (snapshot.legacyDetailRequired) {
+          const legacy = await api(sessionPath(id), undefined, {...sessionOptions,
+            headers: {...sessionOptions.headers, "X-Agent-Coord-Thread-Controls": "1"}});
+          detail = {...detail, ...legacy};
+          delete detail.history_revision; delete detail.stream_seq;
+        }
+        work = detail.work_thread;
+      } else if (state.config?.conversationSnapshotControls) {
         detail = await api(sessionPath(id), undefined, {...sessionOptions,
           headers: {...sessionOptions.headers, "X-Agent-Coord-Thread-Controls": "1"}});
         work = detail.work_thread;
@@ -1321,9 +1291,43 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
         const coordinationMessages = detail?.coordinationMessages ?? (await api(threadPath(id) + "/messages", undefined, options)).data;
         detail = {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false, coordinationMessages};
       }
+      if (paged && detail?.thread?.beforeSeq != null && !detail.thread.historyUnavailable) {
+        let thread = detail.thread;
+        if (searchTarget?.turn && !thread.turns.some(turn => turn.id === searchTarget.turn)) {
+          // Resolve the indexed target and join its context to the latest page.
+          const target = historyPage(await api(sessionPath(id) + "?turn_id=" + encodeURIComponent(searchTarget.turn) + "&limit=40", undefined, options), id);
+          thread = await bridgeHistoryWindow(id, thread, searchTarget.turn, options);
+          thread = mergeHistoryWindow({detail: {thread}}, target, true);
+          entry.historyLoaded = true;
+        }
+        if (messageTarget && thread.earlierTurns) {
+          // Coordination cards have no native turn sequence. Preserve their
+          // ordering by reading compact pages rather than a full transcript.
+          thread = await bridgeHistoryWindow(id, thread, null, options);
+          entry.historyLoaded = true;
+        }
+        const lastRetained = entry.historyLoaded && entry.detail?.thread.turns?.at(-1)?.id;
+        if (lastRetained) thread = await bridgeHistoryWindow(id, thread, lastRetained, options);
+        detail.thread = thread;
+      }
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
       entry.refreshError = error.message || String(error);
+      if (error.status === 403 || error.status === 404 || error.code === "workspace_access_denied" ||
+          error.status === 400 && error.message === "Work thread not found in this workspace.") {
+        entry.opening = null; entry.accessDenied = true;
+        entry.detail = entry.nodes = null;
+        entry.viewport?.dispose(); delete entry.viewport;
+        state.snapshotCache?.remove?.(id).catch(() => {});
+        globalThis.agentCoordPanes?.records.get(id)?.api?.render();
+        if (state.selected === id) {
+          state.detail = null; state.detailRefreshing = false; state.timelineThread = null;
+          replaceTimelineContent(node("p", entry.refreshError, "empty"));
+          $("requests").replaceChildren();
+          renderStatus();
+        }
+        throw error;
+      }
       entry.refreshFailures = (entry.refreshFailures || 0) + 1;
       const delay = [1000, 2000, 4000][entry.refreshFailures - 1];
       if (delay && id === state.selected && state.conversations.get(id) === entry) {
@@ -1338,6 +1342,15 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     detail.work_thread ||= work;
     detail.close_when_done = work.close_when_done;
     detail.work_thread = reconcileAttentionSnapshot(detail.work_thread, attentionRevision);
+    if (epoch !== state.config?.conversationRevisionEpoch) return false;
+    detail.revisionEpoch = epoch;
+    const revisions = ["history_revision", "metadata_revision", "stream_seq"];
+    if (entry.detail && entry.detail.revisionEpoch === detail.revisionEpoch &&
+        (Number.isSafeInteger(detail.stream_seq) && detail.stream_seq < initialSequence ||
+        revisions.some(key => Number.isSafeInteger(detail[key]) && Number.isSafeInteger(entry.detail[key]) && detail[key] < entry.detail[key]))) {
+      if (id === state.selected) scheduleDetail();
+      return false;
+    }
     const changed = revision !== entry.revision;
     // A background snapshot must not erase newer streamed messages or approvals.
     if (changed && entry.detail) {
@@ -1358,15 +1371,27 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
       }
     }
     if (entry.streamedUsage && entry.detail?.work_thread) detail.work_thread.usage = entry.detail.work_thread.usage;
+    if (!entry.historyLoaded && !entry.expandedOutput?.size)
+      state.snapshotCache?.write(id, detail).catch(() => {});
+    entry.retainedBytes = (typeof ConversationSnapshotCache !== "undefined" ? ConversationSnapshotCache.retainedBytes(detail) : detail.snapshotBytes || 0) + (entry.pageBytes || 0) + (entry.expandedBytes || 0);
+    if (paged) detail.thread = mergeHistoryWindow(entry, detail.thread);
     const recovering = !!entry.refreshError;
     const same = sameConversation(entry.detail, detail);
     entry.refreshError = null;
     entry.refreshFailures = 0;
     entry.requestsRefreshing = false;
+    entry.validatedRevision = revision;
+    entry.accessDenied = false;
     entry.detail = detail;
+    for (const echo of state.outgoing?.list?.(id) || []) if (echo.awaitingRoute && echo.retry) {
+      echo.awaitingRoute = false;
+      queueMicrotask(echo.retry);
+    }
     if (!same) entry.nodes = null;
     if (id !== state.selected || state.conversations.get(id) !== entry) return true;
     state.detail = detail;
+    if (detail.agent_tree) hydrateConversationControls(id, detail);
+    else if (detail.legacyDetailRequired) state.scratchpad?.select(id);
     state.updateSubmissions?.receive(id, detail.transferSubmissions);
     state.detailRefreshing = changed;
     if (state.dispatchDock?.active === id && (!detail.work_thread.dispatcher || detail.work_thread.attention === "archived")) {
@@ -1424,16 +1449,16 @@ function renderThread() {
   $("thread-context").hidden = false;
   renderTitle();
   $("page-location").textContent = state.dispatchDock?.active ? "Dispatcher" : "Thread";
-  $("park").textContent = work.attention === "later" ? "Move to Now" : "Move to Later";
+  $("park").textContent = work.attention === "later" ? "Move to Now" : "Later";
   $("snooze-thread-button").hidden = work.attention === "archived";
-  $("snooze-thread-button").textContent = work.attention === "later" ? "Change return time…" : "Move to Later…";
-  $("park").hidden = work.attention !== "later";
+  $("snooze-thread-button").title = work.attention === "later" ? "Change return time" : "Choose a return time";
+  $("park").hidden = work.attention === "archived";
   $("resume-snooze").hidden = !(work.snoozed || work.snooze_due);
   $("resume-snooze").textContent = work.snooze_due ? "Dismiss reminder" : "Move to Now";
   if (work.snoozed) $("park").hidden = true;
   $("snooze-status").textContent = snoozeLabel(work);
   for (const id of ["snooze-thread-button", "resume-snooze"]) $(id).disabled = state.updatingThreads.has(work.thread_id);
-  $("handle-response").hidden = !work.can_handle_response;
+  $("handle-response").hidden = threadGrouping.actionFor?.(work) !== "dismiss";
   $("handle-response").disabled = state.updatingThreads.has(work.thread_id);
   $("organize-thread").textContent = work.project_id ? "Change group" : "Add to group";
   $("quiet-thread").textContent = work.quiet ? "Turn off quiet" : "Make quiet";
@@ -1635,13 +1660,16 @@ async function saveSessionPermissions(mode, {id = state.selected, client = state
   if (!localDraft) await refreshList();
 }
 function renderStatus() {
+  state.statusThread = state.selected;
   globalThis.OpenUIThread?.availability(state.selected, !state.detail?.work_thread?.browser_session ||
     state.detail.work_thread.attention === "archived" || state.closing?.has(state.selected));
-  state.sidecars?.showThread(state.detail?.work_thread, $("thread-sidecars"));
+  if (!state.config?.conversationOpen || !state.detail?.work_thread || state.detail.legacyDetailRequired && !state.detail.sidecars)
+    state.sidecars?.showThread(state.detail?.work_thread, $("thread-sidecars"));
   const sidecarButton = $("attach-sidecar");
   if (sidecarButton) sidecarButton.hidden = isSessionDraft() || !state.detail?.work_thread?.browser_session || state.detail?.work_thread?.attention === "archived";
   state.schedules?.renderThread($("thread-schedules"), state.selected);
-  state.asks?.showThread(isSessionDraft() ? null : state.selected)?.catch(showError);
+  if (!state.config?.conversationOpen || !state.selected || isSessionDraft() || state.detail?.asks || state.detail?.legacyDetailRequired)
+    state.asks?.showThread(isSessionDraft() ? null : state.selected)?.catch(showError);
   globalThis.agentCoordSpeech?.update(state.selected, state.detail, state.config);
   state.rollUp?.changed();
   renderSessionSettings();
@@ -1669,6 +1697,8 @@ function renderStatus() {
     $("agent-recipient").textContent = recipient ? "Messaging " + recipient : "";
   }
   $("message-label").textContent = composerLabel;
+  if ($("quiet-send")) $("quiet-send").hidden = state.config?.quietSubmissions !== 1;
+  $("quiet-send")?.setAttribute?.("aria-pressed", String(!!state.quietSubmissions?.has(state.selected)));
   const archived = work?.attention === "archived";
   const session = state.sessions.find(s => s.thread_id === state.selected);
   const thread = session || work;
@@ -1682,11 +1712,12 @@ function renderStatus() {
     state.detail?.requests?.length ? "input" : active ? "running" : status?.key || "idle");
   $("composer").hidden = !work?.browser_session && !(!state.detail && state.detailRefreshing);
   renderDetailRefresh();
-  const starting = !dispatcher && running && !state.detail.activeTurn;
+  const starting = !dispatcher && running && !state.detail?.activeTurn;
   const orderedInput = !dispatcher && state.outgoing?.pendingTransferCounts?.has(state.selected) &&
     ["codex", "claude"].includes(work?.client);
   const ordinaryStartingInput = starting && (orderedInput || state.detail.acceptsUntargetedInput) && ["codex", "claude"].includes(work?.client);
-  $("send").disabled = !state.detail || state.detailRefreshing || !work?.browser_session || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
+  const opening = !state.detail && state.detailRefreshing && state.conversations?.get(state.selected)?.pending;
+  $("send").disabled = (!work?.browser_session && !opening) || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
   const sendAction = dispatcher ? "Send request" : orderedInput ? "Send after pending messages" : running && !ordinaryStartingInput ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
   $("send").setAttribute?.("aria-label", sendAction);
   $("send").title = sendAction + " (Enter)";
@@ -1710,10 +1741,11 @@ function renderStatus() {
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
-  if (state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
+  if (!state.detail && state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
   $("message").placeholder = $("composer-hint").textContent;
   state.mobileChat?.placeholder($("composer-hint").textContent, archived || state.detailRefreshing ? $("composer-hint").textContent :
     dispatcher ? "Send a request…" : running ? "Add a follow-up…" : "Message…");
+  if (globalThis.matchMedia?.("(pointer: coarse)").matches && !archived) $("message").placeholder = "Message agent…";
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();
@@ -1790,7 +1822,14 @@ function renderTurnElapsed(now = Date.now() / 1000) {
   const started = typeof value === "number" ? (value > 1e12 ? value / 1000 : value) : Date.parse(value) / 1000;
   const visible = !!state.selected && running && !terminal && Number.isFinite(started);
   element.hidden = !visible;
-  if (!visible) { element.textContent = ""; return; }
+  if (!visible || document.hidden) {
+    clearTimeout(state.elapsedTimer); state.elapsedTimer = null;
+    if (!visible) element.textContent = "";
+    return;
+  }
+  if (!state.elapsedTimer) state.elapsedTimer = setTimeout(() => {
+    state.elapsedTimer = null; renderTurnElapsed();
+  }, 1000);
   const seconds = Math.max(0, Math.floor(now - started));
   const duration = seconds < 60 ? seconds + "s" : seconds < 3600
     ? Math.floor(seconds / 60) + "m " + seconds % 60 + "s"
@@ -1930,10 +1969,10 @@ function forkMarker(relation) {
   marker.append(node("span", relation.label + " "), forkLink(relation.thread));
   return marker;
 }
-function timelineDisclosures() {
-  const entry = conversationEntry(state.selected);
+function timelineDisclosures(id = state.selected) {
+  const entry = conversationEntry(id);
   if (!entry.disclosures) {
-    try { entry.disclosures = new Set(JSON.parse(sessionStorage.getItem("timeline-disclosures:" + state.selected) || "[]")); }
+    try { entry.disclosures = new Set(JSON.parse(sessionStorage.getItem("timeline-disclosures:" + id) || "[]")); }
     catch { entry.disclosures = new Set(); }
   }
   return entry.disclosures;
@@ -1959,6 +1998,14 @@ class OutgoingMessages {
 
   list(id) { return this.threads.get(id) || []; }
 
+  remove(id, entry) {
+    const remaining = this.list(id).filter(item => item !== entry);
+    if (remaining.length) this.threads.set(id, remaining);
+    else this.threads.delete(id);
+  }
+
+  itemKey(turnId, itemId) { return JSON.stringify([turnId, itemId]); }
+
   // Retain reconciliation evidence across echo lifetimes, but only for cached
   // conversations or unresolved input. Reopening restores durable receipts.
   release(id) {
@@ -1972,7 +2019,7 @@ class OutgoingMessages {
   add(id, {text, images = 0, requestId = null, submissionId = null, detail = null, transfer = false, preserveFailures = false}) {
     const known = new Set();
     for (const turn of detail?.thread?.turns || []) {
-      for (const item of turn.items || []) if (item.type === "userMessage") known.add(item.id);
+      for (const item of turn.items || []) if (item.type === "userMessage") known.add(this.itemKey(turn.id, item.id));
     }
     const entry = {key: "outgoing-" + ++this.sequence, text, images, match: text.trim(),
       requestId, submissionId, known, status: "sending", error: "", transfer};
@@ -1993,7 +2040,9 @@ class OutgoingMessages {
       if (record?.threadId !== id || typeof record.requestId !== "string" || !record.requestId ||
           typeof record.turnId !== "string" || !record.turnId || typeof record.message !== "string" ||
           !Number.isInteger(record.imageCount) || record.imageCount < 0 ||
-          (record.afterItemId !== null && typeof record.afterItemId !== "string") || seen.has(record.requestId)) continue;
+          (record.afterItemId !== null && typeof record.afterItemId !== "string")) continue;
+      this.onReceipt?.(id, record.requestId);
+      if (seen.has(record.requestId)) continue;
       seen.add(record.requestId);
       const entry = this.list(id).find(row => row.submissionId === record.requestId) ||
         this.add(id, {text: record.message, images: record.imageCount, submissionId: record.requestId, preserveFailures: true});
@@ -2026,6 +2075,7 @@ class OutgoingMessages {
         else this.pendingTransferCounts.delete(id);
       }
       states.set(record.requestId, record.state);
+      this.onReceipt?.(id, record.requestId);
       let entry = this.list(id).find(row => row.submissionId === record.requestId);
       // A new or reconnected window uses ordinary history for past deliveries.
       if (!entry && record.state === "committed") continue;
@@ -2063,7 +2113,7 @@ class OutgoingMessages {
     const positions = new Map();
     const messages = (detail.thread?.turns || []).flatMap(turn => {
       const items = (turn.items || []).filter(item => item.type === "userMessage");
-      positions.set(turn.id, new Map(items.map((item, index) => [item.id, index])));
+      positions.set(turn.id, new Map((turn.items || []).map((item, index) => [item.id, index])));
       return items.map(item => ({...item, turnId: turn.id}));
     });
     const remaining = entries.filter(entry => {
@@ -2071,14 +2121,15 @@ class OutgoingMessages {
         // A cold window may already contain older identical messages. Never
         // count its initial history as evidence of a new delivery.
         if (entry.status === "sent" && detail.transferReadSource === "serving") return false;
-        for (const item of messages) entry.known.add(item.id);
+        for (const item of messages) entry.known.add(this.itemKey(item.turnId, item.id));
         entry.needsHistoryBaseline = false;
       }
       if (entry.status === "failed" || (entry.transfer && (entry.status !== "sent" || detail.transferReadSource === "saved")) ||
-          (entry.submissionId && entry.status === "sending")) return true;
+          (entry.submissionId && ["sending", "uncertain"].includes(entry.status) && !entry.acceptance)) return true;
+      if (entry.queueId && detail.queuedMessages?.some(row => row.id === entry.queueId)) return false;
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
       const match = messages.find(item => {
-        if (entry.known.has(item.id) || consumed.get(item.turnId)?.has(item.id)) return false;
+        if (entry.known.has(this.itemKey(item.turnId, item.id)) || consumed.get(item.turnId)?.has(item.id)) return false;
         if (entry.acceptance) {
           if (item.turnId !== entry.acceptance.turnId) return false;
           const anchor = entry.acceptance.afterItemId;
@@ -2104,7 +2155,7 @@ class OutgoingMessages {
         accepted.add(entry.submissionId);
         this.acceptedRequests.set(id, accepted);
       }
-      for (const pending of entries) if (!pending.acceptance || pending.acceptance.turnId === match.turnId) pending.known.add(match.id);
+      for (const pending of entries) if (!pending.acceptance || pending.acceptance.turnId === match.turnId) pending.known.add(this.itemKey(match.turnId, match.id));
       return false;
     });
     if (remaining.length) this.threads.set(id, remaining); else this.threads.delete(id);
@@ -2129,9 +2180,19 @@ class OutgoingMessages {
     status.className = "message-time outgoing-status";
     status.setAttribute("role", "status");
     const statusText = {sent: "Sent", sending: "Sending…", queued: "Queued during update",
-      uncertain: "Delivery unconfirmed", failed: "Not sent · " + entry.error};
+      uncertain: "Delivery unconfirmed", unverified: "Delivery unconfirmed · no further attempts", failed: "Not sent · " + entry.error};
     status.textContent = statusText[entry.status];
     message.append(body, status);
+    if (entry.retry && entry.status === "uncertain") {
+      const retry = document.createElement("button");
+      retry.className = "quiet"; retry.type = "button"; retry.textContent = "Check delivery";
+      retry.onclick = entry.retry; message.append(retry);
+    }
+    if (entry.release && entry.status === "uncertain") {
+      const release = document.createElement("button");
+      release.className = "quiet"; release.type = "button"; release.textContent = "Continue without resending";
+      release.onclick = () => entry.release().catch(showError); message.append(release);
+    }
     return message;
   }
 
@@ -2235,10 +2296,75 @@ async function loadCompleteHistory(button, loadingText) {
     showError(error);
   }
 }
+async function readConversationContent(button, loadingText, read) {
+  const id = state.selected, entry = conversationEntry(id), text = button.textContent;
+  const focused = document.activeElement === button;
+  button.disabled = true; button.textContent = loadingText; button.setAttribute("aria-busy", "true");
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    await read(id, entry, {signal: controller.signal}, focused);
+  } catch (error) {
+    if (id === state.selected && state.conversations?.get(id) === entry) {
+      showError(controller.signal.aborted ? new Error("Reading this conversation timed out. Try again.") : error);
+    }
+  } finally {
+    clearTimeout(timeout);
+    button.disabled = false; button.textContent = text; button.setAttribute("aria-busy", "false");
+  }
+}
+function renderConversationContent(id, entry, button, {prepend = false, turnId, itemId, focus} = {}) {
+  entry.nodes = null; entry.revision = (entry.revision || 0) + 1;
+  if (id !== state.selected || state.conversations.get(id) !== entry) return;
+  const el = $("timeline"), focused = focus ?? document.activeElement === button;
+  const fromBottom = el.scrollHeight - el.scrollTop;
+  const scroller = state.timelineScroll?.scroller();
+  const viewport = scroller?.getBoundingClientRect();
+  // The earlier-turn button is replaced by a different page's button. Anchor
+  // to the first visible retained row instead of that disappearing control.
+  const anchor = prepend && viewport ? [...el.children].find(child => child !== button &&
+    child.getBoundingClientRect().bottom > viewport.top && child.getBoundingClientRect().top < viewport.bottom) : null;
+  const offset = anchor?.getBoundingClientRect().top;
+  state.timelineScroll?.hold();
+  if (anchor?.dataset?.viewportKey && entry.viewport) entry.viewport.anchorKey = anchor.dataset.viewportKey;
+  state.detail = entry.detail;
+  renderTimeline();
+  if (anchor?.isConnected) state.timelineScroll.restore(scroller.scrollTop + anchor.getBoundingClientRect().top - offset);
+  if (!state.timelineScroll && prepend) el.scrollTop = el.scrollHeight - fromBottom;
+  if (focused) {
+    const replacement = prepend ? el.querySelector?.(".timeline-earlier") :
+      entry.toolNodes?.get(JSON.stringify([turnId, itemId]))?.node.querySelector?.("summary");
+    (replacement || el).focus?.({preventScroll: true});
+  }
+}
+async function loadEarlierHistory(button) {
+  const entry = conversationEntry(state.selected);
+  if (entry.historyPending) return entry.historyPending;
+  entry.historyPending = readConversationContent(button, "Loading earlier turns…", async (id, entry, options, focused) => {
+    const before = entry.detail?.thread.beforeSeq ?? state.detail?.thread.beforeSeq;
+    if (!Number.isSafeInteger(before) || before <= 0) throw new Error("Reopen this conversation to read its earlier turns.");
+    const result = await api(sessionPath(id) + "?before_seq=" + before + "&limit=40", undefined, options);
+    const page = historyPage(result, id, before);
+    entry.pageBytes = (entry.pageBytes || 0) + (result.snapshotBytes || 0);
+    entry.retainedBytes = (entry.retainedBytes || 0) + (result.snapshotBytes || 0);
+    if (state.conversations.get(id) !== entry) return;
+    // A recent refresh can finish while the older page is being read.
+    if (entry.detail.thread.beforeSeq > before) {
+      const revision = entry.revision, epoch = state.config?.conversationRevisionEpoch, initialSequence = entry.lastEventSeq;
+      const thread = await bridgeHistoryWindow(id, entry.detail.thread, page.turns.at(-1)?.id, options);
+      if (state.conversations.get(id) !== entry || entry.revision !== revision) return;
+      entry.detail.thread = thread;
+    }
+    entry.detail.thread = mergeHistoryWindow(entry, page, true);
+    entry.historyLoaded = entry.allTurns = true;
+    renderConversationContent(id, entry, button, {prepend: true, focus: focused});
+  }).finally(() => { entry.historyPending = null; });
+  return entry.historyPending;
+}
 function earlierTurnsControl(count) {
   const button = node("button", "Show " + count + " earlier " + (count === 1 ? "turn" : "turns"), "quiet timeline-earlier");
   button.type = "button";
   button.onclick = async () => {
+    if (state.config?.conversationHistoryPages && state.detail?.thread?.earlierTurns) return loadEarlierHistory(button);
     // Keep the reader's place while earlier turns are inserted above it.
     const el = $("timeline"), fromBottom = el.scrollHeight - el.scrollTop;
     conversationEntry(state.selected).allTurns = true;
@@ -2249,48 +2375,72 @@ function earlierTurnsControl(count) {
   };
   return button;
 }
-function completeOutputControl() {
+function completeOutputControl(turn, item) {
   const button = node("button", "Show full output", "quiet tool-complete");
   button.type = "button";
-  button.onclick = () => loadCompleteHistory(button, "Loading full output…");
+  button.onclick = () => {
+    if (!state.config?.conversationHistoryPages) return loadCompleteHistory(button, "Loading full output…");
+    return readConversationContent(button, "Loading full output…", async (id, entry, options, focused) => {
+      const preview = JSON.stringify(item);
+      const result = await api(sessionPath(id) + "/turns/" + encodeURIComponent(turn.id) + "/full", undefined, options);
+      if (state.conversations.get(id) !== entry) return;
+      entry.expandedBytes = (entry.expandedBytes || 0) + (result.snapshotBytes || 0);
+      entry.retainedBytes = (entry.retainedBytes || 0) + (result.snapshotBytes || 0);
+      const current = entry.detail?.thread.turns.find(current => current.id === turn.id);
+      const index = current?.items.findIndex(current => current.id === item.id) ?? -1;
+      if (index < 0 || JSON.stringify(current.items[index]) !== preview) return;
+      const full = result?.turn?.id === turn.id && result.turn.items?.find(current => current.id === item.id);
+      if (!full || full.abridged) throw new Error("Could not read the full tool output. Try again.");
+      // A turn read can contain many large outputs. Retain only the item asked
+      // for; siblings keep their compact previews and independent controls.
+      (entry.expandedOutput ||= new Map()).set(JSON.stringify([turn.id, item.id]), {preview, item: full});
+      current.items[index] = full;
+      entry.historyLoaded = true;
+      renderConversationContent(id, entry, button, {turnId: turn.id, itemId: item.id, focus: focused});
+    });
+  };
   return button;
 }
-function renderTimeline() {
-  if (state.responseActions?.deferRender(state.selected, renderTimeline)) return;
-  if (state.timelineRender) { clearTimeout(state.timelineRender.timer); state.timelineRender = null; }
-  const el = $("timeline");
-  const atBottom = state.timelineScroll?.beforeRender() ?? (el.scrollHeight - el.scrollTop - el.clientHeight < 100);
-  const open = timelineDisclosures();
-  if (state.timelineThread === state.selected) {
+function renderTimeline() { return renderConversationTimeline(); }
+function renderConversationTimeline(pane = null) {
+  const view = pane?.view || state;
+  const repaint = () => renderConversationTimeline(pane);
+
+  if (view.responseActions?.deferRender(view.selected, repaint)) return;
+  if (view.timelineRender) { clearTimeout(view.timelineRender.timer); view.timelineRender = null; }
+  const el = pane?.timeline || $("timeline");
+  const atBottom = view.timelineScroll?.beforeRender() ?? (el.scrollHeight - el.scrollTop - el.clientHeight < 100);
+  const open = timelineDisclosures(view.selected);
+  if (view.timelineThread === view.selected) {
     for (const detail of el.querySelectorAll("details[data-id]")) {
       if (detail.open) open.add(detail.dataset.id); else open.delete(detail.dataset.id);
     }
-    try { sessionStorage.setItem("timeline-disclosures:" + state.selected, JSON.stringify([...open])); }
+    try { sessionStorage.setItem("timeline-disclosures:" + view.selected, JSON.stringify([...open])); }
     catch { /* Expansion still survives updates when storage is unavailable. */ }
   }
-  state.timelineThread = state.selected;
+  view.timelineThread = view.selected;
   const fragment = globalThis.ResponseActions?.buffer() || document.createDocumentFragment();
-  if (state.detail?.transferReadSource === "saved") {
+  if (view.detail?.transferReadSource === "saved") {
     const notice = node("p", "Showing saved conversation during update.", "empty");
     notice.setAttribute("role", "status");
     fragment.append(notice);
   }
-  if (state.detail?.thread.historyUnavailable) {
+  if (view.detail?.thread.historyUnavailable) {
     const notice = node("p", "Conversation history couldn’t be fully loaded. Reload to try again.", "empty");
     notice.setAttribute("role", "status");
     fragment.append(notice);
   }
-  const messages = (state.detail?.coordinationMessages || []).filter(message => !message.thread_id?.startsWith("event:review:"));
-  const sourceTurns = globalThis.ReviewUI ? ReviewUI.turns(state.detail?.thread.turns || [], state.detail?.reviews || [], state.selected) : state.detail?.thread.turns || [];
-  const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
-    ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
+  const messages = (view.detail?.coordinationMessages || []).filter(message => !message.thread_id?.startsWith("event:review:"));
+  const sourceTurns = globalThis.ReviewUI ? ReviewUI.turns(view.detail?.thread.turns || [], view.detail?.reviews || [], view.selected) : view.detail?.thread.turns || [];
+  const turns = globalThis.DispatchUI && (view.detail?.work_thread?.dispatcher || view.detail?.dispatchRequests?.length)
+    ? DispatchUI.turns(sourceTurns, view.detail.dispatchRequests || []) : sourceTurns;
   const allEntries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
   // A card keeps the exact delivery prompt its agent received; the prompt itself is not repeated as a user message.
   const deliveredPrompts = messages.length ? AgentMessages.deliveredPrompts(turns) : new Map();
-  const titleOf = id => state.sessions?.find(thread => thread.thread_id === id)?.title ||
+  const titleOf = id => view.sessions?.find(thread => thread.thread_id === id)?.title ||
     messages.find(message => message.counterpart?.session_id === id)?.counterpart.title;
   const turnIndexes = new Map(turns.map((turn, index) => [turn, index]));
-  const pendingForks = new Set(forkRelations(state.detail?.work_thread).map(relation =>
+  const pendingForks = new Set(forkRelations(view.detail?.work_thread).map(relation =>
     ({...relation, boundary: forkBoundary(relation, turns)})));
   const appendForks = (boundary, remaining = false) => {
     for (const relation of pendingForks) if (remaining || relation.boundary === boundary) {
@@ -2298,17 +2448,29 @@ function renderTimeline() {
     }
   };
   const workGroups = new Map();
-  const conversation = conversationEntry(state.selected);
+  const conversation = pane?.visual || conversationEntry(view.selected);
   // A long conversation first renders its latest turns: rendering every message
   // delayed opening it. Earlier turns render on request, or when a search
   // result or message link points into the conversation.
   // A target keeps every turn rendered after it has been shown.
-  if (state.searchTarget?.thread === state.selected || state.messageTarget?.thread === state.selected) conversation.allTurns = true;
-  const omitted = state.detail?.thread?.earlierTurns || 0;
+  if (view.searchTarget?.thread === view.selected || view.messageTarget?.thread === view.selected) conversation.allTurns = true;
+  const omitted = view.detail?.thread?.earlierTurns || 0;
   const hidden = conversation.allTurns ? 0 : Math.max(0, turns.length - TIMELINE_WINDOW_TURNS);
   const windowed = omitted > 0 || hidden > 0;
   const firstShown = windowed ? Math.max(0, allEntries.findIndex(entry => entry.turn === turns[hidden])) : 0;
-  const entries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
+  let entries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
+  if (typeof ConversationViewport !== "undefined" && view.timelineScroll && entries.length) {
+    const id = view.selected;
+    conversation.viewport ||= new ConversationViewport(el, view.timelineScroll.scroller(), () => {
+      if (view.selected === id && view.timelineThread === id) repaint();
+    });
+    const searchTurn = view.searchTarget?.thread === id && view.searchTarget.turn;
+    const messageId = view.messageTarget?.thread === id && view.messageTarget.id;
+    const messageIndex = messageId && entries.findIndex(entry => String(entry.message?.id) === String(messageId));
+    const messageTurn = Number.isInteger(messageIndex) && messageIndex >= 0 &&
+      (entries[messageIndex].message.turn_id || entries.slice(0, messageIndex).reverse().find(entry => entry.turn)?.turn.id || "message-" + messageId);
+    entries = conversation.viewport.window(entries, atBottom, searchTurn || messageTurn);
+  }
   if (windowed) {
     // Markers belong to their history, including when that history is hidden
     // or has not been loaded. The context panel retains every fork link.
@@ -2316,30 +2478,42 @@ function renderTimeline() {
       if (relation.boundary !== null && relation.boundary < hidden || omitted > 0 && relation.boundary === null)
         pendingForks.delete(relation);
     }
-    fragment.append(earlierTurnsControl(omitted + hidden));
+    fragment.append(pane ? pane.earlierControl(omitted + hidden) : earlierTurnsControl(omitted + hidden));
   }
   appendForks(-1);
   const previousTools = conversation.toolNodes || new Map(), toolNodes = new Map();
   const previousMessages = conversation.messageNodes || new Map(), messageNodes = new Map();
   let previousMessageMinute = null;
-  const client = state.detail?.work_thread?.client;
+  const client = view.detail?.work_thread?.client;
   const disclosureListeners = conversation.disclosureListeners ||= new WeakSet();
   for (const entry of entries) {
+    if (entry.spacer) {
+      const spacer = node("div");
+      spacer.setAttribute("aria-hidden", "true");
+      spacer.style.height = entry.spacer + "px";
+      spacer.style.flexShrink = "0";
+      fragment.append(spacer);
+      continue;
+    }
+    const append = element => {
+      if (entry.viewportKey) element.dataset.viewportKey = entry.viewportKey;
+      fragment.append(element);
+    };
     if (entry.message) {
-      fragment.append(AgentMessages.card(document, entry.message, {open: openAgentMessage, expanded: open.has("agent-message:" + entry.message.id),
+      append(AgentMessages.card(document, entry.message, {open: openAgentMessage, expanded: open.has("agent-message:" + entry.message.id),
         prompt: deliveredPrompts.get(entry.message.id), titleOf}));
       continue;
     }
     const turn = entry.turn;
     for (const item of entry.item ? [entry.item] : entry.end ? [] : turn.items || []) {
       if (item.type === "reviewReceipt") {
-        fragment.append(ReviewUI.card(document, item.review, {render: text => messageMarkdown.render(text),
+        append(ReviewUI.card(document, item.review, {render: text => messageMarkdown.render(text),
           open: id => select(id).catch(showError), expanded: open.has("review:" + item.review.id)}));
         continue;
       }
       if (item.type === "dispatchReceipt") {
-        fragment.append(DispatchUI.card(document, item.receipt, {open: id => select(id).catch(showError),
-          dismiss: id => action(async () => { await api(sessionPath(state.selected) + "/dispatch", {id, action: "dismiss"}); await refreshDetail(); })}));
+        append(DispatchUI.card(document, item.receipt, {open: id => select(id).catch(showError),
+          dismiss: id => action(async () => { await api(sessionPath(view.selected) + "/dispatch", {id, action: "dismiss"}); await refreshDetail(); })}));
         continue;
       }
       const automatic = globalThis.AgentMessages?.automaticPrompt(item);
@@ -2352,7 +2526,7 @@ function renderTimeline() {
         const reused = previousMessages.get(key);
         const row = reused?.signature === signature ? reused.node : AgentMessages.promptRow(document, automatic, {time, titleOf});
         messageNodes.set(key, {signature, node: row});
-        fragment.append(row);
+        append(row);
         continue;
       }
       if (item.type === "userMessage" || item.type === "agentMessage") {
@@ -2364,20 +2538,20 @@ function renderTimeline() {
         // with its Markdown, for each chunk kept the main thread busy and
         // delayed typing in long conversations; reuse unchanged messages.
         const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
-        const signature = JSON.stringify([item, client]);
+        const signature = item;
         const reused = previousMessages.get(key);
-        if (reused?.signature === signature) {
+        if (reused?.signature === signature && reused.version === item.renderRevision && reused.client === client) {
           if (reused.node.dataset.openuiKey)
             reused.node.dataset.openuiStreaming = String(!["completed", "failed", "interrupted"].includes(turn.status));
           const previousTime = reused.node.querySelector?.(":scope > .message-time");
           if (previousTime && previousTime.outerHTML !== time.outerHTML) previousTime.replaceWith(time);
           messageNodes.set(key, reused);
-          fragment.append(reused.node);
+          append(reused.node);
           continue;
         }
         const text = itemText(item);
         const message = node("article", null, "message " + (item.type === "userMessage" ? "user" : "agent"));
-        messageNodes.set(key, {signature, node: message});
+        messageNodes.set(key, {signature, version: item.renderRevision, client, node: message});
         message.dataset.searchTurn = turn.id || "search-turn-" + turns.indexOf(turn);
         message.dataset.searchItem = item.id || "search-item-" + (turn.items || []).indexOf(item);
         message.tabIndex = -1;
@@ -2386,7 +2560,7 @@ function renderTimeline() {
           body.innerHTML = messageMarkdown.render(text);
           globalThis.ResponseActions?.enhance(body);
           if (body.querySelector?.(".openui-block")) {
-            message.dataset.openuiKey = JSON.stringify([state.selected, turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
+            message.dataset.openuiKey = JSON.stringify([view.selected, turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
             message.dataset.openuiText = text;
             message.dataset.openuiStreaming = String(!["completed", "failed", "interrupted"].includes(turn.status));
           }
@@ -2416,17 +2590,17 @@ function renderTimeline() {
           const images = (item.content || []).filter(c => c.type === "image");
           if (images.length) ChatImageAttachments.appendPreviews(document, body, images);
         }
-        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
+        message.setAttribute("aria-label", item.type === "userMessage" ? "You" : (view.detail?.work_thread?.client === "muse" ? "Muse Code" : view.detail?.work_thread?.client === "kimi" ? "Kimi" : view.detail?.work_thread?.client === "antigravity" ? "Antigravity" : view.detail?.work_thread?.client === "claude" ? "Claude" : "Codex"));
         message.append(body, time);
-        fragment.append(message);
+        append(message);
       } else {
         const text = itemText(item);
         // Streaming changes one item at a time. Reuse unchanged tool rows,
         // including their disclosure state, instead of churning the full history.
         const key = JSON.stringify([turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
-        const signature = JSON.stringify(item), cached = previousTools.get(key);
-        const detail = cached?.signature === signature ? cached.node : node("details", null, "tool");
-        toolNodes.set(key, {signature, node: detail});
+        const signature = item, cached = previousTools.get(key);
+        const detail = cached?.signature === signature && cached.version === item.renderRevision ? cached.node : node("details", null, "tool");
+        toolNodes.set(key, {signature, version: item.renderRevision, node: detail});
         detail.dataset.id = item.id; detail.dataset.status = item.status || ""; detail.open = open.has(item.id);
         if (detail !== cached?.node) {
           const labels = {fileChange: "File changes", reasoning: "Thinking", mcpToolCall: "Tool", plan: "Plan", webSearch: "Web search", contextCompaction: "Conversation compaction"};
@@ -2447,7 +2621,7 @@ function renderTimeline() {
           detail.append(summary);
           if (item.statusReason) detail.append(node("p", item.statusReason));
           detail.append(node("pre", text));
-          if (item.abridged) detail.append(completeOutputControl());
+          if (item.abridged) detail.append(pane ? pane.outputControl(turn, item) : completeOutputControl(turn, item));
         }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
@@ -2469,63 +2643,67 @@ function renderTimeline() {
             group.append(summary);
             workGroups.set(turn, group);
             // Anchor at the first work item; prose and coordination cards retain their order.
-            fragment.append(group);
+            append(group);
           }
           group.append(detail);
-        } else fragment.append(detail);
+        } else append(detail);
       }
     }
-    if (!entry.item && turn.error) fragment.append(node("p", turn.error.message || "This turn failed.", "empty"));
-    if (!entry.item && turn.status === "interrupted") fragment.append(node("p",
-      turn !== turns.at(-1) || state.detail?.running ? "Earlier turn stopped." : "Turn stopped.", "empty"));
+    if (!entry.item && turn.error) append(node("p", turn.error.message || "This turn failed.", "empty"));
+    if (!entry.item && turn.status === "interrupted") append(node("p",
+      turn !== turns.at(-1) || view.detail?.running ? "Earlier turn stopped." : "Turn stopped.", "empty"));
     if (!entry.item) appendForks(turnIndexes.get(turn));
   }
   // Retain navigation even when the provider cannot return the boundary turn.
   appendForks(null, true);
-  if (state.outgoing) {
-    state.outgoing.settle(state.selected, state.detail);
+  if (view.outgoing) {
+    view.outgoing.settle(view.selected, view.detail);
     for (const old of el.querySelectorAll("article[data-outgoing]")) old.remove();
-    state.outgoing.append(document, fragment, state.selected);
+    view.outgoing.append(document, fragment, view.selected);
   }
   // A turn may compact before emitting user or agent messages. Keep its live
   // state visible after the historical footer while the transcript catches up.
-  const currentTurn = state.detail?.activeTurn ? turns.find(turn => turn.id === state.detail.activeTurn) : turns.at(-1);
-  if (state.detail?.running && !(currentTurn?.items || []).some(item => item.type === "agentMessage")) {
+  const currentTurn = view.detail?.activeTurn ? turns.find(turn => turn.id === view.detail.activeTurn) : turns.at(-1);
+  if (view.detail?.running && !(currentTurn?.items || []).some(item => item.type === "agentMessage")) {
     const working = node("p", "Working…", "empty");
     working.setAttribute("role", "status");
     fragment.append(working);
   }
   if (globalThis.OpenUIThread) {
-    const thread = state.selected;
+    const thread = view.selected;
     OpenUIThread.commit(el, fragment, {
       thread,
       theme: document.documentElement?.dataset.theme || "light",
-      disabled: !state.detail?.work_thread?.browser_session || state.detail.work_thread.attention === "archived" || state.closing?.has(thread),
-      onAction: text => sendOpenUIResponse(thread, text),
+      disabled: !view.detail?.work_thread?.browser_session || view.detail.work_thread.attention === "archived" || view.closing?.has(thread),
+      onAction: text => sendOpenUIResponse(thread, text, pane),
     });
   } else if (globalThis.ResponseActions) ResponseActions.commit(el, fragment);
   else el.replaceChildren(fragment);
+  conversation.viewport?.observe();
   conversation.toolNodes = toolNodes;
   conversation.messageNodes = messageNodes;
-  const disclosureThread = state.selected;
+  const disclosureThread = view.selected;
   for (const detail of el.querySelectorAll("details[data-id]")) {
     if (!disclosureListeners.has(detail)) {
       detail.addEventListener("toggle", () => rememberDisclosure(detail, open, disclosureThread));
       disclosureListeners.add(detail);
     }
   }
-  if (state.detail?.work_thread?.browser_session === false) el.append(node("p", state.detail?.thread.historyError ||
+  if (view.detail?.work_thread?.browser_session === false) el.append(node("p", view.detail?.thread.historyError ||
     "Read-only conversation. Continue in its original app or terminal session, or use Continue in browser when available.", "empty"));
   else if (!el.childNodes.length) el.append(node("p", "This is the beginning of your session. What would you like to work on?", "empty"));
-  state.responseActions?.update();
-  if (state.timelineScroll) state.timelineScroll.afterRender(atBottom);
+  view.responseActions?.update();
+  if (view.timelineScroll) view.timelineScroll.afterRender(atBottom);
   else if (atBottom) el.scrollTop = el.scrollHeight;
-  if (state.messageTarget && state.messageTarget.thread === state.selected) focusAgentMessage(state.messageTarget.id);
-  if (state.searchTarget?.thread === state.selected) focusSearchMessage(state.searchTarget);
+  if (view.messageTarget && view.messageTarget.thread === view.selected) {
+    if (pane) pane.focusMessage(view.messageTarget.id); else focusAgentMessage(view.messageTarget.id);
+  }
+  if (!pane && view.searchTarget?.thread === view.selected) focusSearchMessage(view.searchTarget);
 }
-async function sendOpenUIResponse(thread, text) {
-  const detail = state.detail;
-  if (thread !== state.selected || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(thread)) {
+async function sendOpenUIResponse(thread, text, pane = null) {
+  const detail = pane ? pane.view.detail : state.detail;
+  const active = pane ? !pane.disposed && pane.id === thread && pane.shell.layout?.tabs.includes(thread) : thread === state.selected;
+  if (!active || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(thread)) {
     throw new Error("Reopen this thread to send a response.");
   }
   const dispatcher = !!detail.work_thread.dispatcher;
@@ -2537,7 +2715,7 @@ async function sendOpenUIResponse(thread, text) {
   }
   await api(sessionPath(thread) + (!dispatcher && detail.running ? "/queue" : "/messages"), body);
   // A refresh failure must not invite resending an already accepted response.
-  try { if (thread === state.selected) await refreshDetail(); await refreshList(); }
+  try { if (pane) await pane.refresh(); else if (thread === state.selected) await refreshDetail(); await refreshList(); }
   catch (error) { console.warn("OpenUI response accepted before refresh failed", error); }
 }
 function focusSearchMessage(target) {
@@ -2598,32 +2776,36 @@ async function refreshAgentMessages() {
   renderTimeline();
   state.dispatchDock?.update(state.detail);
 }
-function requestButton(label, decision, request, form) {
-  const id = state.selected;
+function requestButton(label, decision, request, form, pane) {
+  const id = pane?.id || state.selected;
   const button = node("button", label, decision === "accept" ? "primary" : "quiet"); button.type = "button";
   button.onclick = () => action(async () => {
     const ticket = state.rollUp?.ticket(id);
     const body = {decision};
     if (form) Object.assign(body, form());
     await api(sessionPath(id) + "/requests/" + encodeURIComponent(request.key), body);
-    if (id === state.selected) await refreshDetail();
+    if (pane) await pane.refresh();
+    else if (id === state.selected) await refreshDetail();
     await refreshList();
     await state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
   }, button);
   return button;
 }
-function renderRequests() {
-  const area = $("requests");
-  if (state.detailRefreshing || state.conversations?.get(state.selected)?.requestsRefreshing) { area.replaceChildren(); delete area.dataset.signature; return; }
+function renderRequests() { return renderConversationRequests(); }
+function renderConversationRequests(pane) {
+  const area = pane?.requests || $("requests");
+  const view = pane?.view || state;
+  const control = (label, decision, request, form) => requestButton(label, decision, request, form, pane);
+  if (view.detailRefreshing || view.conversations?.get(view.selected)?.requestsRefreshing) { area.replaceChildren(); delete area.dataset.signature; return; }
   // Preserve partially entered answers while unrelated events stream.
-  const signature = JSON.stringify((state.detail?.requests || []).map(r => r.key));
+  const signature = JSON.stringify((view.detail?.requests || []).map(r => r.key));
   if (area.dataset.signature === signature) return;
   area.dataset.signature = signature; area.replaceChildren();
-  for (const request of state.detail?.requests || []) {
+  for (const request of view.detail?.requests || []) {
     const box = node("section", null, "request"), params = request.params;
     const actions = node("div", null, "actions");
     if (request.method === "item/tool/requestUserInput") {
-      box.append(node("h3", (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
+      box.append(node("h3", (view.detail?.work_thread?.client === "muse" ? "Muse Code" : view.detail?.work_thread?.client === "kimi" ? "Kimi" : view.detail?.work_thread?.client === "antigravity" ? "Antigravity" : view.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " has a question"));
       const fields = [];
       for (const question of params.questions || []) {
         const label = node("label", question.question);
@@ -2636,14 +2818,14 @@ function renderRequests() {
           }
         } else input.type = question.isSecret ? "password" : "text";
         if (!fixed && question.options?.length) {
-          const options = node("datalist"); options.id = "options-" + request.key + "-" + fields.length;
+          const options = node("datalist"); options.id = "options-" + (pane?.id || "main") + "-" + request.key + "-" + fields.length;
           for (const option of question.options) options.append(node("option", option.label));
           input.setAttribute("list", options.id); label.append(options);
         }
         label.append(input); box.append(label); fields.push([question.id, input]);
       }
-      actions.append(requestButton("Send answer", "accept", request, () => ({answers: Object.fromEntries(fields.map(([id, input]) => [id, {answers: input.multiple ? Array.from(input.selectedOptions, option => option.value) : [input.value]}]))})));
-      if (params.allowCancel) actions.append(requestButton("Cancel", "cancel", request));
+      actions.append(control("Send answer", "accept", request, () => ({answers: Object.fromEntries(fields.map(([id, input]) => [id, {answers: input.multiple ? Array.from(input.selectedOptions, option => option.value) : [input.value]}]))})));
+      if (params.allowCancel) actions.append(control("Cancel", "cancel", request));
     } else if (request.method === "mcpServer/elicitation/request") {
       box.append(node("h3", "A tool needs your input"), node("p", params.message || ""));
       const fields = [];
@@ -2658,17 +2840,17 @@ function renderRequests() {
       if (params.mode === "url") {
         try { const url = new URL(params.url); if (["http:", "https:"].includes(url.protocol)) { const link = node("a", "Open tool sign-in page ↗"); link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; box.append(link); } } catch (_) { /* Invalid URLs remain inert. */ }
       }
-      actions.append(requestButton("Continue", "accept", request, () => ({content: Object.fromEntries(fields.map(([key, schema, input]) => [key, schema.type === "boolean" ? input.checked : ["number", "integer"].includes(schema.type) ? Number(input.value) : input.value]))})), requestButton("Cancel", "cancel", request));
+      actions.append(control("Continue", "accept", request, () => ({content: Object.fromEntries(fields.map(([key, schema, input]) => [key, schema.type === "boolean" ? input.checked : ["number", "integer"].includes(schema.type) ? Number(input.value) : input.value]))})), control("Cancel", "cancel", request));
     } else if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"].includes(request.method)) {
-      box.append(node("h3", (state.detail?.work_thread?.client === "muse" ? "Muse Code" : state.detail?.work_thread?.client === "kimi" ? "Kimi" : state.detail?.work_thread?.client === "antigravity" ? "Antigravity" : state.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
+      box.append(node("h3", (view.detail?.work_thread?.client === "muse" ? "Muse Code" : view.detail?.work_thread?.client === "kimi" ? "Kimi" : view.detail?.work_thread?.client === "antigravity" ? "Antigravity" : view.detail?.work_thread?.client === "claude" ? "Claude" : "Codex") + " is requesting approval"));
       if (params.reason) box.append(node("p", params.reason));
       box.append(node("pre", params.command || (params.permissions || params.networkApprovalContext ? JSON.stringify(params.permissions || params.networkApprovalContext, null, 2) : params.grantRoot || "Apply the file changes shown above.")));
       const choices = params.availableDecisions || (request.method === "item/permissions/requestApproval" ? ["accept", "decline"] : ["accept", "acceptForSession", "decline", "cancel"]);
       const labels = {accept: "Allow once", acceptForSession: "Allow for session", decline: "Decline", cancel: "Cancel"};
-      for (const decision of choices) if (typeof decision === "string" && labels[decision]) actions.append(requestButton(labels[decision], decision, request));
+      for (const decision of choices) if (typeof decision === "string" && labels[decision]) actions.append(control(labels[decision], decision, request));
     } else {
       box.append(node("h3", "This request is not supported yet"), node("p", "Cancel this request to continue."));
-      actions.append(requestButton("Cancel request", "cancel", request));
+      actions.append(control("Cancel request", "cancel", request));
     }
     box.append(actions); area.append(box);
   }
@@ -2691,10 +2873,16 @@ function scheduleTimelineRender({userMessage = false} = {}) {
   else render.timer = setTimeout(paint, 50);
 }
 function applyEvent(event) {
+  if (event.method === "browser/conversationInvalidated") { invalidateConversationMetadata(event.params); return; }
   if (event.method === "browser/schedules") { state.schedules?.refresh().catch(showError); return; }
+  if (event.method === "browser/changed" && !event.params?.threadId) { refreshDecisionsAndSchedules(); scheduleList(); if (state.selected) scheduleDetail(); return; }
   if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
+  if (cached && Number.isSafeInteger(event.seq)) {
+    if (event.seq <= Math.max(cached.lastEventSeq ?? -1, cached.detail?.stream_seq ?? -1)) return;
+    cached.lastEventSeq = event.seq;
+  }
   if (event.method === "browser/messageAccepted") {
     const id = event.params.threadId;
     // Unopened conversations restore receipts on their next read. An evicted
@@ -2717,7 +2905,7 @@ function applyEvent(event) {
     }
     return;
   }
-  const streamedItem = state.detail && event.params.threadId === state.selected && !event.requestKey &&
+  const streamedItem = cached?.detail && !event.requestKey &&
     event.method.startsWith("item/") && event.params.turnId && (event.params.item?.id || event.params.itemId);
   if (cached) {
     if (streamedItem && cached.streamedItems) {
@@ -2736,28 +2924,40 @@ function applyEvent(event) {
       return;
     }
   }
-  if (!state.detail || event.params.threadId !== state.selected) return;
+  if (!state.detail || event.params.threadId !== state.selected) {
+    if (cached?.detail) {
+      reduceConversationHistory(cached.detail, event);
+      cached.nodes = null;
+    }
+    return;
+  }
   const {method, params} = event;
   if (method === "coordination/messages") { refreshAgentMessages().catch(showError); return; }
   if (event.requestKey) { state.detail.requests.push({key: event.requestKey, method, params}); renderRequests(); renderStatus(); if (state.detailRefreshing) scheduleDetail(); return; }
+  reduceConversationHistory(state.detail, event);
+  if (method === "turn/started" || method === "turn/completed") renderTimeline();
+  if (["turn/completed", "serverRequest/resolved", "browser/requests", "browser/changed"].includes(method)) scheduleDetail();
+  if (!method.startsWith("item/") || !params.turnId) { renderStatus(); return; }
+  scheduleTimelineRender({userMessage: params.item?.type === "userMessage"});
+}
+function reduceConversationHistory(detail, event) {
+  const {method, params} = event;
   if (method === "turn/started") {
-    state.detail.running = true; state.detail.activeTurn = params.turn.id;
-    const turns = state.detail.thread.turns ||= [];
+    detail.running = true; detail.activeTurn = params.turn.id;
+    const turns = detail.thread.turns ||= [];
     const turn = turns.find(t => t.id === params.turn.id);
     if (turn) Object.assign(turn, {...params.turn, items: turn.items});
     else turns.push({...params.turn, items: params.turn.items || []});
-    renderTimeline();
+
   }
   if (method === "turn/completed") {
-    state.detail.running = false;
-    const turn = state.detail.thread.turns?.find(t => t.id === params.turn?.id);
+    detail.running = false;
+    const turn = detail.thread.turns?.find(t => t.id === params.turn?.id);
     if (turn) Object.assign(turn, {...params.turn, items: params.turn.items?.length ? params.turn.items : turn.items});
-    renderTimeline(); scheduleDetail();
+
   }
-  if (method === "serverRequest/resolved" || method === "browser/requests") scheduleDetail();
-  if (method === "browser/changed") scheduleDetail();
-  if (!method.startsWith("item/") || !params.turnId) { renderStatus(); return; }
-  const turns = state.detail.thread.turns ||= [];
+  if (!method.startsWith("item/") || !params.turnId) return;
+  const turns = detail.thread.turns ||= [];
   let turn = turns.find(t => t.id === params.turnId);
   if (!turn) { turn = {id: params.turnId, items: [], status: "inProgress", startedAt: params.turnStartedAt}; turns.push(turn); }
   if (turn.startedAt == null && params.turnStartedAt != null) turn.startedAt = params.turnStartedAt;
@@ -2767,10 +2967,19 @@ function applyEvent(event) {
   } else if (params.itemId && typeof params.delta === "string") {
     let item = turn.items.find(i => i.id === params.itemId);
     if (!item && method === "item/agentMessage/delta") { item = {id: params.itemId, type: "agentMessage", text: ""}; turn.items.push(item); }
+    if (item) item.renderRevision = (item.renderRevision || 0) + 1;
     if (item && method === "item/agentMessage/delta") item.text = (item.text || "") + params.delta;
     if (item && method === "item/commandExecution/outputDelta") item.aggregatedOutput = (item.aggregatedOutput || "") + params.delta;
+    if (item && method === "item/mcpToolCall/outputDelta") {
+      const output = typeof item.visibleOutput === "string" ? item.visibleOutput : typeof item.result === "string" ? item.result : "";
+      item.visibleOutput = output + params.delta;
+    }
+    if (item && method === "item/reasoning/summaryTextDelta" && Number.isSafeInteger(params.summaryIndex) && params.summaryIndex >= 0) {
+      const summary = item.summary ||= [], index = params.summaryIndex;
+      if (summary[index] && typeof summary[index] === "object") summary[index].text = (summary[index].text || "") + params.delta;
+      else summary[index] = (summary[index] || "") + params.delta;
+    }
   }
-  scheduleTimelineRender({userMessage: params.item?.type === "userMessage"});
 }
 let listTimer, detailTimer;
 let listScheduledAt = 0;
@@ -2788,6 +2997,7 @@ function backgroundRefreshAllowed(kind) {
   return true;
 }
 function refreshBackgroundView({reconcile = false} = {}) {
+  if (state.streamHealthy && !reconcile && !state.backgroundDetailPending) return;
   if (!state.paneMode && backgroundRefreshAllowed("list")) refreshList({background: true}).catch(showError);
   if (backgroundRefreshAllowed("detail")) {
     if (reconcile || state.backgroundDetailPending) {
@@ -2806,17 +3016,39 @@ function scheduleList() {
   }, wait);
 }
 function scheduleDetail() {
-  clearTimeout(detailTimer);
+  if (detailTimer) return;
   detailTimer = setTimeout(() => {
+    detailTimer = null;
     if (backgroundRefreshAllowed("detail")) {
       state.backgroundDetailPending = false;
       refreshDetail({background: true}).catch(showError);
     } else state.backgroundDetailPending = true;
   }, 100);
 }
+function invalidateConversationMetadata({revision, threadIds = [], topics = [], reset = false}) {
+  if (!Number.isSafeInteger(revision) || !reset && revision <= state.config.conversationMetadataCursor) return;
+  state.config.conversationMetadataCursor = revision;
+  const matches = id => reset || !threadIds.length || threadIds.includes(id);
+  for (const [id, entry] of state.conversations || []) if (matches(id)) entry.revision++;
+  if (state.selected && matches(state.selected)) scheduleDetail();
+  for (const [id, record] of globalThis.agentCoordPanes?.records || [])
+    if (record.api && matches(id)) record.api.scheduleRefresh();
+  if (reset || topics.includes("organization")) state.organizationReadAt = 0;
+  if (reset || topics.includes("threads") || topics.includes("organization")) scheduleList();
+  if (reset || topics.includes("asks")) state.asks?.refresh().catch(showError);
+  if (reset || topics.includes("schedules")) state.schedules?.refresh().catch(showError);
+  if (reset || topics.includes("settings")) {
+    state.activity?.refreshSettings?.();
+    globalThis.agentCoordJev?.refreshStatus?.();
+  }
+  if (!state.config.conversationOpen && (reset || topics.includes("sidecars"))) state.sidecars?.refresh().catch(showError);
+}
 function connect() {
-  const events = new EventSource(base + "events?after=" + (state.config.eventCursor ?? 0)
-    + "&completion_after=" + state.config.completionCursor);
+  state.events?.close?.();
+  state.streamHealthy = false;
+  const metadata = state.config.conversationMetadataEvents === 1 && Number.isSafeInteger(state.config.conversationMetadataCursor);
+  const events = state.events = new EventSource(base + "events?after=" + (state.config.eventCursor ?? 0)
+    + "&completion_after=" + state.config.completionCursor + (metadata ? "&metadata_after=" + state.config.conversationMetadataCursor : ""));
   if (state.updateSubmissions) {
     // Broadcast only invalidation to this window and its same-origin panes.
     // Receipt contents are read using the selected conversation's own route.
@@ -2831,13 +3063,32 @@ function connect() {
     events.addEventListener("update-submission-change", changed);
     events.addEventListener("open", changed);
   }
-  events.onopen = () => { for (const entry of state.conversations?.values() || []) entry.revision++; $("connection").replaceChildren(node("span", "Connected locally", "sr-only")); $("connection").title = "Connected locally"; $("connection").dataset.state = "connected"; scheduleList(); if (state.selected) scheduleDetail(); };
-  events.onerror = () => { $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…"; $("connection").dataset.state = "reconnecting"; };
+  events.onopen = () => {
+    if (state.events !== events) return;
+    state.streamHealthy = metadata;
+    state.asks?.setEventsConnected?.(metadata);
+    state.setPolling?.(metadata);
+    $("connection").replaceChildren(node("span", "Connected locally", "sr-only"));
+    $("connection").title = "Connected locally"; $("connection").dataset.state = "connected";
+    if (state.streamWasOpen) {
+      for (const entry of state.conversations?.values() || []) entry.revision++;
+      scheduleList(); scheduleDetail(); globalThis.agentCoordPanes?.refresh();
+    }
+    state.streamWasOpen = true;
+  };
+  events.onerror = () => {
+    if (state.events !== events) return;
+    state.streamHealthy = false; state.asks?.setEventsConnected?.(false); state.setPolling?.(false);
+    $("connection").textContent = "Reconnecting…"; $("connection").title = "Reconnecting…";
+    $("connection").dataset.state = "reconnecting";
+  };
   let resumeCursor;
   let previousApprovals = new Map();
   events.onmessage = message => {
+    if (state.events !== events) return;
     const batch = JSON.parse(message.data);
-    resumeCursor = {eventCursor: batch.seq, completionCursor: batch.completionSeq};
+    const stableCursor = /^([0-9a-f]{32}\/\d+):\d+$/.exec(message.lastEventId || "");
+    resumeCursor = {eventCursor: stableCursor ? stableCursor[1] : batch.seq, completionCursor: batch.completionSeq};
     // Approvals are a snapshot of unclaimed requests. Batches between polls
     // omit the field, and each poll can repeat the same unanswered requests.
     const changedThreads = new Set();
@@ -2859,7 +3110,7 @@ function connect() {
     }
     const approvalChanges = Array.from(changedThreads, thread_id => ({thread_id}));
     globalThis.agentCoordSpeech?.receive(batch.completions || []);
-    globalThis.agentCoordPanes?.receive({...batch, approvals: approvalChanges});
+
     // Completions apply to every thread, including when this tab is hidden.
     for (const notification of [...(batch.completions || []), ...approvalChanges]) {
       const entry = state.conversations?.get(notification.thread_id);
@@ -2874,16 +3125,24 @@ function connect() {
     if (state.selected && (changedThreads.has(state.selected)
         || batch.completions?.some(row => row.thread_id === state.selected)
         || batch.snoozes?.some(row => row.thread_id === state.selected))) scheduleDetail();
-    if (batch.reset) { for (const entry of state.conversations?.values() || []) entry.revision++; scheduleDetail(); }
+    if (batch.reset) {
+      for (const entry of state.conversations?.values() || []) {
+        entry.revision++; delete entry.lastEventSeq;
+        if (entry.detail) { delete entry.detail.stream_seq; delete entry.detail.revisionEpoch; }
+      }
+      scheduleList(); refreshDecisionsAndSchedules(); scheduleDetail(); globalThis.agentCoordPanes?.refresh();
+    }
     for (const event of batch.events) {
       if (event.method === "bridge/disconnected") { for (const entry of state.conversations?.values() || []) entry.revision++; showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail?.work_thread?.client === "codex" && state.detail) { state.detail.running = false; state.detailRefreshing = true; renderRequests(); } renderStatus(); }
       else applyEvent(event);
       if (changesThreadList(event)) scheduleList();
     }
+    globalThis.agentCoordPanes?.receive({...batch, approvals: approvalChanges});
   };
   window.addEventListener("pagehide", event => {
     events.close();
-    if (event.persisted && state.updateSubmissions) {
+    if (state.events === events) state.streamHealthy = false;
+    if (event.persisted && state.events === events) {
       // The page cache restores the same document with its old stream closed.
       window.addEventListener("pageshow", restored => {
         if (restored.persisted) {
@@ -3176,7 +3435,7 @@ function composerDraftId(id = state.selected) {
   return id === "new-session" ? state.newSessionDraft?.draftId || id : id;
 }
 function sessionBusy() {
-  return !!state.busy || !!state.transferLocks?.has(state.selected) || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
+  return !!state.settingsMutations?.has(state.selected) || !!state.transferLocks?.has(state.selected) || !!state.sending?.has(isSessionDraft() ? state.newSessionDraft : state.selected);
 }
 function modelValue(client, model) { return JSON.stringify([client, model || ""]); }
 function defaultsKey(session) {
@@ -3208,7 +3467,7 @@ function sessionModelClients() {
     ["codex", "claude", "antigravity", "kimi", "muse"] : [state.detail?.session?.client || "codex"];
 }
 function selectDraftModel({client, model}) {
-  if (!isSessionDraft() || state.newSessionDraft.createdId || state.busy || state.detailRefreshing) return;
+  if (!isSessionDraft() || state.newSessionDraft.createdId || sessionBusy() || state.detailRefreshing) return;
   if (state.newSessionDraft.session.client !== client) {
     delete state.newSessionDraft.session.permission_mode;
     delete state.newSessionDraft.session.permission_modes;
@@ -3279,7 +3538,7 @@ function renderEffortPicker() {
 async function changeSessionEffort() {
   const id = state.selected, draft = isSessionDraft(), effort = $("effort-picker").value || null;
   if ($("effort-picker").disabled || sessionBusy() || state.detail?.running || draft && state.newSessionDraft.createdId) return;
-  state.busy = true;
+  (state.settingsMutations ||= new Set()).add(id);
   renderStatus();
   try {
     if (draft) state.newSessionDraft.session.effort = effort;
@@ -3287,7 +3546,7 @@ async function changeSessionEffort() {
       const session = await api(sessionPath(id), {effort});
       if (state.selected === id) state.detail.session = session;
     }
-  } finally { state.busy = false; renderStatus(); }
+  } finally { state.settingsMutations.delete(id); renderStatus(); }
 }
 $("effort-picker").onchange = () => action(changeSessionEffort);
 $("effort-picker").onfocus = () => loadSessionModels({refresh: true});
@@ -3315,15 +3574,16 @@ async function changeSessionModel() {
   const draft = isSessionDraft();
   if (sessionBusy() || state.detailRefreshing || state.detail?.running || draft && state.newSessionDraft.createdId) return;
   if (draft) { selectDraftModel({client, model}); await loadSessionDefaults(); return; }
-  state.busy = true;
+  (state.settingsMutations ||= new Set()).add(id);
   try {
     const session = await api(sessionPath(id), {model});
     if (state.selected === id) state.detail.session = session;
-  } finally { state.busy = false; renderStatus(); }
+  } finally { state.settingsMutations.delete(id); renderStatus(); }
 }
 $("model-picker").onchange = () => action(changeSessionModel);
 $("model-picker").onfocus = () => loadSessionModels({refresh: true});
 async function newSession() {
+  state.initializeConversationView?.();
   state.mobileChat?.close();
   if (!state.config || state.choosingSessionFolder) return;
   let body = state.newSessionDraft?.session;
@@ -3343,7 +3603,7 @@ async function newSession() {
   if (!state.newSessionDraft) state.sessionDefaults?.clear();
   const defaults = globalThis.NewSessionDefaults?.read() || {client: "codex", model: null, effort: null, yolo: false};
   state.newSessionDraft ||= {
-    draftId: "new-session:" + (state.draftSequence = (state.draftSequence || 0) + 1),
+    draftId: "new-session:" + body.cwd,
     session: {...body, ...defaults},
     work_thread: {thread_id: "new-session", title: "New session", ...body, project_cwd: body.cwd, client: defaults.client, browser_session: true, attention: "now", links: []},
     thread: {turns: []}, requests: [], queuedMessages: [], running: false,
@@ -3357,6 +3617,7 @@ async function newSession() {
   state.detailRefreshing = false;
   state.titleEdit = null;
   $("message").value = state.drafts.get("new-session") || "";
+  if (state.durableDrafts) restoreLocalDraft(state.newSessionDraft.draftId).catch(showError);
   $("welcome").hidden = true;
   $("conversation").hidden = false;
   $("conversation").classList.add("session-draft");
@@ -3364,17 +3625,19 @@ async function newSession() {
   if (typeof layoutContext === "function") layoutContext();
   $("page-location").textContent = "New session";
   state.timelineThread = null;
-  $("timeline").replaceChildren(node("p", "Choose a model and send a message to start.", "empty"));
+  replaceTimelineContent(node("p", "Choose a model and send a message to start.", "empty"));
   state.timelineScroll?.reset();
+  const intent = state.creationIntents?.get(state.newSessionDraft.draftId);
+  if (intent) showCreationIntent(state.newSessionDraft.draftId, intent);
   $("requests").replaceChildren(); delete $("requests").dataset.signature;
   $("thread-context").hidden = true;
   renderTitle(); renderQueuedMessages(); renderStatus();
   navigation?.remember();
   $("message").focus();
-  // Each provider loads independently; an unavailable CLI cannot block the other.
-  await loadSessionModels();
+  // The restored draft is usable before provider catalog discovery completes.
+  loadSessionModels().catch(showError);
 }
-async function sendSessionDraft(text, images, mentions = []) {
+async function sendSessionDraft(text, images, mentions = [], quiet = false) {
   const input = $("message"), doc = input.ownerDocument;
   const hadComposerFocus = doc?.activeElement === input;
   const navigationRevision = state.navigationRevision;
@@ -3398,24 +3661,67 @@ async function sendSessionDraft(text, images, mentions = []) {
       : "Permissions: default — approval prompts enabled. Use /yolo to enable full machine access.";
     input.value = ""; state.drafts.delete("new-session");
     state.mentions?.sent(draft.draftId || "new-session", text, mentions);
+    if (state.durableDrafts) {
+      const id = draft.draftId || "new-session";
+      await writeComposerRecord(id, () => state.durableDrafts.write(id, {text: "", mentions: []}), "text");
+    }
     renderStatus();
     return;
   }
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
+  const ordinary = !command.startsWith("/") && !state.reviewUI?.settings?.has(draftId);
+  if (!draft.createdId && state.durableDrafts) {
+    const settings = {...draft.session};
+    if (settings.permission_mode) delete settings.yolo;
+    const message = {message: text, mentions, images};
+    state.reviewUI?.decorate(message, draftId);
+    const options = message.review ? {review: message.review, requestId: message.requestId} : {};
+    return startCreation(draftId, settings, text, images, mentions, quiet, options);
+  }
+  const requestId = ordinary ? crypto.randomUUID() : null;
+  if (ordinary) {
+    const versions = state.draftVersions ||= new Map();
+    versions.set(draftId, (versions.get(draftId) || 0) + 1);
+    const pending = {text, images: images.length, key: requestId, status: "sending"};
+    replaceTimelineContent(state.outgoing.node(document, pending));
+    input.value = ""; state.drafts.delete("new-session");
+    state.timelineScroll?.latest();
+  }
   if (!draft.createdId) {
     const settings = {...draft.session};
     if (settings.permission_mode) delete settings.yolo;
-    const result = await api("sessions", settings);
+    let result;
+    try { result = await api("sessions", settings); }
+    catch (error) {
+      if (ordinary && state.newSessionDraft === draft) {
+        if (!state.drafts.get("new-session")) state.drafts.set("new-session", text);
+        if (isSessionDraft()) {
+          if (!input.value) input.value = text;
+          replaceTimelineContent(state.outgoing.node(document,
+            {text, images: images.length, key: requestId, status: "failed", error: error.message}));
+        }
+      }
+      throw error;
+    }
     draft.createdId = result.session.thread_id;
     draft.createdDetail = result;
     if (draft.session.project_id) savedViews?.showGroup(draft.session.project_id, draft.session.cwd);
   }
   const body = {message: text, windowId: state.sourceWindowId};
+  if (quiet) body.quiet = true;
   if (mentions.length) body.mentions = mentions;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   state.reviewUI?.decorate(body, draftId);
-  body.requestId ||= DispatchUI.requestKey(sessionStorage, draft.createdId, body);
-  const result = await api(sessionPath(draft.createdId) + "/messages", body);
+  let result = {}, delivery, stage;
+  if (ordinary) {
+    delivery = submitComposerMessage({id: draft.createdId, requestId, text, images, mentions, body,
+      path: sessionPath(draft.createdId) + "/messages", detail: draft.createdDetail, clear() {},
+      onStage: promise => { stage = promise; }});
+    delivery.catch(() => {}); // Observed after the new conversation has its own composer.
+  } else {
+    body.requestId ||= DispatchUI.requestKey(sessionStorage, draft.createdId, body);
+    result = await api(sessionPath(draft.createdId) + "/messages", body);
+  }
   sessionStorage.removeItem("dispatch-request:" + draft.createdId);
   // Creation and message acceptance already establish this conversation. Show
   // that state immediately while its full detail catches up in the background.
@@ -3426,8 +3732,11 @@ async function sendSessionDraft(text, images, mentions = []) {
     thread: {...created.thread, turns: result.turn ? [result.turn] : created.thread?.turns || []},
     requests: [], queuedMessages: [], running: !!(result.turn || result.turnId), activeTurn: result.turn?.id || result.turnId || null};
   state.reviewUI?.sent(draftId);
-  state.attachments?.sent(draftId, images);
-  state.mentions?.sent(draftId, text, mentions);
+  state.clearingSubmission = draftId;
+  try {
+    if (images.length) state.attachments?.sent(draftId, images);
+    state.mentions?.sent(draftId, text, mentions);
+  } finally { state.clearingSubmission = null; }
   state.mentions?.move(draftId, draft.createdId);
   state.attachments?.move(draftId, draft.createdId);
   if (result.command) state.commandFeedback.set(draft.createdId, result.command.message);
@@ -3436,7 +3745,21 @@ async function sendSessionDraft(text, images, mentions = []) {
   const saved = state.projectDrafts?.get(cwd);
   const remaining = current ? (isSessionDraft() ? $("message").value : state.drafts.get("new-session"))
     : saved?.detail === draft ? saved.text : "";
-  if (remaining && remaining !== text) state.drafts.set(draft.createdId, remaining);
+  const nextText = ordinary || remaining !== text ? remaining || "" : "";
+  if (nextText) state.drafts.set(draft.createdId, nextText);
+  const next = {text: nextText, images: state.attachments?.snapshot(draft.createdId) || [],
+    mentions: state.mentions?.snapshot(draft.createdId, nextText) || []};
+  let migration;
+  if (state.durableDrafts) {
+    // Reserve both composer keys in this task. Earlier writes complete before
+    // the atomic move, and later edits on either key follow that transaction.
+    const prior = state.composerWrites?.get(draftId);
+    migration = writeComposerRecord(draft.createdId, async () => {
+      await prior; await stage;
+      await state.durableDrafts.move(draftId, draft.createdId, next);
+    });
+    writeComposerRecord(draftId, () => migration).catch(showError);
+  }
   if (saved?.detail === draft) state.projectDrafts.delete(cwd);
   if (current) {
     state.drafts.delete("new-session");
@@ -3452,6 +3775,11 @@ async function sendSessionDraft(text, images, mentions = []) {
     const selecting = select(draft.createdId, {focus: !result.command, refreshInventory: false});
     focusRevision = state.navigationRevision;
     await selecting.catch(error => showError(new Error("Your message was received, but the view could not refresh. " + error.message)));
+  }
+  await migration;
+  if (delivery) {
+    await delivery;
+    if (state.selected === draft.createdId) refreshDetail({background: true}).catch(showError);
   }
   refreshList({background: true}).catch(showError);
   // The first command replaces the draft, including inside a pane where select
@@ -3513,7 +3841,7 @@ $("expand-chat").onclick = () => setChatExpanded(!document.body.classList.contai
 // available in compact and expanded layouts; the mobile sheet shows them inline.
 function headerMenuItems() {
   return [...document.querySelectorAll(".session-actions .thread-menu-action")].filter(button => !button.hidden)
-    .map(button => ({label: button.textContent, title: button.title, disabled: button.disabled, run: () => button.click()}));
+    .map(button => ({label: button.getAttribute("aria-label") || button.textContent, title: button.title, disabled: button.disabled, run: () => button.click()}));
 }
 $("thread-actions").onclick = event => state.threadActions.showMenu($("thread-actions"),
   state.detail?.work_thread?.title || "Thread", headerMenuItems(), event);
@@ -3535,7 +3863,7 @@ function goHome({restoreDispatcher = true, rememberTab = true, preserveRollUp = 
   setChatExpanded(false);
   if (state.selected) state.drafts.set(state.selected, $("message").value);
   retainConversation();
-  state.dispatchDock?.hide();
+  if (state.dispatchDock?.active) state.dispatchDock.hide();
   state.selected = null; state.detail = null; state.titleEdit = null;
   state.updateSubmissions?.select(null);
   state.activity?.select(null);
@@ -3580,11 +3908,12 @@ $("open-settings").onclick = event => {
   event.preventDefault();
   if (window.agentCoordDesktop?.openSettings) { window.agentCoordDesktop.openSettings().catch(showError); return; }
   setNavigation(false);
-  if (!$("settings-frame").getAttribute("src")) $("settings-frame").src = "/settings?embedded=1";
+  const frame = workspaceDialogFrame(document, "settings-frame");
+  if (!frame.getAttribute("src")) frame.src = "/settings?embedded=1";
   $("settings-dialog").showModal();
 };
 window.addEventListener("message", event => {
-  if (event.origin === location.origin && event.source === $("settings-frame").contentWindow && event.data?.type === "ribbon-field-close-settings") $("settings-dialog").close();
+  if (event.origin === location.origin && event.source && event.source === $("settings-frame")?.contentWindow && event.data?.type === "ribbon-field-close-settings") $("settings-dialog").close();
 });
 $("settings-dialog").addEventListener("close", () => {
   $("settings-frame").removeAttribute("src");
@@ -3623,7 +3952,10 @@ setNavigation(false);
 const compactContext = window.matchMedia("(max-width: 1100px)");
 function setupAgentTree() {
   const records = new Map();
-  let openThreads = [], closedThreads = [], familyThreads = [], pending, defaultPending = false;
+  let openThreads = [], closedThreads = [], familyThreads = [], pending;
+  const breadcrumb = AgentTree.Breadcrumb && new AgentTree.Breadcrumb({document, host: $("agent-breadcrumb"),
+    onSelect: id => select(id, {tabId: state.threadTabs?.selected, focus: false, stayInProject: true}),
+    onError: showError});
   const currentTab = () => state.threadTabs?.items.find(item => item.thread_id === state.threadTabs.selected);
   const controller = state.agentTreeController = {
     mode: "context", root: null, tree: AgentTree.graph([]),
@@ -3638,7 +3970,11 @@ function setupAgentTree() {
       openThreads = open;
       if (closed) closedThreads = closed;
       this.update();
-      if (this.mode === "agents" && state.selected && !isSessionDraft()) this.load().catch(showError);
+      if (!state.config?.conversationOpen && this.mode === "agents" && state.selected && !isSessionDraft()) this.load().catch(showError);
+    },
+    hydrate(data) {
+      familyThreads = data;
+      this.update();
     },
     async load() {
       if (isSessionDraft() || state.selected === "new-session") return;
@@ -3667,6 +4003,8 @@ function setupAgentTree() {
         all.push(relationship ? {...work, agent_parent_id: relationship.agent_parent_id} : work);
       }
       this.tree = AgentTree.graph(all);
+      breadcrumb?.update(this.tree, isSessionDraft() ? null : state.selected);
+      if (state.selected && !isSessionDraft()) state.threadTabs?.reconcileFamily?.(this.tree, state.selected);
       if (!state.selected || isSessionDraft() || state.selected === "new-session") {
         this.root = null;
         $("panel-agents").hidden = true;
@@ -3694,7 +4032,6 @@ function setupAgentTree() {
       if (!hasAgents && this.mode === "agents") {
         this.setMode("context", false);
       }
-      this.applyDefault();
     },
     childCount(id) { return Math.max(0, this.tree.family(id).filter(child => child !== id && this.tree.nodes.get(child)?.browser_session !== false).length); },
     recipient() {
@@ -3705,29 +4042,16 @@ function setupAgentTree() {
     bind({preservePanel = false, dock = false} = {}) {
       if (!preservePanel) familyThreads = [];
       const draft = !state.selected || isSessionDraft() || state.selected === "new-session";
-      defaultPending = !preservePanel && !dock && !state.paneMode && !draft;
       if (!preservePanel || draft) {
         if (typeof readSavedContextCollapsed === "function") contextCollapsed = readSavedContextCollapsed();
         this.setMode("context", false);
       } else layoutContext();
       this.update();
       // Discover closed ancestors and children even when overview filters hide them.
-      if (!dock && !state.paneMode && !draft) this.load().catch(showError);
+      if (!dock && !state.paneMode && !draft && !state.config?.conversationOpen) this.load().catch(showError);
     },
-    applyDefault() {
-      if (!defaultPending || !state.selected || isSessionDraft() || !this.hasAgents(this.root)) return;
-      defaultPending = false;
-      // A phone shows the conversation first: the tree is the panel's mode, one tap away
-      // in thread options, but the sheet does not open over the conversation.
-      if (state.mobileChat?.matches) { this.setMode("agents", false); renderStatus(); return; }
-      this.setMode("agents");
-      setContextCollapsed(false, {persist: false});
-      renderStatus();
-    },
-    cancelDefault() { defaultPending = false; },
     setMode(mode, remember = true) {
       if (mode === "agents" && !this.hasAgents(this.root)) mode = "context";
-      if (remember) this.cancelDefault();
       this.mode = mode;
       if (mode !== "agents") panel.clearMessages();
       $("agent-tree-panel").hidden = mode !== "agents"; $("context-info").hidden = mode === "agents";
@@ -3785,7 +4109,6 @@ function setupAgentTree() {
   $("panel-agents").onclick = () => action(() => controller.open());
   $("panel-context").onclick = () => controller.setMode("context");
   $("close-context-panel").onclick = () => {
-    controller.cancelDefault();
     if (state.mobileChat?.matches) state.mobileChat.close();
     else setContextCollapsed(true);
   };
@@ -3869,7 +4192,6 @@ function layoutContext() {
   if (collapsed && containsFocus) $(expanded ? "expand-chat" : "toggle-context").focus({preventScroll: true});
 }
 function setContextCollapsed(collapsed, {persist = true} = {}) {
-  state.agentTreeController?.cancelDefault();
   contextCollapsed = collapsed;
   if (persist) {
     try { localStorage.setItem("agent-coord.context-collapsed", String(collapsed)); } catch { /* Preferences are optional. */ }
@@ -3882,6 +4204,9 @@ layoutContext();
 if (typeof AgentTree !== "undefined") setupAgentTree();
 state.scratchpad = new ThreadScratchpad({panel: $("thread-scratchpad"), input: $("scratchpad-text"), status: $("scratchpad-status"), api, compactStatus: true});
 state.outgoing = new OutgoingMessages({itemText});
+state.outgoing.onReceipt = (id, requestId) => {
+  if (state.submissionQueue?.confirm(id, requestId)) state.durableDrafts?.acknowledge(id, requestId).catch(showError);
+};
 if (!state.paneMode) {
   state.projectScratchpad = new ProjectScratchpad({document, view: window, api});
   window.agentCoordProjectScratchpad = state.projectScratchpad;
@@ -3923,7 +4248,8 @@ document.addEventListener("keydown", event => {
 $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
-async function sendMessage(mode = "send") {
+async function sendMessage(mode = "send", quiet = false) {
+  if (!state.detail && state.detailRefreshing) return submitAfterFirstRead(quiet);
   const reviewing = state.detail?.reviews?.some(run => run.active);
   if (reviewing) mode = "steer";
   else if (state.detail?.running && ["antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
@@ -3941,7 +4267,7 @@ async function sendMessage(mode = "send") {
     state.outgoing?.pendingTransferCounts?.has(id) && ["codex", "claude"].includes(detail?.work_thread?.client);
   const ordinaryStartingInput = mode === "send" && (orderedInput || detail?.acceptsUntargetedInput) &&
     ["codex", "claude"].includes(detail.work_thread?.client) && !text.trimStart().startsWith("/");
-  if (state.busy || state.sending?.has(sendKey) || state.detailRefreshing || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
+  if (state.settingsMutations?.has(id) || state.transferLocks?.has(id) || state.sending?.has(sendKey) || !detail?.work_thread?.browser_session || detail.work_thread.attention === "archived" || state.closing?.has(state.selected) ||
       (!dispatcher && !reviewing && detail.running && !detail.activeTurn && !ordinaryStartingInput) || state.attachments?.pending(draftId) || (!text.trim() && !images.length)) return;
   const mentions = state.mentions?.snapshot(draftId, text) || [];
   const body = {message: text};
@@ -3949,6 +4275,21 @@ async function sendMessage(mode = "send") {
   if (state.sourceWindowId) body.windowId = state.sourceWindowId;
   if (images.length) body.images = images.map(({name, url}) => ({name, url}));
   if (!dispatcher && !reviewing && !orderedInput && detail.running && detail.activeTurn && mode !== "queue") body.expectedTurnId = detail.activeTurn;
+  if (state.config?.quietSubmissions === 1 && (quiet || state.quietSubmissions?.has(id))) {
+    body.quiet = true; state.quietSubmissions?.delete(id);
+  }
+  if (!draft && !dispatcher && !reviewing && !text.trimStart().startsWith("/") && !state.reviewUI?.settings?.has(id)) {
+    const path = sessionPath(id) + (mode === "queue" ? "/queue" : "/messages");
+    const result = await submitComposerMessage({id, text, images, mentions, body, path, detail, clear() {
+      $("message").value = ""; state.drafts.delete(id);
+      state.mentions?.sent(id, text, mentions);
+      if (images.length) state.attachments?.sent(id, images);
+      state.timelineScroll?.latest();
+    }});
+    if (id === state.selected) refreshDetail({background: true}).catch(showError);
+    if (!result?.transferSubmission) state.rollUp?.responded(ticket, {pending: !!state.detail?.requests?.length});
+    return;
+  }
   (state.sending ||= new Set()).add(sendKey); renderStatus();
   let echo = null;
   const showOutgoing = () => {
@@ -3968,7 +4309,7 @@ async function sendMessage(mode = "send") {
         state.drafts.delete("new-session"); state.attachments?.drafts.delete(draftId); state.mentions?.drafts.delete(draftId);
         $("message").value = ""; state.newSessionDraft = null; goHome(); return;
       }
-      await sendSessionDraft(text, images, mentions); return;
+      await sendSessionDraft(text, images, mentions, !!body.quiet); return;
     }
     if (command === "/fork" || command === "/close") {
       const clearCommand = () => {
@@ -4034,6 +4375,12 @@ async function sendMessage(mode = "send") {
       if ($("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       else state.drafts.set(id, $("message").value);
     } else if (state.drafts.get(id) === text) state.drafts.delete(id);
+    if (state.durableDrafts) {
+      const remaining = id === state.selected ? $("message").value : state.drafts.get(id) || "";
+      const draft = {text: remaining, mentions: state.mentions?.snapshot(id, remaining) || [],
+        images: state.attachments?.snapshot(id) || []};
+      await writeComposerRecord(id, () => state.durableDrafts.write(id, draft));
+    }
     if (result.transferSubmission && result.transferSubmission.state !== "committed") return;
     // Acceptance releases the composer. Neither transcript reconciliation nor
     // an unrelated inventory read is part of sending the user's message.
@@ -4081,44 +4428,69 @@ async function toggleDispatcher(thread = state.detail?.work_thread) {
   await refreshList();
 }
 function composerKeydown(event) {
+  if (state.config?.quietSubmissions === 1 && TurnNotifications.isQuietShortcut(event)) {
+    event.preventDefault();
+    if (!$("send").disabled) action(() => sendMessage("send", true));
+    else action(() => submitAfterFirstRead(true));
+    return;
+  }
   if (event.isComposing || event.keyCode === 229 || state.slashCommands?.composing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
   if (state.slashCommands?.keydown(event)) return;
   if (state.mentions?.keydown(event)) return;
   if (event.key === "Enter") {
     if (globalThis.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
     event.preventDefault();
-    if (!$("send").disabled) $("composer").requestSubmit();
-    else if (state.detailRefreshing) {
-      // Enter can arrive during a read or in the gap before reconciliation.
-      // Honor it only for the same selection and draft after normal send checks.
-      const id = state.selected, revision = state.navigationRevision;
-      const entry = state.conversations?.get(id), text = $("message").value;
-      const images = state.attachments?.snapshot(id) || [];
-      if (!entry || (!text.trim() && !images.length) || state.attachments?.pending(id)) return;
-      const intent = {text, images};
-      entry.openingSubmission = intent;
-      const currentDraft = () => entry.openingSubmission === intent && state.selected === id &&
-        state.navigationRevision === revision && $("message").value === text;
-      const read = entry.pending || refreshDetail({markSeen: false});
-      read.then(async fresh => {
-        if (!currentDraft()) return;
-        if (fresh === false && state.detailRefreshing && !entry.refreshError)
-          fresh = await refreshDetail({markSeen: false});
-        if (fresh === false || !currentDraft() || state.detail?.work_thread?.thread_id !== id ||
-            $("send").disabled || $("composer").hidden) return;
-        const current = state.attachments?.snapshot(id) || [];
-        if (current.length === images.length && current.every((image, i) => image === images[i]))
-          $("composer").requestSubmit();
-      }).catch(showError).finally(() => {
-        if (entry.openingSubmission === intent) delete entry.openingSubmission;
-      });
-    }
+    if (!$("send").disabled) requestComposerSubmit();
+    else action(() => submitAfterFirstRead(false));
   } else if (event.key === "Tab" && state.detail?.running && ($("message").value.trim() || state.attachments?.snapshot().length)) {
     event.preventDefault();
     if (!$("queue").disabled) action(() => sendMessage("queue"));
   }
 }
+function submitAfterFirstRead(quiet) {
+  const id = state.selected, entry = state.conversations?.get(id);
+  if (state.detail || !state.detailRefreshing || !entry?.pending || state.attachments?.pending(id)) return;
+  const revision = state.navigationRevision, text = $("message").value;
+  const images = state.attachments?.snapshot(id) || [];
+  if (!text.trim() && !images.length) return;
+  if (!text.trimStart().startsWith("/") && state.durableDrafts?.resolveSubmission) {
+    const mentions = state.mentions?.snapshot(id, text) || [];
+    const body = {message: text, windowId: state.sourceWindowId};
+    if (mentions.length) body.mentions = mentions;
+    if (images.length) body.images = images.map(({name, url}) => ({name, url}));
+    if (quiet || state.quietSubmissions?.has(id)) { body.quiet = true; state.quietSubmissions?.delete(id); }
+    state.reviewUI?.decorate(body, id);
+    return submitComposerMessage({id, requestId: body.requestId, text, images, mentions, body, detail: null, path: "", clear() {
+      $("message").value = ""; state.drafts.delete(id);
+      state.mentions?.sent(id, text, mentions);
+      if (images.length) state.attachments?.sent(id, images);
+      state.timelineScroll?.latest();
+    }});
+  }
+  const intent = entry.firstReadIntent = {};
+  // Attach to this exact read. A retry or a later read cannot submit an
+  // abandoned draft, and normal background reconciliation never holds Enter.
+  entry.pending.then(fresh => {
+    if (!fresh || intent !== entry.firstReadIntent || state.selected !== id || state.navigationRevision !== revision ||
+        state.detail?.work_thread?.thread_id !== id || !state.detail.work_thread.browser_session ||
+        $("send").disabled || $("message").value !== text || state.attachments?.pending(id)) return;
+    const current = state.attachments?.snapshot(id) || [];
+    if (current.length !== images.length || current.some((image,index) => image !== images[index])) return;
+    if (quiet) action(() => sendMessage("send", true));
+    else requestComposerSubmit();
+  }).catch(() => {}).finally(() => { if (entry.firstReadIntent === intent) delete entry.firstReadIntent; });
+}
+function requestComposerSubmit() {
+  if ($("composer").requestSubmit) $("composer").requestSubmit();
+  else $("send").click();
+}
 $("message").onkeydown = composerKeydown;
+$("quiet-send").onclick = () => {
+  const id = state.selected;
+  const quiet = state.quietSubmissions ||= new Set();
+  if (quiet.has(id)) quiet.delete(id); else quiet.add(id);
+  $("quiet-send").setAttribute("aria-pressed", String(quiet.has(id)));
+};
 // An idle conversation's Claude Code process may have been released. Start it
 // while the user types, so sending need not wait for it; at most once in five
 // minutes per conversation.
@@ -4360,7 +4732,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
   const panes = () => window.agentCoordPanes;
   const staged = new Map();
   const field = id => panes()?.active && panes().records.get(id)?.api
-    ? panes().records.get(id).frame.contentDocument.getElementById("message")
+    ? panes().records.get(id).api.input
     : state.selected === id ? $("message") : null;
   return {
     empty: () => state.threadTabs.items.length === 0,
@@ -4370,7 +4742,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
         || [...state.threadTabs.projects.values()].flat().find(item => item.thread_id === id)
         || (state.drafts.has(id) || state.attachments.drafts.has(id) || state.mentions?.drafts.has(id) ? {thread_id: id} : null);
       if (!tab || id === "new-session") return null;
-      if (validate && (state.transferLocks?.has(id) || record?.api?.canTransfer?.() === false || state.busy || state.sending?.size || state.attachments.pending(id) ||
+      if (validate && (state.transferLocks?.has(id) || state.submissionQueue?.lanes?.has(id) || record?.api?.canTransfer?.() === false || state.settingsMutations?.has(id) || state.sending?.has(id) || state.attachments.pending(id) ||
           document.querySelector("dialog[open]") || record?.frame?.contentDocument?.querySelector("dialog[open]"))) return null;
       const thread = {...tab, ...state.conversations?.get(id)?.detail?.work_thread, ...record?.thread};
       const input = field(id), position = state.conversationPositions?.get(id) || state.conversations?.get(id);
@@ -4396,34 +4768,64 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       renderStatus();
     },
     async stage(payload, transferId) {
-      if (state.busy || state.sending?.size || document.querySelector("dialog[open]") ||
-          panes()?.focusedRecord?.api?.canTransfer?.() === false)
+      if (state.settingsMutations?.has(payload.thread.thread_id) || state.sending?.has(payload.thread.thread_id) || document.querySelector("dialog[open]"))
         throw new Error("Finish the current action in the destination window before moving a tab there.");
       const id = payload.thread.thread_id;
-      staged.set(transferId, {id, before: this.capture(id, {validate: false}), selected: state.selected,
+      staged.set(transferId, {id, incoming: payload.draft, before: this.capture(id, {validate: false}), selected: state.selected,
         wasOpen: [...state.threadTabs.projects.values()].some(items => items.some(item => item.thread_id === id)),
         paneView: panes()?.active ? panes().viewId : null});
       this.lock(id, true);
       try {
+        if (state.durableDrafts) {
+          await state.composerWrites?.get(id);
+          const stored = await state.durableDrafts.read(id);
+          const target = staged.get(transferId);
+          target.stored = stored;
+          if (stored && (stored.text || stored.images.length || stored.mentions.length) &&
+              !this.sameDraft(stored, payload.draft))
+            throw new Error("This window already has a different draft for this conversation.");
+        }
+        staged.get(transferId).restoring = true;
         await this.restore(payload);
         return true;
       } catch (error) {
-        await this.finish(transferId, false);
+        if (staged.get(transferId)?.restoring) await this.finish(transferId, false);
+        else { staged.delete(transferId); this.lock(id, false); }
         throw error;
       }
+    },
+    sameDraft(first, second) {
+      const a = first.images || [], b = second.images || [];
+      return first.text === second.text && a.length === b.length &&
+        a.every((image, index) => image.name === b[index].name && image.url === b[index].url) &&
+        JSON.stringify(first.mentions || []) === JSON.stringify(second.mentions || []);
+    },
+    async prepareCommit(transferId) {
+      const snapshot = staged.get(transferId);
+      if (!snapshot) return false;
+      if (!snapshot.prepared && state.durableDrafts) {
+        const {id, incoming} = snapshot;
+        await writeComposerRecord(id, () => state.durableDrafts.write(id,
+          {text: incoming.text, images: incoming.images || [], mentions: incoming.mentions || []}));
+      }
+      snapshot.prepared = true;
+      return true;
     },
     async finish(transferId, committed) {
       const snapshot = staged.get(transferId);
       if (!snapshot) return !committed;
-      staged.delete(transferId);
       const {id, before, wasOpen, selected, paneView} = snapshot;
+      if (committed && !snapshot.prepared) await this.prepareCommit(transferId);
+      if (!committed && snapshot.prepared && state.durableDrafts)
+        await writeComposerRecord(id, () => snapshot.stored ? state.durableDrafts.write(id, snapshot.stored) : state.durableDrafts.remove(id));
+      staged.delete(transferId);
       this.lock(id, false);
       if (!committed) {
         if (before) {
           await this.restore(before, {rollback: true});
           if (!wasOpen) await this.release(id, state.threadTabs.cwd, undefined, {retainDraft: true});
         }
-        else await this.release(id);
+        else await this.release(id, undefined, undefined, {preserveStorage: true});
         if (selected && selected !== id) await select(selected, {focus: false});
         else if (!selected) goHome({restoreDispatcher: false});
         if (paneView != null) panes()?.restoreView?.();
@@ -4436,12 +4838,12 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
         throw new Error("The detached conversation state is invalid.");
       const existing = this.capture(id, {validate: false});
       if (!rollback && existing && (existing.draft.text || existing.draft.images?.length) &&
-          JSON.stringify([existing.draft.text, existing.draft.images, existing.draft.mentions]) !==
-          JSON.stringify([draft.text, draft.images, draft.mentions]))
+          !this.sameDraft(existing.draft, draft))
         throw new Error("This window already has a different draft for this conversation.");
       if (panes()?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
       state.drafts.set(id, draft.text);
       state.attachments.drafts.set(id, draft.images || []);
+      (state.attachmentSnapshots ||= new Map()).set(id, state.attachments.drafts.get(id).filter(image => image.url));
       state.mentions?.restore(id, draft.text, draft.mentions || []);
       const disclosures = Array.isArray(draft.disclosures) ? draft.disclosures : [];
       try { sessionStorage.setItem("timeline-disclosures:" + id, JSON.stringify(disclosures)); }
@@ -4466,16 +4868,17 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       $("message").focus({preventScroll: true});
       return true;
     },
-    discard(id) {
+    async discard(id, {preserveStorage = false} = {}) {
+      if (!preserveStorage && state.durableDrafts) await writeComposerRecord(id, () => state.durableDrafts.remove(id));
+      state.attachmentSnapshots?.delete(id);
       state.drafts.delete(id); state.attachments.drafts.delete(id); state.mentions?.drafts.delete(id);
     },
-    async release(id, cwd = state.projectCwd, expected, {retainDraft = false} = {}) {
+    async release(id, cwd = state.projectCwd, expected, {retainDraft = false, preserveStorage = false} = {}) {
       if (expected) {
         // Unrelated sends/dialogs may start in another tab while the target
         // loads. Only an actual draft change can invalidate this commit.
         const current = this.capture(id, {validate: false});
-        const content = draft => JSON.stringify([draft?.text, draft?.images || [], draft?.mentions || []]);
-        if (!current || content(current.draft) !== content(expected.draft))
+        if (!current || !this.sameDraft(current.draft, expected.draft))
           throw new Error("Your draft changed while the window was opening. The original tab has been kept.");
       }
       if (retainDraft) {
@@ -4511,7 +4914,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       const record = shell?.records.get(id);
       record?.frame?.remove(); shell?.records.delete(id);
       // Prevent navigation history from restoring the moved draft in this window.
-      if (!retainDraft) this.discard(id);
+      if (!retainDraft) await this.discard(id, {preserveStorage});
     },
   };
 }
@@ -4519,10 +4922,13 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
 function setupComposerSizing(input) {
   let frame = 0, width;
   const resize = () => {
+    // A one-row empty textarea already has its stylesheet minimum height.
+    // Restoring that intrinsic size needs no synchronous geometry read.
+    if (!input.value) { if (input.style.height) input.style.height = ""; return; }
     if (frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      if (!input.getClientRects().length) return;
+      if (!input.value || !input.getClientRects().length) return;
       // Reset before measuring so deleting text also shrinks the composer.
       // CSS retains the height limits for desktop, mobile, and tiled chats.
       input.style.height = "auto";
@@ -4539,17 +4945,27 @@ function setupComposerSizing(input) {
   resize();
   return resize;
 }
+function workspaceConfig(config) {
+  // Retained interaction gateways decorate the legacy detail read with transfer
+  // receipts. Prefer that read until the same guarantee covers composite open.
+  if (config.interactionContinuity === true && config.conversationOpenTransferReceipts !== 1)
+    return {...config, conversationOpen: 0};
+  return config;
+}
 async function boot() {
   const refreshTimeFormats = () => { messageTimeFormats = null; };
   window.addEventListener("languagechange", refreshTimeFormats);
   window.addEventListener("focus", refreshTimeFormats);
   const historyNavigation = new agentCoordNavigation.HistoryNavigation(window);
-  state.permissionMenu = new PermissionMenu({document, view: window});
-  state.resizeComposer = setupComposerSizing($("message"));
-  state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
-  state.responseActions = new ResponseActions({timeline: $("timeline"), input: $("message"), composer: $("composer"),
-    canDiscuss: () => !!state.selected && !$("conversation").hidden && !$("composer").hidden && !$("message").disabled,
-    onHold: () => state.timelineScroll.hold(), onError: showError});
+  state.initializeConversationView = () => {
+    state.permissionMenu = new PermissionMenu({document, view: window});
+    state.resizeComposer = setupComposerSizing($("message"));
+    state.timelineScroll = new ConversationScroll($("timeline"), $("jump-to-latest"));
+    state.responseActions = new ResponseActions({timeline: $("timeline"), input: $("message"), composer: $("composer"),
+      canDiscuss: () => !!state.selected && !$("conversation").hidden && !$("composer").hidden && !$("message").disabled,
+      onHold: () => state.timelineScroll.hold(), onError: showError});
+    state.initializeConversationView = null;
+  };
   if (!state.paneMode) {
     let storage; try { storage = localStorage; } catch { /* Optional preference. */ }
     state.dispatchDock = new DispatchUI.Dock({document, view: window, storage,
@@ -4579,7 +4995,23 @@ async function boot() {
     clean.searchParams.delete("message");
     history.replaceState(history.state, "", clean.pathname + clean.search + clean.hash);
   }
-  state.config = await api("config");
+  state.config = workspaceConfig(await api("config"));
+  globalThis.agentCoordJev?.start?.(state.config);
+  state.snapshotCache = new ConversationSnapshotCache(state.config.conversationCacheScope);
+  state.submissionQueue = new ConversationSubmissionQueue();
+  if (globalThis.ComposerDrafts && globalThis.indexedDB) {
+    state.durableDrafts = window.agentCoordComposerDrafts = ComposerDrafts.create({
+      scope: await composerWindowScope(window)});
+  }
+  window.agentCoordDrainComposerWrites = drainComposerWrites;
+  window.agentCoordStreamConnected = () => state.streamHealthy;
+  window.agentCoordReconnect = async config => {
+    const fresh = config || await api("config");
+    if (!fresh?.token) throw new Error("Reconnect requires an authenticated workspace.");
+    state.config = workspaceConfig(fresh);
+    connect();
+    refreshBackgroundView({reconcile: true});
+  };
   if (state.config.interactionContinuity === true) {
     state.updateSubmissions = new UpdateSubmissionChanges({
       load: (id, after, signal) => api("update-submissions?thread=" + encodeURIComponent(id) +
@@ -4611,7 +5043,10 @@ async function boot() {
   state.activity = globalThis.ActivityCollector?.bind({window, document, state, api});
   state.schedules = new ScheduledPromptsUI({document, api, openThread: select, onError: showError,
     supportsRecurrence: state.config.recurringSchedules === true,
-    onChange: () => renderList(),
+    onChange: () => {
+      if ($("view").value === "later" && state.inventoryOpen) renderList();
+      else if (state.selected) state.schedules.renderThread($("thread-schedules"), state.selected);
+    },
     getThread: id => state.sessions.find(thread => thread.thread_id === id) ||
       (state.detail?.work_thread?.thread_id === id ? state.detail.work_thread : null),
     getDraft: () => {
@@ -4629,6 +5064,7 @@ async function boot() {
         $("message").value = ""; state.drafts.delete(draft.source); renderStatus();
       }
     }});
+  state.schedules.connected = () => state.streamHealthy;
   state.mentions = new ThreadMentions({input: $("message"), menu: $("thread-mentions"), references: $("thread-references"),
     getThread: () => composerDraftId(),
     getWorkspace: () => state.detail?.session?.cwd || state.detail?.work_thread?.cwd || state.config.cwd,
@@ -4642,7 +5078,7 @@ async function boot() {
     },
     canComplete: () => state.slashCommands?.query()?.kind !== "skill" && !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
-    onChange: () => { state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
+    onChange: () => { persistComposer(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.slashCommands = new ChatSlashCommands({input: $("message"), menu: $("slash-commands"),
     getThread: () => state.selected,
     getSession: () => ({...state.detail?.session,
@@ -4661,19 +5097,19 @@ async function boot() {
     canComplete: () => !!state.detail?.work_thread?.browser_session && !$("composer").hidden && !sessionBusy() &&
       state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected),
     onReplace: (start, end, text) => state.mentions?.draft().edit(start, end, text),
-    onChange: () => { state.mentions?.render(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
+    onChange: () => { persistComposer(); state.mentions?.render(); state.drafts.set(state.selected, $("message").value); state.resizeComposer?.(); globalThis.agentCoordPane?.saveDraft(); }});
   state.attachments = new ChatImageAttachments({document, getThread: () => composerDraftId(),
     canAttach: () => !!state.detail?.work_thread?.browser_session && state.detail.work_thread.attention !== "archived" && !state.closing.has(state.selected) && !state.transferLocks?.has(state.selected),
-    onChange: renderStatus, onError: showError});
+    onChange: () => {
+      persistAttachmentChanges();
+      renderStatus();
+    }, onError: showError});
   state.attachments.bind();
-  const turnTimer = setInterval(() => { if (!document.hidden) renderTurnElapsed(); }, 1000);
-  window.addEventListener("pagehide", () => clearInterval(turnTimer), {once: true});
+  window.addEventListener("pagehide", () => { clearTimeout(state.elapsedTimer); state.elapsedTimer = null; });
+  document.addEventListener("visibilitychange", () => renderTurnElapsed());
   window.addEventListener("focus", () => refreshBackgroundView({reconcile: true}));
   document.addEventListener("visibilitychange", () => refreshBackgroundView({reconcile: true}));
-  if (state.paneMode) {
-    await setupPaneConversation({state, document, api, select, refreshDetail, refreshThread, applyEvent, scheduleDetail, renderStatus, showError});
-    return;
-  }
+
   const Notifications = state.config.remote ? PhoneNotifications : TurnNotifications;
   notifications = new Notifications({
     button: $("notifications"),
@@ -4692,7 +5128,7 @@ async function boot() {
   try { preferences = localStorage; } catch { /* Views work without persistent storage. */ }
   state.overviewPreferences = preferences;
   state.overviewLayout = new OverviewLayout({document, window, storage: preferences,
-    canNavigate: () => !state.busy && !document.querySelector("dialog[open]"),
+    canNavigate: () => !document.querySelector("dialog[open]"),
     onChange: (_mode, {navigate}) => { state.listSignature = ""; if (navigate) goHome({restoreDispatcher: false}); else renderList(); }});
   const desktop = window.agentCoordDesktop;
   state.conversationWindow = desktop?.conversationWindow === true;
@@ -4717,7 +5153,7 @@ async function boot() {
   if (projectQuery.get("new_project") === "1") state.folders.reset();
   else await state.folders.restore(state.config.workspaceRoot).catch(showError);
   const initialDirectory = projectQuery.get("directory");
-  if (initialDirectory) await state.folders.open(initialDirectory).catch(showError);
+  if (initialDirectory && state.folders.selected?.cwd !== initialDirectory) await state.folders.open(initialDirectory).catch(showError);
   if (state.config.remote) {
     const shared = await api("desktop-projects").catch(error => { showError(error); return null; });
     if (shared?.projects?.length) await state.folders.replace(shared.projects, shared.active).catch(showError);
@@ -4732,20 +5168,36 @@ async function boot() {
   state.folderPicker = new FolderPicker({document, folders: state.folders, api, desktop, remote: state.config.remote,
     onError: showError, onOpened: switchProject});
   state.projectTabs = new ProjectTabs({document, folders: state.folders, onSwitch: switchProject, onError: showError});
-  savedViews = new SavedViews({document, api, storage: windowStorage, preferences,
+  // Restoring the selected view needs its definitions before inventory can choose
+  // the right history filter. Reuse those exact reads for the first inventory.
+  let initialDefinitions = {};
+  const definitionRevision = listRequest;
+  // All views, including Closed, use the open inventory for tab indicators.
+  // Workspace validation has finished, so run this read alongside definitions.
+  const inventoryEntities = state.inventoryEntities ||= {open: {}, closed: {}};
+  initialDefinitions.open = api("threads?archived=false", undefined,
+    {entity: inventoryEntities.open, priority: initialThread ? "low" : "auto"});
+  initialDefinitions.open.catch(() => {}); // Consumed by refreshList unless startup is superseded.
+  const viewApi = (path, body, options) => {
+    const result = api(path, body, options);
+    if (initialDefinitions && body === undefined && (path === "views" || path === "organization"))
+      initialDefinitions[path] = result;
+    return result;
+  };
+  savedViews = new SavedViews({document, api: viewApi, storage: windowStorage, preferences,
     getLayout: () => state.overviewLayout.mode,
     onRefresh: refreshList,
     notify: (...args) => state.threadActions.notify(...args),
     scope: (state.config.workspaceRoot || "") + ":" + (desktop?.folderSlot || "browser"),
     onSwitch: async () => { goHome(); await refreshList(); window.agentCoordPanes?.restoreView(); }, onError: showError});
   state.projectCwd = state.folders.selected?.cwd || "";
-  state.sidecars = new SidecarsUI({document, api, getThreads: () => state.sessions, openThread: select, onError: showError});
+  state.sidecars = new SidecarsUI({document, api, connected: () => state.streamHealthy, getThreads: () => state.sessions, openThread: select, onError: showError});
   if (globalThis.ReviewUI) state.reviewUI = new ReviewUI({document, api, onError: showError, changed: renderStatus});
   window.addEventListener("pagehide", () => clearInterval(state.sidecars.timer), {once: true});
   let askStorage; try { askStorage = localStorage; } catch { /* Reply marks then last for this page. */ }
   const askThread = id => state.sessions?.find(thread => thread.thread_id === id)
     || (state.selected === id ? state.detail?.work_thread : state.conversations?.get(id)?.detail?.work_thread);
-  state.asks = new AsksUI({document, api, navigate: url => window.agentCoordNavigate(url), onError: showError,
+  state.asks = new AsksUI({document, api, typedAnswers: state.config.askTypedAnswers === 1, connected: () => state.streamHealthy, navigate: url => window.agentCoordNavigate(url), onError: showError,
     kinds: Boolean(state.config.askKinds), replyRecords: state.config.askReplies === true, storage: askStorage,
     threadInfo: askThread,
     // A reply sent from an ask is a message in its conversation; show it there at once.
@@ -4759,7 +5211,6 @@ async function boot() {
       return {get value() { return state.drafts.get(id) || ""; }, set value(text) { state.drafts.set(id, text); },
         focus() { action(() => select(id)); }};
     }});
-  state.asks.refresh().catch(showError);
   const sidecarButton = document.createElement("button");
   sidecarButton.id = "attach-sidecar"; sidecarButton.type = "button"; sidecarButton.className = "quiet thread-menu-action";
   sidecarButton.textContent = "Attach sidecar…"; sidecarButton.hidden = true;
@@ -4823,16 +5274,18 @@ async function boot() {
     }
   });
   const inventoryProject = state.projectCwd;
-  const inventoryReady = refreshList({priority: initialThread ? "low" : "auto"}).then(() => {
+  const inventoryReady = refreshList({priority: initialThread ? "low" : "auto",
+    initialDefinitions: listRequest === definitionRevision ? initialDefinitions : null}).then(() => {
     if (state.projectCwd === inventoryProject) savedViews.restoreScroll();
   });
+  initialDefinitions = null;
   // A direct conversation has its own detail and history routes.
   if (initialThread && initialThread !== "new-session" && !initialNavigation && !initialDispatcher) {
     inventoryReady.catch(showError);
   } else await inventoryReady;
   connect();
   navigation = new agentCoordNavigation.Router({api, history, location, windowId: state.sourceWindowId, onError: showError,
-    blocked: () => Boolean(document.querySelector("dialog[open]") || window.agentCoordPanes?.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")),
+    blocked: () => Boolean(document.querySelector("dialog[open]")),
     capture: () => ({directory: state.projectCwd, viewId: savedViews.activeId, ...savedViews.read(),
       ...(savedViews.current().kind === "group" ? {groupId: savedViews.current().projectId} : {}),
       ...(state.projectScratchpad?.tabActive ? {scratchpad: true} : {}),
@@ -4901,11 +5354,21 @@ async function boot() {
   navigation.remember();
   window.agentCoordConversationTransfer = setupConversationTransfer({state, document, select, goHome, renderStatus});
   await historyNavigation.ready(navigation);
+  recoverWorkspaceOutbox().catch(showError);
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.
-  const metadataTimer = setInterval(refreshBackgroundView, 5000);
-  window.addEventListener("pagehide", () => clearInterval(metadataTimer), {once: true});
+  let metadataTimer;
+  state.setPolling = connected => {
+    clearInterval(metadataTimer);
+    metadataTimer = connected ? null : setInterval(refreshBackgroundView, 5000);
+    state.sidecars?.setEventsConnected(connected);
+    state.schedules?.setEventsConnected(connected);
+  };
+  state.setPolling(!!state.streamHealthy);
+  window.addEventListener("pagehide", () => state.setPolling(true));
+  window.addEventListener("pageshow", event => { if (event.persisted) state.setPolling(!!state.streamHealthy); });
   window.addEventListener("pagehide", () => savedViews.remember());
 }
-boot().catch(showError);
+performance.mark?.("workspace-evaluated");
+boot().then(() => performance.mark?.("workspace-ready")).catch(showError);

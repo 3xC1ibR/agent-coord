@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
@@ -16,6 +17,7 @@ function composer(client) {
   c.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   return {c, calls};
 }

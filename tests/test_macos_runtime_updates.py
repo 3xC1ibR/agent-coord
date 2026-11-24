@@ -39,7 +39,10 @@ func status(_ instance: String, _ payload: URL) -> [String: Any] {
 func update(_ id: String, _ phase: String) -> [String: Any] {
     return ["id": id, "phase": phase, "target": target.path, "previous": previous.path]
 }
-try backend.accept(status("old", previous))
+var predecessor = status("old", previous)
+predecessor["interrupted_provider_continuation"] = 1
+try backend.accept(predecessor)
+precondition(backend.continuesInterruptedProviders && !backend.retainsProviderSessions)
 var accepted = status("old", previous)
 accepted["update"] = update("first", "accepted")
 try backend.accept(accepted)
@@ -69,6 +72,42 @@ var rollback = status("restored", previous)
 rollback["update"] = update("second", "rolled-back").merging(["error": "Candidate failed"]) { _, new in new }
 try backend.accept(rollback)
 precondition(!backend.updateInProgress && notices.last?.1 == true)
+
+let stable = Backend(directory: root)
+var addresses: [URL] = []
+stable.ready = { addresses.append($0) }
+let edge = "http://127.0.0.1:22345/"
+var edgeStatus = status("before", previous)
+edgeStatus["edge_url"] = edge
+edgeStatus["edge_observer"] = String(repeating: "a", count: 43)
+edgeStatus["unbrokered_provider_wait"] = 1
+edgeStatus["interrupted_provider_continuation"] = 1
+try stable.accept(edgeStatus)
+precondition(!stable.continuesInterruptedProviders && stable.retainsProviderSessions)
+for generation in 1...3 {
+    let key = "upgrade-\(generation)"
+    var active = status("before-\(generation)", previous)
+    active["edge_url"] = edge
+    active["update"] = update(key, "accepted")
+    try stable.accept(active)
+    var successor = status("after-\(generation)", target)
+    successor["edge_url"] = edge
+    successor["url"] = "http://127.0.0.1:\(32345 + generation)/"
+    successor["pid"] = Int32(222 + generation)
+    successor["update"] = update(key, "committed")
+    try stable.accept(successor)
+    precondition(!stable.updateInProgress)
+    precondition(stable.process?.processIdentifier == Int32(222 + generation))
+    precondition(addresses.map(\.absoluteString) == [edge])
+}
+var changedEdge = status("after", target)
+changedEdge["edge_url"] = "http://127.0.0.1:42345/"
+do { try stable.accept(changedEdge); fatalError("A generation changed the native origin") } catch {}
+precondition(addresses.count == 1)
+var historicalGateway = status("after", target)
+historicalGateway["interaction_url"] = "http://127.0.0.1:52345/"
+do { try stable.accept(historicalGateway); fatalError("A stable origin returned to a predecessor gateway") } catch {}
+precondition(addresses.count == 1)
 ''')
             binary = root / "runtime-update-test"
             build = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-module-cache-path", str(root / "modules"),

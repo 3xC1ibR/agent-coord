@@ -234,7 +234,7 @@ class OrganizationStore:
     def association(db, thread_id):
         return db.execute("""SELECT o.repository_id, r.name AS repository_name,
                                             r.root AS repository_root, o.project_id,
-                                            p.name AS project_name
+                                            p.name AS project_name, p.cwd AS project_launch_cwd
                                      FROM thread_organization o
                                      LEFT JOIN work_repositories r ON r.id = o.repository_id
                                      LEFT JOIN named_projects p ON p.id = o.project_id
@@ -249,12 +249,13 @@ class OrganizationStore:
             str(uuid.uuid5(uuid.NAMESPACE_URL, "agent-coord:repository:" + root)) if root else None)
         result = {"repository_id": repository_id,
                   "repository_name": repository["name"] if repository else (Path(root).name or root) if root else None,
-                  "repository_root": root, "project_id": None, "project_name": None}
-        creator = (app_agent_creators(db) if creators is None else creators).get(thread_id)
+                  "repository_root": root, "project_id": None, "project_name": None, "project_launch_cwd": None}
+        creator = (app_agent_creators(db, thread_id) if creators is None else creators).get(thread_id)
         if creator and creator["mode"] == "orchestration":
             parent = OrganizationStore.association(db, creator["thread_id"])
             if parent:
-                result.update(project_id=parent["project_id"], project_name=parent["project_name"])
+                result.update(project_id=parent["project_id"], project_name=parent["project_name"],
+                              project_launch_cwd=parent["project_launch_cwd"])
         return result
 
     def create_project(self, name: str, cwd: str | None = None) -> dict:

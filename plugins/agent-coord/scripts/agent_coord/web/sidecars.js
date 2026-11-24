@@ -2,14 +2,20 @@
 (() => {
   const labels = {watching: "Watching", reviewing: "Reviewing", paused: "Paused", needs_attention: "Needs attention", complete: "Complete", detached: "Detached"};
   class SidecarsUI {
-    constructor({document, api, getThreads, openThread, onError}) {
-      Object.assign(this, {document, api, getThreads, openThread, onError});
+    constructor({document, api, getThreads, openThread, onError, connected}) {
+      Object.assign(this, {document, api, getThreads, openThread, onError, connected});
       this.sequence = 0;
       this.catalogSequence = 0;
       this.dialog = this.node("dialog", "", "sidecar-dialog");
       this.dialog.setAttribute("aria-labelledby", "sidecar-heading");
       this.document.body.append(this.dialog);
-      this.timer = setInterval(() => { if (this.thread && !this.document.hidden) this.refresh().catch(onError); }, 5000);
+      this.setEventsConnected(!!this.connected?.());
+    }
+    setEventsConnected(connected) {
+      clearInterval(this.timer);
+      this.timer = connected ? null : setInterval(() => {
+        if (this.thread && !this.document.hidden) this.refresh().catch(this.onError);
+      }, 5000);
     }
     node(tag, text, className) {
       const element = this.document.createElement(tag);
@@ -35,6 +41,12 @@
       this.thread = id; this.sequence++;
       container.replaceChildren(); container.hidden = true;
       if (id) this.refresh().catch(this.onError);
+    }
+    hydrate(id, data, container) {
+      this.thread = id;
+      this.container = container;
+      ++this.sequence;
+      this.render(data);
     }
     async refresh() {
       const id = this.thread, sequence = ++this.sequence;

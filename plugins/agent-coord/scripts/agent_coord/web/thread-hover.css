@@ -1,49 +1,49 @@
 .thread-hover {
-  position: fixed; z-index: 80; width: min(420px, calc(100vw - 24px));
-  max-height: min(620px, calc(100dvh - 24px), var(--thread-hover-available-height, 100dvh)); overflow-y: auto; /* drift-ok: preserve the existing height limit and viewport inset. */
-  box-sizing: border-box; padding: 18px 20px; border: 1px solid var(--line-strong);
-  border-radius: 10px; background: var(--surface); color: var(--ink);
-  box-shadow: 0 12px 42px var(--shadow);
-  font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: anywhere;
+  position: fixed; z-index: var(--layer-popover); width: min(var(--thread-hover-width), calc(100vw - 24px));
+  max-height: min(var(--thread-hover-max-height), calc(100dvh - 24px), var(--thread-hover-available-height, 100dvh)); overflow-y: auto;
+  box-sizing: border-box; padding: var(--space-5) var(--space-5); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); background: var(--surface); color: var(--ink);
+  box-shadow: var(--shadow-lg);
+  font: var(--text-md)/1.55 var(--font-sans); overflow-wrap: anywhere;
 }
 .thread-hover[hidden] { display: none; }
-.thread-hover .hover-title { margin: 0 0 6px; font-size: 16px; line-height: 1.35; font-weight: 600; }
+.thread-hover .hover-title { margin: 0 0 var(--space-2); font-size: var(--text-lg); line-height: 1.35; font-weight: 600; }
 .thread-hover p { margin: 0; }
 .thread-hover .markdown { white-space: normal; }
-.thread-hover .hover-muted { color: var(--muted); font-size: 11px; }
-.thread-hover .hover-summary { margin-top: 14px; }
+.thread-hover .hover-muted { color: var(--muted); font-size: var(--text-xs); }
+.thread-hover .hover-summary { margin-top: var(--space-4); }
 .thread-hover .hover-summary > :first-child, .thread-hover .hover-next-text > :first-child { margin-top: 0; }
 .thread-hover .hover-summary > :last-child, .thread-hover .hover-next-text > :last-child { margin-bottom: 0; }
-.thread-hover .hover-message { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
-.thread-hover .hover-message-text { color: var(--muted); font-size: 12px; }
+.thread-hover .hover-message { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); }
+.thread-hover .hover-message-text { color: var(--muted); font-size: var(--text-sm); }
 .thread-hover .hover-speaker { color: var(--ink); }
 
 /* Lens: the preview pinned into a small dialog. */
-.thread-hover[data-pinned="true"] { z-index: 110; }
-.thread-hover .hover-close { position: absolute; top: 10px; right: 10px; display: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer; }
-.thread-hover .hover-close:hover { color: var(--ink); background: var(--tint); }
+.thread-hover[data-pinned="true"] { z-index: var(--layer-drawer); }
+.thread-hover .hover-close { position: absolute; top: var(--space-3); right: var(--space-3); display: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--muted); font-size: var(--text-lg); line-height: 1; cursor: pointer; }
+.thread-hover .hover-close:hover { color: var(--ink); background: var(--hover-bg); }
 .thread-hover[data-pinned="true"] .hover-close { display: grid; place-items: center; }
-.thread-hover[data-pinned="true"] .hover-title { padding-right: 28px; }
-.thread-hover .hover-state { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin: 0; font-size: 11px; color: var(--muted); }
+.thread-hover[data-pinned="true"] .hover-title { padding-right: calc(var(--space-6) + var(--space-1)); }
+.thread-hover .hover-state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-xs); color: var(--muted); }
 .thread-hover .hover-state .provider-logo { width: 13px; height: 13px; }
 .thread-hover .hover-state .hover-state-label { color: var(--ink); }
-.thread-hover .hover-back { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.thread-hover .hover-back { margin-left: auto; padding: 0; border: 0; background: transparent; color: var(--muted); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 .thread-hover .hover-back:hover { color: var(--ink); text-decoration: underline; }
-.thread-hover .hover-activity { margin-top: 8px; color: var(--accent); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-hover .hover-next { margin-top: 12px; padding-left: 10px; border-left: 2px solid var(--line-strong); }
+.thread-hover .hover-activity { margin-top: var(--space-2); color: var(--accent); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-hover .hover-next { margin-top: var(--space-3); padding-left: var(--space-3); border-left: 2px solid var(--line-strong); }
 .thread-hover .hover-next[data-actor="user"] { border-left-color: var(--accent); }
-.thread-hover .hover-next-actor { display: block; color: var(--muted); font-size: 11px; }
-.thread-hover .hover-earlier { margin-top: 10px; color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.thread-hover .hover-agents { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 1px; }
-.thread-hover .hover-agent { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; margin: 0 -8px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
-.thread-hover .hover-agent:hover, .thread-hover .hover-agent:focus-visible { background: var(--tint); }
+.thread-hover .hover-next-actor { display: block; color: var(--muted); font-size: var(--text-xs); }
+.thread-hover .hover-earlier { margin-top: var(--space-3); color: var(--muted); font-size: var(--text-sm); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.thread-hover .hover-agents { list-style: none; margin: var(--space-3) 0 0; padding: 0; display: grid; gap: var(--stroke); }
+.thread-hover .hover-agent { display: flex; align-items: center; gap: var(--space-2); width: 100%; padding: var(--space-2) var(--space-2); margin: 0 calc(-1 * var(--space-2)); border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
+.thread-hover .hover-agent:hover, .thread-hover .hover-agent:focus-visible { background: var(--hover-bg); }
 .thread-hover .hover-agent-copy { display: flex; flex-direction: column; min-width: 0; }
-.thread-hover .hover-agent-title { font-size: 12.5px; line-height: 1.4; }
-.thread-hover .hover-agent-status { color: var(--muted); font-size: 11px; line-height: 1.4; }
-.thread-hover .hover-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
-.thread-hover .hover-path { min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-hover .hover-agent-title { font-size: var(--text-md); line-height: 1.4; }
+.thread-hover .hover-agent-status { color: var(--muted); font-size: var(--text-xs); line-height: 1.4; }
+.thread-hover .hover-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-3); }
+.thread-hover .hover-path { min-width: 0; color: var(--muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-hover .hover-foot button { flex-shrink: 0; }
-.thread-hover .hover-foot button { font-size: 12px; padding: 6px 10px; }
+.thread-hover .hover-foot button { font-size: var(--text-sm); padding: var(--space-2) var(--space-3); }
 .thread-hover .hover-message-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
 /* Peek is for phones and touch, where there is no hover; desktop opens the lens by hovering. */
@@ -51,5 +51,5 @@
 @media (hover: none), (max-width: 720px) {
   .card-actions .card-peek { display: inline-block; color: var(--ink); }
   .agent-rows > li { position: relative; }
-  .agent-rows .agent-peek { display: inline-block; position: absolute; right: 6px; top: 7px; padding: 3px 7px; font-size: 10px; border-radius: 5px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+  .agent-rows .agent-peek { display: inline-block; position: absolute; right: var(--space-2); top: var(--space-2); padding: var(--space-1) var(--space-2); font-size: var(--text-xs); border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
 }

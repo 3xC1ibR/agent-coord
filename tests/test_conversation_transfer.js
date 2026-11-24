@@ -128,9 +128,9 @@ test("a restored background tab without a reading position follows latest, and c
   assert.equal(payload.draft.following, true);
   assert.equal(payload.cwd, "/other"); assert.equal(payload.sourceCwd, "/work");
 });
-test("pending sends, incomplete images, modal dialogs and temporary drafts cannot transfer", () => {
+test("an unrelated busy flag does not block transfer; incomplete images and temporary drafts do", () => {
   const f = fixture();
-  f.state.busy = true; assert.equal(f.transfer.capture("a"), null); f.state.busy = false;
+  f.state.busy = true; assert.ok(f.transfer.capture("a")); f.state.busy = false;
   f.state.attachments.drafts.get("a")[0].url = null; assert.equal(f.transfer.capture("a"), null);
   assert.equal(f.transfer.capture("new-session"), null);
 });

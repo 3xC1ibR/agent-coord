@@ -327,7 +327,7 @@ test('uncarded prompts become a marked system row whose popover holds readable d
 });
 
 test('the timeline folds carded prompts, renders other automatic prompts as rows, and passes the exact prompt to cards', () => {
-  const start = source.indexOf('function renderTimeline(');
+  const start = source.indexOf('function renderConversationTimeline(');
   const body = source.slice(start, source.indexOf('\nfunction ', start + 10));
   assert.match(body, /AgentMessages\.deliveredPrompts\(turns\)/);
   assert.match(body, /prompt: deliveredPrompts\.get\(entry\.message\.id\)/);

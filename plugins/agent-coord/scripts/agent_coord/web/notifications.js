@@ -1,6 +1,11 @@
 "use strict";
 
 class TurnNotifications {
+  static isQuietShortcut(event) {
+    return event.key === "Enter" && event.altKey && event.metaKey &&
+      !event.shiftKey && !event.ctrlKey && !event.isComposing && event.keyCode !== 229 && !event.repeat;
+  }
+
   constructor({button, claim, claimApproval, claimSnooze, selected, openThread, onError}, env = globalThis) {
     Object.assign(this, {button, claim, claimApproval, claimSnooze, selected, openThread, onError, env});
     this.owner = env.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
@@ -95,7 +100,7 @@ class TurnNotifications {
     if (this.closed || !this.enabled() || !["completed", "failed", "approval", "question", "snooze", "stalled"].includes(event.status)) return;
     // The server claim is atomic across tabs and persists across reconnects.
     // Consume focused-thread events too, so they cannot pop up in another tab.
-    const quiet = this.viewing(event.thread_id);
+    const quiet = event.status === "completed" && event.quiet === true || this.viewing(event.thread_id);
     const stalled = event.status === "stalled";
     const approval = ["approval", "question"].includes(event.status) || stalled;
     const snooze = event.status === "snooze";

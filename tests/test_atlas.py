@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from workspace_http_fixture import assert_workspace_bundles
 
 
 class AtlasBrowserTests(unittest.TestCase):
@@ -32,9 +33,8 @@ class AtlasBrowserTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="atlas-overview"', page)
-                    self.assertIn(b'href="/atlas.css?v=', page)
-                    for script in [b"atlas-layout.js", b"atlas.js", b"overview-layout.js"]:
-                        self.assertIn(b'rel="preload" as="script" href="/' + script + b'?v=', page)
+                assert_workspace_bundles(self, base, page, script=(b"Domain atlas", b"AtlasLayout", b"Overview layout"),
+                                         stylesheet=(b".live-atlas", b".atlas-inspector"))
                 for path, mime in [("atlas-layout.js", "javascript"), ("atlas.js", "javascript"),
                                    ("overview-layout.js", "javascript"), ("atlas.css", "css")]:
                     with urllib.request.urlopen(base + "/" + path) as response:

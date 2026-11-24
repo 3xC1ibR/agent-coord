@@ -26,40 +26,66 @@ not the legacy one-time interruption below. Public publication remains a
 separate outcome; an installed app or a passing CI run alone does not establish
 published customer updates.
 
-## Keeping local conversations available during a full-database upgrade
+## Stable local origin during coordinator replacement
 
-The macOS interface can stage an interaction gateway from the retained signed
-candidate while the original coordinator still serves. Its loopback origin stays
-stable while the old supervisor closes its listeners and copies the rollback
-database. The original coordinator remains the sole owner of provider processes,
-approvals, scheduling and the live database. The gateway reads committed
-conversation snapshots and identifies them as saved. During the handover, search
-reports its bounded coverage. An action that requires the coordinator returns
-an explicit refusal if the coordinator cannot receive it.
+The interface uses `--runtime-stable-origin` to attach to the permanent loopback
+edge. The edge retains the browser origin and credential while the authenticated
+serving coordinator changes. It forwards the ordinary UI routes, bundled assets,
+conversation opens and event streams without maintaining a second conversation
+projection. The native shell observes its private health endpoint and keeps the
+same window URL across coordinator generations.
 
-An explicit backend update binds the original coordinator instance, candidate
-payload and update request ID. While the interface is attached to an older coordinator, the gateway acknowledges
-eligible ordinary messages after committing the original request and expected turn
-to its private intake. It forwards staged messages to the original owner one at
-a time. Preparation stops new legacy deliveries and waits for already dispatched
-work to reach a canonical outcome. The listener remains available throughout
-this wait. After the switch, independent conversations drain concurrently in
-receipt order within each conversation. The normal
-provider receipt on the authenticated receiving coordinator determines delivery.
-The gateway can reissue the same ordinary transfer only to a receiver that
-reserves the same request before any provider operation. An ambiguous native
-outcome stays visible for reconciliation. Rollback to an older receiver permits
-a single delivery attempt. Stop Work and Quit and pending approvals retain their
-existing authority.
+The receiving coordinator owns ordinary composer acceptance and its canonical
+submission receipts. The edge may wait briefly for a fenced route to reopen;
+it does not acknowledge a new message by writing a separate intake database.
+A lost reply does not authorize repeating a provider operation. Existing request
+identity and receipt checks continue to determine whether work was accepted.
 
-Use the retained candidate helper with `--runtime-interaction-continuity` for both
-staging and activation. The native interface selects that path automatically.
-Compare the independent interaction URL and the serving coordinator URL, then
-verify both on the exact signed candidate under continuous opens, sends and
-streaming. A successful backup or a successful standalone candidate run leaves
-the upgrade test outstanding. Inspect `interaction_settled` and the committed
-payload before returning the interface to the coordinator. Retire the settled
-listener through its authenticated control and retain its original receipts.
+The historical `--runtime-interaction-continuity` option selects this stable-edge
+path for a new attachment. The successor does not create an interaction gateway.
+Once the native shell binds the stable origin, a later status cannot send it back
+to a predecessor gateway or reload it solely because the coordinator PID changed.
+
+A running runtime advertising `unbrokered_provider_wait: 1` retains supported
+Codex, Claude, Kimi, Muse and Antigravity channels. Work still owned by an older
+coordinator reaches its natural idle boundary before adoption. The native update
+disclosure uses that running capability; earlier signed-98 explicit-interruption
+and pre-98 restart disclosures retain their own behavior.
+
+### Existing predecessor intake and first adoption
+
+An already recorded predecessor gateway can still own accepted messages or an
+unfinished authorization. The successor delegates observation and recovery to
+that service's exact retained, manifest-verified payload. It does not select a
+new gateway target, replace its source instance or discard its receipt database.
+Keep every retained payload referenced by an active gateway or replacement
+record. Missing identity, changed source bytes or an unavailable retained helper
+fails closed and leaves the original intake available for recovery.
+
+The predecessor's original contract remains in force: an explicit backend update
+binds the original coordinator instance, candidate payload and update request ID.
+Eligible ordinary messages are acknowledged only after the original request and
+expected turn commit to private intake. Preparation stops new legacy deliveries
+and waits for dispatched work to reach a canonical outcome. After the switch,
+independent conversations drain concurrently in receipt order within each
+conversation. The normal provider receipt on the authenticated receiving
+coordinator determines delivery. Reissuing the same transfer requires a receiver
+that reserves that request before any provider operation; ambiguous native work
+remains visible for reconciliation. An older receiver permits only a single
+attempt. Stop Work and Quit and pending approvals retain their authority.
+
+While this old intake remains unsettled, keep its original origin, request and
+authorization. Do not publish another successor around it. Recovery uses the
+recorded retained signed helper and its original target. Only authenticated
+`interaction_settled` confirmation permits retirement; archive the service's
+original directory and receipt bytes before proceeding through the stable edge.
+The first adoption may therefore require one origin switch after old intake
+settles. Ordinary stable-origin updates do not take that compatibility path.
+
+Historical gateway source and behavioral tests are retained under
+`tests/fixtures/runtime_gateway_predecessor/`; they are excluded from product
+payloads. Exact affected-build and signed-predecessor qualification still uses
+the independent retained signed package.
 
 ## Inbox recovery after a runtime exit
 
@@ -207,8 +233,8 @@ source validation.
 
 ## Uninterrupted coordinator upgrades
 
-The integrated backend implements stable provider ownership for Codex and Claude.
-A provider-neutral transport process retains their processes, pipes, native turns,
+Codex, Claude, Kimi, Antigravity and Muse can all run through the retained
+provider transport. The transport keeps their processes, pipes, native turns,
 long-running tools and pending approvals while the coordinator and provider
 adapters are replaced. Status advertises `uninterrupted_updates: 1` and identifies
 both the active coordinator payload and the retained transport. The transport
@@ -226,10 +252,8 @@ accepted requests to drain. Continuous interface polling and agent requests cann
 starve that boundary. The drain has a 30-second monotonic deadline measured from
 admission closure; a timeout fails the update and reopens the current backend.
 Status exposes the `draining` phase, current `blocked` reasons and
-`admission_drain_seconds`. Kimi, Antigravity and Muse work follows the bounded
-procedure in [Explicit updates with coordinator-owned providers](#explicit-updates-with-coordinator-owned-providers);
-work that becomes unsupported during a drain reopens admission so it remains
-answerable. Passive updates continue to wait for a quiet request boundary.
+`admission_drain_seconds`. If a coordinator-owned turn starts during the drain,
+admission reopens so its conversation and approvals remain available. Passive updates continue to wait for a quiet request boundary.
 
 Coordinator startup migrates only incomplete work-thread metadata, including
 missing request text, directories and current Beads links. Restoring the adapter
@@ -242,83 +266,37 @@ event still rolls back its history changes and cursor as one transaction.
 Native update confirmation remains effective: a held pending payload does not
 activate until Install or **Apply Backend Update… → Update and Continue** authorizes
 it. Passive compatible attachment without a confirmation hold can also replace the
-coordinator while supported turns run. Active Kimi, Antigravity or Muse turns and
-Muse background workflows defer a passive replacement; an explicit update pauses
-and continues eligible turns as described below. Incompatible transport or
-projection versions also defer activation; they do not fall back to interrupting
-agents. Providers keep executing while the interface reconnects, so bounded HTTP
-or event-stream gaps are possible.
+coordinator while supported turns run. Active turns and Muse workflows transfer when their
+provider channels belong to the retained transport. The outgoing coordinator
+checks channel ownership and projection compatibility before transfer.
 
 ### Explicit updates with coordinator-owned providers
 
-The coordinator owns the Kimi, Antigravity and Muse processes, so the provider
-transport cannot retain them across a replacement. On November 23, 2026, an
-installed build 64 stayed `accepted` indefinitely behind such turns while the
-interface showed only "Updating backend…". Runtimes that advertise
-`interrupted_provider_continuation: 1` bound that wait for an explicit Install
-or **Update and Continue**. Passive updates never interrupt work.
+Kimi, Antigravity and Muse processes started with private coordinator pipes
+must finish before a coordinator using the new retention contract can hand over.
+While waiting, admission stays open, pending approvals remain answerable, and
+update status identifies the affected conversations. Retained channels can
+carry active turns, requests and Muse workflows through a compatible upgrade.
 
-1. Admission stays open for up to `UPDATE_UNSUPPORTED_GRACE_SECONDS` (30) while
-   those turns may finish on their own. `update.notice` names the conversations.
-2. A pending approval or question on such a turn, or a running Muse workflow
-   (background or inside the foreground turn), keeps the update waiting with
-   admission open. The notice names the conversation. Approvals are never
-   withdrawn, and no native evidence shows that resuming a Muse session
-   restores a workflow.
-3. The candidate is probed and its rollback space checked before any provider
-   is signalled. Then admission closes and accepted operations drain.
-4. Each exact turn is recorded in `runtime_update_interruptions` and in
-   `runtime_update_recoveries` as `interrupting`. Immediately before signalling,
-   the update rechecks the active turn and its approvals. It then sends the
-   adapter's native interrupt, marked as update-owned: this is neither a user
-   Stop nor a failure report. Each adapter refuses that interrupt under its own
-   lock while a request is pending. After it begins stopping, it declines a
-   late provider request to the provider instead of presenting it, so no
-   approval shown to the user is withdrawn. No turn is signalled after
-   `UPDATE_INTERRUPTION_SECONDS` (20). Each signalled turn must reach a saved
-   terminal state within `UPDATE_CONFIRMATION_SECONDS` (10) of its interrupt
-   returning.
-5. Outcomes: `confirmed` turns become `prepared` for one continuation. A turn
-   that finished on its own records `finished` and keeps its outcome, including
-   the failure guard of a natural failure. A turn with a pending approval, or
-   one reached after the signalling budget, is `withdrawn` and keeps running.
-   A recorded user Stop is carried out with its user origin and never
-   continued. A turn that is still running, or that stopped without a saved
-   outcome, is `unconfirmed`. The latter keeps the failure guard.
-6. If any turn still blocks transfer, or any outcome is `unconfirmed`, the
-   update fails visibly. The current coordinator then immediately continues
-   the turns it paused. The same applies if admission reopens and new
-   provider work starts before the handover; no second round of stops runs.
-   Otherwise the ordinary uninterrupted Codex and Claude replacement proceeds.
-7. After commit, after rollback to the previous coordinator, or after a failure
-   before handover, the serving coordinator submits one continuation into the
-   same native session (`session/resume`, `session/load` or Muse
-   `session/resume`). The existing recovery guards apply: queued user input
-   first, user Stop, settings changes, closure, approvals, uncertain receipts,
-   and claims `prepared → submitting → continued | uncertain`.
-8. A coordinator that exits during step 4 leaves those rows `uncertain`, and
-   they are never continued automatically. A restarted coordinator marks an
-   update failed if its accepting coordinator exited before handover. This
-   includes a `stopping` update when the previous payload restarts, and it
-   applies to Codex and Claude updates as well, which previously stayed stuck
-   in that phase. Confirmed turns then continue once. Stop Work and Quit
-   cancels continuation.
+The outgoing build controls the first adoption. In particular, build 98 has a
+different explicit-update contract. After a grace period it can interrupt an
+eligible coordinator-owned turn, record the exact turn and continue its saved
+native session once. It waits for pending approvals and active Muse workflows.
+For uninterrupted first adoption, wait for those older turns to finish before
+requesting activation. When an operator authorizes interruption on that build,
+use the guarded update and inspect each recovery after commit or rollback.
 
-`continued` means the provider accepted the continuation, not that it is
-running successfully. `recovery.conversations[].continuation.status` reports the
-native result (`running`, `completed`, `failed`, `interrupted` or `superseded`).
-A failed continuation, such as one hitting a provider quota, keeps its ordinary
-failure report and inbox guard.
+Previously recorded interruption and recovery receipts remain authoritative.
+User Stop cancels continuation. A queued user message takes precedence over
+an automatic continuation. An uncertain submission requires review. A
+continued turn has been accepted by the provider. Its subsequent native state
+is available in `recovery.conversations[].continuation.status`.
 
-The behavior runs in the outgoing coordinator. A running build without it,
-such as build 64, cannot acquire it retroactively, so the first update from
-such a build still waits while these turns run. Its native prompt now says so.
-Both prompt variants depend on capabilities the running runtime advertises.
-
-Inspect an update without private files or HTTP routes:
+Inspect an update using the packaged interpreter. Set the bytecode policy in the
+environment as well so subprocesses preserve the signed resources.
 
 ```bash
-env -u PYTHONHOME PYTHONPATH="$candidate_resources/backend" PYTHONNOUSERSITE=1 \
+env -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$candidate_resources/backend" PYTHONNOUSERSITE=1 \
 "$candidate_resources/runtime/bin/python3" -B "$candidate_resources/backend.py" \
   --db "$coord_database" --runtime-command update-status
 ```
@@ -329,19 +307,12 @@ It returns `update` with `phase`, `notice`, `blocked`, `unsupported`, and
 owner it returns the saved transaction as `unavailable`. It reports state; it
 does not replace explicit recovery controls such as `thread resume`.
 
-Regression evidence for this path is `tests/test_runtime_unsupported_update.py`.
-Its in-process tests drive the real Kimi, Antigravity and Muse adapters and
-stdio connections against the independent wire fixture
-`tests/fixtures/update_interruption_provider.py`. Its process test covers the
-actual runtime, provider transport and supervisor with that fixture as `kimi`.
-On unchanged `2d7e525`, 16 of the original 18 in-process tests and the process
-test fail. The process test leaves the update `accepted`. The two that pass
-there are invariants: passive updates never interrupt, and every adapter
-reports a finished turn with the phrase the update recognizes. Nine further
-tests cover findings from an independent review: slow interrupts beyond the
-signalling budget, an interrupt that does not stop its turn, approvals that
-arrive before or inside the adapter interrupt, Muse foreground workflows, a
-second round of work, a crash after `stopping`, and Antigravity Stop origin.
+The provider retention regression suite in `tests/test_acp_retention.py`
+exercises coordinator replacement, including a pending request and a running
+workflow. The pre-adoption November 23 build 64 incident and the later bounded
+interruption policy describe the outgoing implementations used by older
+installations. Use the serving runtime's capabilities when interpreting its
+update status.
 
 The full ownership, receipt, retention, crash-recovery and rollback contract is in
 [Provider ownership during coordinator replacement](runtime-provider-ownership.md).
@@ -532,10 +503,10 @@ an idle window is not inherently required. That first transition interrupts nati
 execution and continues eligible saved conversations under the existing recovery
 rules. It is never evidence of an uninterrupted upgrade.
 
-Before first adoption, finish pending approvals and arrange explicit continuation
-for any active Kimi, Antigravity or Muse assignments. The bounded continuation
-above requires the outgoing runtime to advertise `interrupted_provider_continuation`. Preserve checkpoints and
-external action outcomes. The old backend performs the shutdown drain, so a
+Before first adoption, check pending approvals, workflows and ownership of each
+active Kimi, Antigravity or Muse conversation. An older outgoing runtime may
+advertise `interrupted_provider_continuation` for its guarded restart. Preserve
+checkpoints and external action outcomes. The old backend performs the shutdown drain, so a
 legacy drain failure can commit the new backend with `requires_review: true`.
 Inspect its exact recovery states and tool outcomes before authenticated `resume`;
 uncertain submissions must never be replayed automatically. The fixed drain only
@@ -794,8 +765,9 @@ Launch the signed application with `--observe-window-origins /absolute/path/nati
 to enable a read-only Unix socket in a new, user-owned directory with mode `0700`.
 Each connection returns the window IDs, top-level loopback origins and navigation readiness
 sampled from WebKit. Match the socket peer PID to the signed running application, compare
-every window with the staged gateway before activation, then repeat against the committed
-backend. The native smoke test exercises this observation on two windows with independent
+every window with the stable edge before activation, then repeat after the committed
+backend takes over without changing that origin. An existing predecessor gateway may
+switch to the stable edge once, only after its accepted intake has settled. The native smoke test exercises this observation on two windows with independent
 drafts. Run it with `python3 desktop/macos/smoke_test.py --origins-only --app 'Ribbon Field.app'`.
 
 Validation uses isolated databases, runtime directories, and fake providers before

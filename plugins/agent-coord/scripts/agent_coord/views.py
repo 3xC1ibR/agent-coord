@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from .store import CoordinationError
+from .workspaces import directory_roots
 
 DEFAULT_FILTERS = {"repository": "", "project": "", "phase": "", "show": "active", "search": ""}
 PHASES = {"", "new", "discussion", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"}
@@ -63,10 +64,10 @@ class ViewStore:
         ):
             raise CoordinationError("A view with that name already exists. Choose another name.")
         filters = body.get("filters", {})
-        if not isinstance(filters, dict) or set(filters) - DEFAULT_FILTERS.keys():
+        if not isinstance(filters, dict) or set(filters) - (DEFAULT_FILTERS.keys() | {"directory_roots"}):
             raise CoordinationError("Choose supported view filters.")
         filters = {**DEFAULT_FILTERS, **filters}
-        if any(not isinstance(value, str) for value in filters.values()):
+        if any(not isinstance(filters[key], str) for key in DEFAULT_FILTERS):
             raise CoordinationError("View filters must be strings.")
         if filters["show"] not in {"active", "attention", "completed", "later", "archived"} or filters["phase"] not in PHASES:
             raise CoordinationError("Choose a supported thread status and phase.")
@@ -88,7 +89,8 @@ class ViewStore:
     def create(self, body):
         if set(body) - {"name", "filters", "group_by", "cwd"}:
             raise CoordinationError("View creation accepts a name, filters, and grouping.")
-        with self.store._connection() as db:
+        body = self._normalize_folders(body)
+        with self.store.database_operation("views.create", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             name, filters, group, cwd = self._validate(db, body)
             view_id = str(uuid.uuid4())
@@ -100,7 +102,8 @@ class ViewStore:
     def update(self, view_id, body):
         if set(body) - {"name", "filters", "group_by", "version"} or not set(body) - {"version"}:
             raise CoordinationError("View updates accept a name, filters, grouping, and current version.")
-        with self.store._connection() as db:
+        body = self._normalize_folders(body)
+        with self.store.database_operation("views.update", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, view_id)
             self._version(current, body)
@@ -108,6 +111,13 @@ class ViewStore:
             db.execute("UPDATE saved_views SET name = ?, filters = ?, group_by = ?, version = version + 1 WHERE id = ?",
                        (name, filters, group, view_id))
             return self._decode(self._get(db, view_id))
+
+    @staticmethod
+    def _normalize_folders(body):
+        filters = body.get("filters")
+        if isinstance(filters, dict) and "directory_roots" in filters:
+            return {**body, "filters": {**filters, "directory_roots": directory_roots(filters["directory_roots"])}}
+        return body
 
     def delete(self, view_id, body):
         if set(body) != {"version"}:

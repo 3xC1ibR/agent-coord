@@ -9,7 +9,8 @@ const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/a
 
 function setup() {
   const elements = new Map();
-  const c = {listRequest: 0, $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
+  const c = {listRequest: 0, document: {hidden: false}, clearTimeout,
+    $: id => { if (!elements.has(id)) elements.set(id, {}); return elements.get(id); },
     state: {selected: "one", detail: {work_thread: {browser_session: true, attention: "now"}}, sessions: [{thread_id: "one"}], closing: new Set()},
     threadGrouping: grouping, renderSessionSettings() {}, refreshDetail: async () => {}, refreshList: async () => {},
     renderList() { c.rendered = c.state.sessions.filter(thread => !c.state.pendingCloses?.has(thread.thread_id)); },
@@ -334,11 +335,11 @@ test("partial failure reconciles closed children and preserves the parent and fa
 
 test("overview render cache rebuilds when a close or Undo changes button availability", () => {
   const c = setup(), rebuilding = new Error("Rebuilding overview");
-  Object.assign(c, {savedViews: null, conversationSearch: null, renderClosedToggle() {},
+  Object.assign(c, {document: {activeElement: null}, savedViews: null, conversationSearch: null, renderClosedToggle() {},
     threadsInProject: threads => threads, threadOrganization: {matches: () => true},
     threadViews: {matches: () => true}, upcomingSchedules: () => []});
-  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set(),
-    overviewMotion: {capture() { throw rebuilding; }}});
+  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set()});
+  c.$("sessions").replaceChildren = () => { throw rebuilding; };
   for (const id of ["search", "view", "group-by", "phase-filter", "repository", "project", "group-by-domain", "back-home", "results-count"]) {
     Object.assign(c.$(id), {value: "", setAttribute() {}});
   }

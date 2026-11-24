@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 // Pressing Enter must show the user's message before any network work, with
 // honest sending, sent and not-sent states. These tests never resolve the
 // request until they choose to, so a regression to "render after acceptance"
@@ -234,7 +235,7 @@ test("conversation eviction releases settled reconciliation state and snapshots 
   assert.equal(messages.acceptedRequests.size, 0);
 });
 
-test("reconciliation state follows the four-conversation cache instead of accumulating across visits", () => {
+test("reconciliation state follows the 64-conversation cache instead of accumulating across visits", () => {
   const messages = outgoing();
   const c = {state: {outgoing: messages, conversations: new Map(), selected: null}};
   vm.createContext(c);
@@ -245,8 +246,8 @@ test("reconciliation state follows the four-conversation cache instead of accumu
     c.conversationEntry(id);
     messages.confirm(id, [acceptance("first", "Correction", {threadId: id})]);
     messages.settle(id, detailWith(user("old", "Earlier"), user("canonical", "Correction")));
-    assert.ok(messages.consumedItems.size <= 4);
-    assert.ok(messages.acceptedRequests.size <= 4);
+    assert.ok(messages.consumedItems.size <= 64);
+    assert.ok(messages.acceptedRequests.size <= 64);
   }
 });
 
@@ -308,6 +309,7 @@ function composer({running = false} = {}) {
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), context);
+  loadComposer(context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
   context.state.outgoing = new OutgoingMessages({itemText});
   context.$("message").value = "Ship the fix";
@@ -328,7 +330,9 @@ for (const running of [false, true]) {
       return new Promise(resolve => { accept = resolve; });
     };
     const sending = c.sendMessage();
-    assert.equal(typeof accept, "function", "the request starts without waiting for any other work");
+    assert.match(c.$("timeline").text, /Ship the fix Sending…/, "the echo paints before the queued delivery runs");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(typeof accept, "function");
     c.$("message").value = "Next thought";
     accept(running ? {turnId: "turn-one"} : {turn: {id: "turn-two"}});
     await sending;
@@ -339,11 +343,11 @@ for (const running of [false, true]) {
 
 test("a rejected send is marked not sent and its text returns to the composer", async () => {
   const c = composer();
-  c.api = async () => { throw new Error("Claude Code disconnected."); };
+  c.api = async () => { throw Object.assign(new Error("Claude Code disconnected."), {status: 400}); };
   await assert.rejects(c.sendMessage(), /disconnected/);
   assert.match(c.$("timeline").text, /Ship the fix Not sent · Claude Code disconnected\./);
   assert.equal(c.$("message").value, "Ship the fix");
-  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.state.submissionQueue.lanes.size, 0);
 });
 
 test("a committed acceptance event resolves a lost HTTP response without replaying", async () => {
@@ -372,7 +376,8 @@ test("acceptance for an evicted pending send still resolves a lost HTTP response
     return new Promise((resolve, reject) => { rejectResponse = reject; });
   };
   const sending = c.sendMessage();
-  for (let index = 0; index < 5; index++) {
+  await new Promise(resolve => setImmediate(resolve));
+  for (let index = 0; index < 65; index++) {
     c.state.selected = "visited-" + index;
     c.conversationEntry(c.state.selected);
   }
@@ -390,12 +395,13 @@ test("acceptance for an evicted pending send still resolves a lost HTTP response
   assert.equal(c.$("message").value, "Draft in the selected conversation");
 });
 
-test("queued and command input keep their own displays", async () => {
+test("queued messages use optimistic feedback and local commands keep their own display", async () => {
   for (const [mode, text] of [["queue", "Later"], ["steer", "/compact"]]) {
     const c = composer({running: mode === "queue"});
     c.$("message").value = text;
     c.api = async () => ({queued: true, command: mode === "steer" ? {message: "Compacted"} : null});
     await c.sendMessage(mode);
-    assert.equal(c.$("timeline").children.length, 0, mode);
+    if (mode === "queue") assert.match(c.$("timeline").text, /Later Sent/);
+    else assert.equal(c.$("timeline").children.length, 0, mode);
   }
 });

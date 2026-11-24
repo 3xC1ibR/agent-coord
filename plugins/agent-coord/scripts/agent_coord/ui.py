@@ -4,6 +4,7 @@ import errno
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import queue
 import re
@@ -15,7 +16,6 @@ import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import lru_cache
 from http import HTTPStatus
@@ -26,18 +26,22 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
+from .conversation_open import open_route_thread
+from .history_response import OpeningAdmissionError, read_snapshot_json
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
+from .submission_receipts import SubmissionOutcomeUnknownError
 from .thread_control import ThreadControlWorker
 from .app_control import AppControlWorker
-from .message_timeline import message_timeline, message_cursor, message_changes, message_sends
+from .message_timeline import message_timeline
+from .notification_broadcast import NotificationBroadcast
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
 from .native_push import NativePush
-from .workspaces import matches_workspace, require_thread_workspaces, resolve_workspace
+from .workspaces import WorkspaceAccessError, matches_workspace, require_thread_workspaces, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
@@ -55,6 +59,7 @@ SORT_KEYS = {"created", "last_activity", "name"}
 _CLIENT_DISCONNECT_ERRNOS = {errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE}
 _WEB_ROOT = Path(__file__).with_name("web")
 _WORKSPACE_ASSET = re.compile(rb'(?:src|href)="/([a-zA-Z0-9_-]+\.(?:js|css))"')
+_BUILT_WORKSPACE_ASSET = re.compile(r"/dist/app-([a-f0-9]{20})\.(js|css)")
 
 
 @lru_cache(maxsize=192)
@@ -63,6 +68,10 @@ def _asset_digest(path, file_identity):
 
 
 def _workspace_html():
+    built = _WEB_ROOT / "dist" / "index.html"
+    if built.is_file():
+        return built.read_bytes()
+
     def versioned(match):
         path = _WEB_ROOT / match[1].decode("ascii")
         stat = path.stat()
@@ -70,6 +79,20 @@ def _workspace_html():
         return match[0][:-1] + b"?v=" + digest + b'"'
 
     return _WORKSPACE_ASSET.sub(versioned, (_WEB_ROOT / "index.html").read_bytes())
+
+
+def workspace_bundle_asset(path):
+    match = _BUILT_WORKSPACE_ASSET.fullmatch(path)
+    if match is None:
+        return None
+    asset = _WEB_ROOT / path[1:]
+    if not asset.is_file() or not asset.resolve().is_relative_to(_WEB_ROOT.resolve()):
+        return None
+    body = asset.read_bytes()
+    if hashlib.sha256(body).hexdigest()[:20] != match[1]:
+        return None
+    content_type = "text/javascript" if match[2] == "js" else "text/css"
+    return body, content_type + "; charset=utf-8"
 
 
 _MAX_BODY_BYTES = 128 * 1024
@@ -332,6 +355,8 @@ def _handler(
     coordination_metrics: CoordinationMetrics | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
+    if browser_sessions is not None:
+        browser_sessions.conversation_open.initialize_catalog()
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
@@ -357,6 +382,8 @@ def _handler(
                 operation = "thread_detail"
             elif method == "GET" and path.startswith("/api/browser/sessions/"):
                 operation = "conversation_read"
+            elif method == "GET" and open_route_thread(path.removeprefix("/api/browser/")) is not None:
+                operation = "conversation_open"
             self._metric_operation = operation
             self._metric_started = time.monotonic()
 
@@ -370,7 +397,8 @@ def _handler(
             self._send(HTTPStatus.OK, content_type + "; charset=utf-8", body, cache_control=policy)
 
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
-                  entity_tag: str | None = None, cache_control: str = "no-store") -> None:
+                  entity_tag: str | None = None, cache_control: str = "no-store",
+                  extra_headers: dict[str, str] | None = None) -> None:
             operation = getattr(self, "_metric_operation", None)
             if operation:
                 processing_ms = (time.monotonic() - self._metric_started) * 1000
@@ -383,6 +411,8 @@ def _handler(
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", cache_control)
+                for name, value in (extra_headers or {}).items():
+                    self.send_header(name, value)
                 if entity_tag:
                     self.send_header("ETag", entity_tag)
                 self.send_header("X-Content-Type-Options", "nosniff")
@@ -454,6 +484,14 @@ def _handler(
             if not self._authorized():
                 self._json(HTTPStatus.UNAUTHORIZED, {"error": "Pair this device using a fresh link from your Mac."})
                 return
+            if parsed.path.startswith("/dist/"):
+                asset = workspace_bundle_asset(parsed.path)
+                if asset is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                else:
+                    body, content_type = asset
+                    self._send(HTTPStatus.OK, content_type, body, cache_control="private, max-age=31536000, immutable")
+                return
             if parsed.path == "/html-preview":
                 self._send(HTTPStatus.OK, "text/html; charset=utf-8", (_WEB_ROOT / "html-preview.html").read_bytes())
                 return
@@ -480,7 +518,7 @@ def _handler(
             if parsed.path == "/push-notifications.js":
                 self._static_asset(parsed)
                 return
-            if parsed.path in {"/openui.js", "/openui.css"}:
+            if parsed.path in {"/openui.js", "/openui.css", "/tokens.css"}:
                 self._static_asset(parsed)
                 return
             if parsed.path == "/api/remote/status":
@@ -542,6 +580,10 @@ def _handler(
                             self._browser_get(parsed)
                     else:
                         self._browser_get(parsed)
+                except OpeningAdmissionError as exc:
+                    self._admission_unavailable(str(exc))
+                except WorkspaceAccessError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": exc.code})
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 except sqlite3.OperationalError as exc:
@@ -580,40 +622,28 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
-        def _coordination_events(self, completion_sequence, message_sequence, send_sequence):
-            completions = browser_sessions.completions_after(completion_sequence)
-            message_sequence, changes = message_changes(store, message_sequence, browser_sessions.cwd)
-            send_sequence, sends = message_sends(store, send_sequence, browser_sessions.cwd)
-            notifications = {
-                "completions": completions["events"], "completionSeq": completions["seq"],
-                "snoozes": browser_sessions.snooze_notifications(),
-                "approvals": browser_sessions.approval_notifications(),
-            }
-            return message_sequence, send_sequence, changes + sends, notifications
-
-        def _stream_events(self, sequence, completion_sequence):
-            message_sequence = message_cursor(store)
-            send_sequence, _ = message_sends(store)
-            # Keep one poll in flight per connection. Only this handler writes
-            # frames and advances the cursors advertised to this client.
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rf-notifications") as reader:
-                poll = None
-                next_poll = 0.0
+        def _stream_events(self, sequence, completion_sequence, metadata_sequence=None):
+            broadcaster = self.server.notification_broadcast
+            with broadcaster.subscribe(completion_sequence) as client:
+                next_catalog_poll = 0.0
                 while not browser_sessions.closed:
-                    if poll is None and time.monotonic() >= next_poll:
-                        next_poll = time.monotonic() + 1
-                        poll = reader.submit(self._coordination_events, completion_sequence, message_sequence, send_sequence)
                     batch = browser_sessions.events_after(sequence, timeout=1)
                     if browser_sessions.closed or not self._authorized():
                         return
                     sequence = batch["seq"]
-                    batch.update(completions=[], completionSeq=completion_sequence)
-                    if poll is not None and poll.done():
-                        message_sequence, send_sequence, changes, notifications = poll.result()
-                        poll = None
-                        batch["events"].extend(changes)
-                        batch.update(notifications)
+                    notifications = broadcaster.take(client)
+                    if notifications is None:
+                        batch.update(completions=[], completionSeq=completion_sequence)
+                    else:
+                        batch["events"].extend(notifications["events"])
+                        batch.update((key, value) for key, value in notifications.items() if key != "events")
                         completion_sequence = batch["completionSeq"]
+                    if metadata_sequence is not None and time.monotonic() >= next_catalog_poll:
+                        next_catalog_poll = time.monotonic() + .5
+                        changes = browser_sessions.conversation_open.catalog_changes(metadata_sequence)
+                        if changes is not None:
+                            metadata_sequence = changes["revision"]
+                            batch["events"].append({"method": "browser/conversationInvalidated", "params": changes})
                     self._event_batch(batch)
 
         def _event_batch(self, batch: dict) -> None:
@@ -624,6 +654,17 @@ def _handler(
 
         def _json(self, status: HTTPStatus, payload: Any) -> None:
             self._send(status, "application/json; charset=utf-8", json.dumps(payload).encode())
+
+        def _admission_unavailable(self, message):
+            generation = getattr(self.server, "edge_fenced_generation", None)
+            if generation:
+                # The edge retries only when this generation rejected admission.
+                from .runtime_edge import FENCED_HEADER
+                body = json.dumps({"error": "Coordinator admission is switching."}).encode()
+                self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json; charset=utf-8", body,
+                           extra_headers={FENCED_HEADER: generation})
+            else:
+                self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": message})
 
         def _database_busy(self, error: sqlite3.OperationalError) -> None:
             if "locked" not in str(error).lower() and "busy" not in str(error).lower():
@@ -659,11 +700,12 @@ def _handler(
         def _check_thread_workspace(self, thread_id):
             # Sidebar panels need the saved workspace boundary. Building a
             # live thread card here waits on unrelated provider checkpoints.
-            require_thread_workspaces(store, [thread_id], browser_sessions.cwd)
+            require_thread_workspaces(store, [thread_id], browser_sessions.cwd, exclude_managed=True)
 
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
             query = parse_qs(parsed.query, keep_blank_values=True)
+            open_thread = open_route_thread(route)
             if route == "config":
                 # The page fetches its conversation snapshots after config.
                 # Subscribe from here to cover events arriving during startup.
@@ -673,11 +715,22 @@ def _handler(
                                           "recurringSchedules": True,
                                           # The asks view checks this before offering kinds, notes, snooze and the log.
                                           "askKinds": True,
+                                          "askTypedAnswers": 1,
                                           # Records the user's reply to an open ask, for the mark every device shows.
                                           "askReplies": True,
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
+                                          "conversationHistoryPages": 1,
+                                          "conversationOpen": 1,
+                                          "conversationRevisionEpoch": browser_sessions.conversation_open.epoch,
+                                          "conversationMetadataEvents": 1,
+                                          "conversationMetadataCursor": browser_sessions.conversation_open.catalog_cursor(),
+                                          **({} if self._remote_request() else {
+                                              "conversationCacheScope": browser_sessions.conversation_open.cache_scope}),
+                                          "ordinarySubmissionReceipts": 1,
+                                          "sessionCreationReceipts": 1,
+                                          "quietSubmissions": 1,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -698,9 +751,8 @@ def _handler(
                         raise CoordinationError("Choose a conversation and HTML file to preview.")
                     thread_id, file_path = query["thread"][0], query["path"][0]
                 # Read saved metadata only. Opening output must not resume an agent.
+                self._check_thread_workspace(thread_id)
                 thread = store.threads.get(thread_id, history=False)
-                if not matches_workspace(thread["cwd"], browser_sessions.cwd):
-                    raise CoordinationError("Work thread not found in this workspace.")
                 result = read_html(thread["cwd"], file_path)
                 if content:
                     self._send(HTTPStatus.OK, "text/html; charset=utf-8", result["html"].encode("utf-8"))
@@ -777,8 +829,15 @@ def _handler(
             elif route == "sessions":
                 self._json(HTTPStatus.OK, {"data": browser_sessions.list_sessions(archived=query.get("archived") == ["true"])})
             elif route == "threads":
+                archived = query.get("archived") == ["true"]
+                if query.keys() & {"project", "project_cwd", "directory_root"}:
+                    from .workspaces import workspace_members
+                    includes = workspace_members(query)
+                    data = [thread for thread in browser_sessions.list_work_threads(archived=archived) if includes(thread)]
+                    self._json(HTTPStatus.OK, {"data": data})
+                    return
                 with store.reading():
-                    body, tag = browser_sessions.work_thread_inventory_response(archived=query.get("archived") == ["true"])
+                    body, tag = browser_sessions.work_thread_inventory_response(archived=archived)
                 # A window that already holds this list skips the transfer and
                 # its own parse and render.
                 if self.headers.get("If-None-Match") == tag:
@@ -808,6 +867,7 @@ def _handler(
                 self._json(HTTPStatus.OK, close_status)
             elif route.startswith("threads/") and route.endswith("/agent-tree"):
                 from .agent_tree import agent_tree
+                self._check_thread_workspace(unquote(route[8:-11]))
                 self._json(HTTPStatus.OK, agent_tree(browser_sessions, unquote(route[8:-11])))
             elif route.startswith("threads/") and route.endswith("/close-plan"):
                 from .subagent_close import close_plan
@@ -829,29 +889,66 @@ def _handler(
                 self._json(HTTPStatus.OK, {"watches": watches,
                                          "requests": [control.status(key) for key in pending]})
             elif route.startswith("threads/") and route.endswith("/preview"):
-                self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
+                thread_id = unquote(route[8:-8])
+                self._check_thread_workspace(thread_id)
+                self._json(HTTPStatus.OK, thread_preview(browser_sessions, thread_id))
             elif route.startswith("threads/") and route.endswith("/messages"):
-                self._json(HTTPStatus.OK, {"data": message_timeline(store, unquote(route[8:-9]), browser_sessions.cwd)})
+                thread_id = unquote(route[8:-9])
+                self._check_thread_workspace(thread_id)
+                self._json(HTTPStatus.OK, {"data": message_timeline(store, thread_id, browser_sessions.cwd)})
             elif route.startswith("threads/"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:])
+                self._check_thread_workspace(thread_id)
                 with store.reading():
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif open_thread is not None:
+                if query:
+                    raise CoordinationError("Conversation open does not accept query parameters.")
+                self._json(HTTPStatus.OK, browser_sessions.conversation_open.read(unquote(open_thread)))
+            elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
+                parts = route.split("/")
+                if len(parts) != 5 or parts[2] != "turns" or not parts[1] or not parts[3]:
+                    raise CoordinationError("Choose a session and a turn.")
+                self._json(HTTPStatus.OK, {"turn": browser_sessions.read_history_turn(unquote(parts[1]), unquote(parts[3]))})
+            elif route.startswith("sessions/") and query.keys() & {"before_seq", "limit", "turn_id"}:
+                if "/" in route[9:] or not route[9:]:
+                    raise CoordinationError("Choose a session for transcript pagination.")
+                try:
+                    before = int(query["before_seq"][0]) if "before_seq" in query else None
+                    limit = int(query.get("limit", ["40"])[0])
+                    if any(len(query.get(key, ())) > 1 for key in ("limit", "turn_id", "before_seq")):
+                        raise ValueError
+                    target = query.get("turn_id", [None])[0]
+                    if target == "" or (before is not None and target is not None):
+                        raise ValueError
+                    if not 1 <= limit <= 200 or before is not None and not 0 <= before < 2**63:
+                        raise ValueError
+                except ValueError as exc:
+                    raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
+                thread_json = browser_sessions.read_history_window_json(
+                    unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
+                if thread_json is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Saved turn was not found."})
+                else:
+                    self._send(HTTPStatus.OK, "application/json; charset=utf-8", b'{"thread":' + thread_json + b'}')
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
-                with store.reading():
-                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
-                    if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
-                        from .thread_control import ThreadControl
-                        work = result["work_thread"]
-                        work["close_when_done"] = ThreadControl(store).status(work["thread_id"])
-                self._json(HTTPStatus.OK, result)
+                if view == "recent" and self.headers.get("X-Agent-Coord-Conversation-Revisions") == "1":
+                    result = browser_sessions.conversation_open.read(unquote(route[9:]), detail_only=True)
+                    if not result["legacyDetailRequired"]:
+                        self._json(HTTPStatus.OK, result)
+                        return
+                body = read_snapshot_json(
+                    browser_sessions, unquote(route[9:]), recent=view == "recent",
+                    controls=self.headers.get("X-Agent-Coord-Thread-Controls") == "1")
+                self._send(HTTPStatus.OK, "application/json; charset=utf-8", body)
             elif route == "events":
                 try:
                     cursor = (self.headers.get("Last-Event-ID") or query.get("after", ["0"])[0]).split(":")
@@ -860,7 +957,9 @@ def _handler(
                     sequence = int(cursor[0])
                     completion_sequence = int(cursor[1] if len(cursor) == 2 else
                                               query.get("completion_after", [store.threads.completion_cursor()])[0])
-                    if not all(0 <= value <= 9_223_372_036_854_775_807 for value in (sequence, completion_sequence)):
+                    metadata_sequence = int(query["metadata_after"][0]) if "metadata_after" in query else None
+                    if not all(0 <= value <= 9_223_372_036_854_775_807 for value in
+                               (sequence, completion_sequence, metadata_sequence) if value is not None):
                         raise ValueError("Cursor out of range.")
                 except ValueError as exc:
                     raise CoordinationError("Invalid event cursor.") from exc
@@ -872,7 +971,7 @@ def _handler(
                 try:
                     self.wfile.write(b"retry: 1500\n\n")
                     self.wfile.flush()
-                    self._stream_events(sequence, completion_sequence)
+                    self._stream_events(sequence, completion_sequence, metadata_sequence)
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                         raise
@@ -921,8 +1020,8 @@ def _handler(
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
-                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
-                        "Runtime maintenance is pausing new work. Try again shortly.")})
+                    self._admission_unavailable(browser_sessions.admission.message(
+                        "Runtime maintenance is pausing new work. Try again shortly."))
                     return
                 try:
                     self._admitted_POST()
@@ -1272,6 +1371,7 @@ def _handler(
                     if len(route) not in {4, 5}:
                         raise CoordinationError("Choose a work thread.")
                     thread_id = unquote(route[3])
+                    self._check_thread_workspace(thread_id)
                     if len(route) == 4:
                         result = browser_sessions.update_work_thread(
                             thread_id, body, prefer_minimal=self.headers.get("Prefer") == "return=minimal")
@@ -1361,7 +1461,9 @@ def _handler(
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 if len(route) == 3:
-                    self._json(HTTPStatus.CREATED, browser_sessions.create(body))
+                    created = (browser_sessions.creation_receipts.create(body) if "requestId" in body
+                               else browser_sessions.create(body))
+                    self._json(HTTPStatus.CREATED, created)
                     return
                 thread_id = unquote(route[3])
                 if len(route) == 4:
@@ -1414,6 +1516,10 @@ def _handler(
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 self._json(HTTPStatus.OK, result)
+            except SubmissionOutcomeUnknownError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code})
+            except WorkspaceAccessError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": exc.code})
             except BrowserBusyError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except sqlite3.OperationalError as exc:
@@ -1439,11 +1545,17 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     coordination_metrics: CoordinationMetrics | None = None
 
     stoic_integration = None
+    notification_broadcast: NotificationBroadcast | None = None
+    search_publications = None
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
+        self._storage_stopped = threading.Event()
+        self._migration_index = None
         self._idle_workers = []
         self._workers_closing = False
+        self._startup_cancelled = threading.Event()
+        self._startup_worker = None
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
@@ -1468,13 +1580,74 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 return
             request, client_address = next_request
 
+    def start_storage_maintenance(self, owner_guard):
+        """Start migration only after the serving runtime owns its committed database."""
+        from .search_publication import SearchPublicationWorker, prepare_search_publication
+        from .search_store import SearchStore
+        from .transcript_migration import start_runtime_migration
+
+        sessions = self.browser_sessions
+        store = sessions.store
+
+        def available():
+            return owner_guard() and not self._storage_stopped.is_set() and not sessions.admission.paused
+
+        def prepare_search():
+            if not available():
+                return False
+            if self.search_publications is not None:
+                return True
+            self._migration_index = SearchStore.for_store(store)
+            if not prepare_search_publication(store, stopped=self._storage_stopped, owner_guard=available):
+                return False
+            with sessions.admission.enter() as allowed:
+                if not allowed or not available():
+                    return False
+                self.search_publications = SearchPublicationWorker.start_if_active(store)
+            return self.search_publications is not None
+
+        if available():
+            with sessions.admission.enter() as allowed:
+                if allowed:
+                    self.search_publications = SearchPublicationWorker.start_if_active(store)
+                    if self.search_publications is None:
+                        sessions.start_search_index()
+        start_runtime_migration(sessions, owner_guard=owner_guard, search_handshake=prepare_search)
+
+    def start_services(self, operations, *, background=False):
+        if not background:
+            for operation in operations:
+                operation()
+            return
+
+        def start_pending():
+            for operation in operations:
+                if self._startup_cancelled.is_set():
+                    return
+                try:
+                    operation()
+                except Exception:
+                    logging.getLogger(__name__).exception("Coordinator background service failed to start")
+
+        self._startup_worker = threading.Thread(target=start_pending, name="runtime-services", daemon=True)
+        self._startup_worker.start()
+
     def server_close(self) -> None:
+        self._storage_stopped.set()
+        migration = getattr(self.browser_sessions, "transcript_migration", None)
+        if migration is not None:
+            migration.close(timeout=None)
         with self._worker_lock:
             self._workers_closing = True
             for mailbox in self._idle_workers:
                 mailbox.put(None)
             self._idle_workers.clear()
+        self._startup_cancelled.set()
+        if self._startup_worker is not None:
+            self._startup_worker.join()
         try:
+            if self.notification_broadcast is not None:
+                self.notification_broadcast.close()
             if self.stoic_integration is not None:
                 self.stoic_integration.close()
             if self.coordination_metrics is not None:
@@ -1494,7 +1667,13 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 if self.browser_sessions is not None:
                     self.browser_sessions.close()
             finally:
-                super().server_close()
+                try:
+                    if self.search_publications is not None:
+                        self.search_publications.close()
+                    elif self._migration_index is not None:
+                        self._migration_index.close()
+                finally:
+                    super().server_close()
 
     def server_bind(self) -> None:
         # HTTPServer performs a reverse-DNS lookup only to populate a cosmetic
@@ -1519,6 +1698,9 @@ def make_ui_server(
     browser_sessions: BrowserSessions | None = None,
     remote_access: RemoteAccess | None = None,
     admission_paused: bool = False,
+    csrf_token: str | None = None,
+    native_transport=None,
+    defer_services: bool = False,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
@@ -1534,11 +1716,12 @@ def make_ui_server(
         sessions.admission.pause()
     remote = remote_access or RemoteAccess(store.database_path)
     push = WebPush(store, sessions, remote)
-    native = NativePush(store, sessions, remote)
+    native = NativePush(store, sessions, remote, transport=native_transport)
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions,
+            csrf_token or secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
     except Exception:
         coordination_metrics.close()
         push.close()
@@ -1547,38 +1730,41 @@ def make_ui_server(
         raise
     server.external_work = sessions.external_work
     server.browser_sessions = sessions
+    server.notification_broadcast = NotificationBroadcast(store, sessions)
     server.remote_access = remote
     server.web_push = push
     server.native_push = native
     server.coordination_metrics = coordination_metrics
     server.thread_control = ThreadControlWorker(sessions)
     server.app_control = AppControlWorker(sessions, provider_limits)
+    from .snapshot_cache import prepare_snapshot_cache
+    prepare_snapshot_cache(store)
     sessions.admission.wrap(server.thread_control, "process_once", automatic=True)
     sessions.admission.wrap(server.app_control, "process_once", automatic=True)
     server.runtime_admission_ready = True
     bound_host, bound_port = server.server_address[:2]
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
-    remote.restore(f"http://{target_host}:{bound_port}")
-    try:
-        sessions.start_database_checkpoint()
-        sessions.start_search_index()
-        push.start()
-        native.start()
-        server.thread_control.start()
-        server.app_control.start()
-        sessions.schedules.start()
-        sessions.inbox_wake.start()
-        sessions.event_subscriptions.start()
-        sessions.sidecars.start()
-        sessions.reviews.start()
-        sessions.watchdog.start()
-        sessions.start_residency()
-        sessions.dispatch.wake()
+    def start_stoic():
         # Standalone distributions can omit application-specific connectors.
         from importlib.util import find_spec
         if find_spec(".stoic_integration", __package__) is not None:
             from .stoic_integration import start_connector
             server.stoic_integration = start_connector(server.external_work)
+
+    automatic_services = (
+        server.thread_control.start, server.app_control.start, sessions.schedules.start,
+        sessions.inbox_wake.start, sessions.event_subscriptions.start, sessions.sidecars.start,
+        sessions.reviews.start, sessions.watchdog.start, sessions.start_residency,
+        sessions.dispatch.wake,
+    )
+    maintenance = (sessions.start_database_checkpoint,)
+    notifications = (push.start, native.start)
+    try:
+        remote.restore(f"http://{target_host}:{bound_port}")
+        if defer_services:
+            server.runtime_services = (*automatic_services, *notifications, *maintenance, start_stoic)
+        else:
+            server.start_services((*maintenance, *notifications, *automatic_services, start_stoic))
     except BaseException:
         server.server_close()
         raise

@@ -48,7 +48,7 @@ def ensure_hooks():
     if not hook.is_file():
         raise CoordinationError(f"Ribbon Field's Kimi hook is missing: {hook}. Reinstall or rebuild Ribbon Field.")
     command = ('if [ "$AGENT_COORD_CLIENT" = kimi ] && [ -n "$AGENT_COORD_SESSION_ID" ]; then '
-               + shlex.join([sys.executable, str(hook)]) + '; fi')
+               + shlex.join([sys.executable, "-B", str(hook)]) + '; fi')
     rules = [START]
     for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
         rules.extend(["[[hooks]]", "event = " + json.dumps(event),

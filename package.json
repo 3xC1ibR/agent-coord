@@ -1,0 +1,6 @@
+{
+  "name": "ribbon-field-interface",
+  "private": true,
+  "scripts": { "build": "python3 scripts/build_web.py" },
+  "devDependencies": { "esbuild": "0.28.2" }
+}

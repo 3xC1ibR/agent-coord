@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -199,24 +200,28 @@ test("the ordinary composer keeps the 202 queued and a concurrent stream confirm
     const outgoingMessages = outgoing();
     const detail = {...history(), running: false, work_thread: {client: "codex", browser_session: true, attention: "now"}};
     const input = {value: "same text"};
-    const state = {config: {interactionContinuity: true}, selected: "thread", detail, closing: new Set(),
+    const state = {config: {interactionContinuity: true, ordinarySubmissionReceipts: 1}, selected: "thread", detail, closing: new Set(),
       commandFeedback: new Map(), drafts: new Map(), outgoing: outgoingMessages};
     const c = vm.createContext({state, document: {}, $: () => input, sessionPath: id => "sessions/" + id,
       DispatchUI: {requestKey: () => "accepted"}, conversationEntry: () => ({detail}),
       sessionStorage: {removeItem() {}}, renderStatus() {}, isSessionDraft: () => false,
       showError() {}, refreshList: async () => {}, refreshDetail: async () => {}});
+    let requestId;
     c.api = async (path, body) => {
-      assert.equal(path, "sessions/thread/messages"); assert.equal(body.requestId, "accepted");
-      assert.equal(outgoingMessages.list("thread")[0].submissionId, "accepted");
+      assert.equal(path, "sessions/thread/messages");
+      requestId = body.requestId;
+      assert.equal(body.client_message_id, requestId);
+      assert.equal(outgoingMessages.list("thread")[0].submissionId, requestId);
       if (lostResponse) {
-        outgoingMessages.transfers("thread", [receipt("accepted", 1)], detail);
+        outgoingMessages.transfers("thread", [receipt(requestId, 1)], detail);
         throw new Error("response lost");
       }
-      return {transferSubmission: receipt("accepted", 1)};
+      return {transferSubmission: receipt(requestId, 1)};
     };
+    loadComposer(c);
     vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
     await c.sendMessage();
-    assert.deepEqual(status(outgoingMessages), [["accepted", "queued"]]);
+    assert.deepEqual(status(outgoingMessages), [[requestId, "queued"]]);
     assert.equal(input.value, "");
   }
 });
@@ -234,7 +239,8 @@ test("Enter can submit an ordinary message behind a starting turn on a verified 
     const c = vm.createContext({state, document:{}, $:()=>input, sessionPath:id=>"sessions/"+id,
       DispatchUI:{requestKey:()=>"request"}, conversationEntry:()=>({detail}), sessionStorage:{removeItem(){}},
       renderStatus(){}, isSessionDraft:()=>false, refreshList:async()=>{}, refreshDetail:async()=>{},showError(){},
-      api:async(path,body)=>{requests.push(body);return {transferSubmission:receipt("request",1)};}});
+      api:async(path,body)=>{requests.push(body);return {transferSubmission:receipt(body.requestId,1)};}});
+    loadComposer(c);
     vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
     await c.sendMessage(mode);
     assert.equal(requests.length, expected === false ? 0 : 1);

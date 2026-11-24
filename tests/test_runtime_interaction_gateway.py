@@ -8,11 +8,12 @@ import sys
 import tempfile
 import threading
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord import runtime_interaction_gateway as gateway
-from agent_coord.runtime_message_intake import RuntimeMessageIntake
+from historical_gateway import runtime_interaction_gateway as gateway
+from historical_gateway.runtime_message_intake import RuntimeMessageIntake
 
 
 class GatewayTests(unittest.TestCase):
@@ -97,7 +98,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_terminal_receiver_owns_turn_handoff_after_earlier_inputs_resolve(self):
         import hashlib
-        from agent_coord.runtime_message_intake import OrdinaryComposerReceiver
+        from historical_gateway.runtime_message_intake import OrdinaryComposerReceiver
         self.current.update(instance="new", payload=self.g.payload)
         self.g.backend = (*self.g.backend[:2], "new", self.g.payload)
         self.g.terminal = self.g._authority(self.current)
@@ -152,7 +153,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(seen, [body])
 
     def test_ordered_steering_requires_exact_live_target_and_matching_predecessors(self):
-        from agent_coord.runtime_message_intake import OrdinaryComposerReceiver
+        from historical_gateway.runtime_message_intake import OrdinaryComposerReceiver
         self.current.update(instance="new", payload=self.g.payload)
         self.g.backend = (*self.g.backend[:2], "new", self.g.payload)
         self.g.terminal = self.g._authority(self.current)
@@ -179,7 +180,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_untargeted_input_waits_for_earlier_native_start_without_choosing_a_turn(self):
         import hashlib
-        from agent_coord.runtime_message_intake import OrdinaryComposerReceiver
+        from historical_gateway.runtime_message_intake import OrdinaryComposerReceiver
         self.current.update(instance="new", payload=self.g.payload)
         self.g.backend = (*self.g.backend[:2], "new", self.g.payload)
         self.g.terminal = self.g._authority(self.current)

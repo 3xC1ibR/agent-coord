@@ -14,14 +14,17 @@ def initialize(db):
         checkpoint_id INTEGER,
         PRIMARY KEY (thread_id, turn_key)
     )""")
+    if "quiet" not in {row[1] for row in db.execute("PRAGMA table_info(turn_notification_context)")}:
+        db.execute("ALTER TABLE turn_notification_context ADD COLUMN quiet INTEGER")
 
 
 def record_context(db, thread_id, turn_id, context):
-    db.execute("""INSERT INTO turn_notification_context (thread_id, turn_key, origin, owner_thread_id)
-        VALUES (?, ?, ?, ?) ON CONFLICT(thread_id, turn_key) DO UPDATE SET
+    db.execute("""INSERT INTO turn_notification_context (thread_id, turn_key, origin, owner_thread_id, quiet)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(thread_id, turn_key) DO UPDATE SET
         origin = CASE WHEN origin = 'user' THEN origin ELSE excluded.origin END,
-        owner_thread_id = CASE WHEN origin = 'user' THEN owner_thread_id ELSE excluded.owner_thread_id END""",
-        (thread_id, turn_id, context["origin"], context.get("owner_thread_id")))
+        owner_thread_id = CASE WHEN origin = 'user' THEN owner_thread_id ELSE excluded.owner_thread_id END,
+        quiet = COALESCE(excluded.quiet, quiet)""",
+        (thread_id, turn_id, context["origin"], context.get("owner_thread_id"), context.get("quiet")))
 
 
 def snapshot_checkpoint(db, thread_id, turn_id):
@@ -74,7 +77,10 @@ def automatic_context(store, thread_id):
         return {"origin": "coordination", "owner_thread_id": owner if owner != thread_id or is_owner else None}
 
 
-def available_owners(db, store):
+def available_owners(db, store, *, thread_ids=None):
+    candidates = None if thread_ids is None else sorted({identity for identity in thread_ids if identity})
+    if candidates == []:
+        return set()
     # Filter in SQLite and return one row. Python's sqlite3 releases and
     # reacquires the GIL for every result row, which convoys behind other
     # request threads when thousands of rows are filtered here.
@@ -84,13 +90,17 @@ def available_owners(db, store):
               if "browser_inbox_wake" in tables else "1")
     browser = ("EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)"
                if "browser_sessions" in tables else "0")
+    predicate = '' if candidates is None else ' AND t.thread_id IN (SELECT value FROM json_each(?))'
+    parameters = (store.clock() - store.stale_after_seconds,)
+    if candidates is not None:
+        parameters += (json.dumps(candidates),)
     owners = db.execute(f"""SELECT json_group_array(t.thread_id) FROM work_threads t
         JOIN sessions s ON s.session_id = t.thread_id
         LEFT JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
         WHERE t.attention IS NOT 'archived' AND {paused}
         AND (s.turn_active OR c.status IS NULL OR c.status NOT IN ('failed', 'interrupted'))
-        AND ({browser} OR s.ended_at IS NULL AND s.last_seen_at >= ?)""",
-        (store.clock() - store.stale_after_seconds,)).fetchone()[0]
+        AND ({browser} OR s.ended_at IS NULL AND s.last_seen_at >= ?){predicate}""",
+        parameters).fetchone()[0]
     return set(json.loads(owners))
 
 
@@ -102,7 +112,7 @@ def decide(thread, *, waiting=False, owners=(), provider_input=None):
     defaults to `waiting`.
     """
     incident = thread.get("stall_incident")
-    if incident and incident.get("last_user_alert_at") is not None:
+    if incident and not incident.get("dismissed") and incident.get("last_user_alert_at") is not None:
         return {"quiet": False, "notify": True, "owner_thread_id": thread["thread_id"], "needs_user": True}
     context = thread.get("notification_context") or {}
     origin = context.get("origin")
@@ -132,12 +142,18 @@ def decide(thread, *, waiting=False, owners=(), provider_input=None):
     delivered = bool(owner == thread["thread_id"] and checkpoint
                      and checkpoint["phase"] != "orchestrating" and checkpoint["next_actor"] == "nobody")
     failed = bool(completion and completion["status"] == "failed")
+    stalled = thread.get("status") == "stalled" or (thread.get("turn_health") or {}).get("state") == "stalled"
+    classification = thread.get("response_classification") or {}
+    classified_blocker = (completion and classification.get("completion_id") == completion["id"]
+                          and classification.get("status") == "classified"
+                          and classification.get("choice") in {"blocked", "review"})
     # A stopped/closed/failed owner cannot be relied on to recover a child.
     stranded = failed and (not owner or owner == thread["thread_id"] or owner not in owners)
     # A thread the user made quiet (or external work submitted as quiet)
     # reports only a failure or a request that needs the user. Stalls that
     # alerted the user returned above; approvals and asks set needs_user.
-    muted = bool(thread.get("quiet")) and not failed
+    muted = not failed and (bool(thread.get("quiet")) or
+                            bool(context.get("quiet") and not (stalled or classified_blocker)))
     quiet = not needs_user and ((internal and not delivered and not stranded)
                                 or waiting_for_agents and not failed or muted)
     return {"quiet": quiet, "notify": not quiet,

@@ -59,6 +59,17 @@ class MessageTimelineTests(unittest.TestCase):
         self.assertNotIn('sender_turn_id', sent)
         self.assertNotIn('counterpart', sent)
 
+    def test_timeline_scope_is_checked_without_writer_admission(self):
+        sent = self.send()
+        outside = str(self.root.with_name(self.root.name + '-outside'))
+        with patch.object(self.store._writer, 'reserve', side_effect=AssertionError('Timeline took writer admission')):
+            rows = message_timeline(self.store, 'sender', str(self.root), limit=4)
+            self.assertEqual([row['id'] for row in rows], [sent['id']])
+            with self.assertRaisesRegex(CoordinationError, 'Conversation not found in this workspace'):
+                message_timeline(self.store, 'sender', outside, limit=4)
+            with self.assertRaisesRegex(CoordinationError, 'Session missing is not registered'):
+                message_timeline(self.store, 'missing', str(self.root), limit=4)
+
     def test_turn_attribution_is_captured_once_and_survives_reopen(self):
         self.active('sender', 'send-turn')
         self.send()

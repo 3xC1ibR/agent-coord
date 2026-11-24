@@ -27,10 +27,12 @@ bounded event journal, and command delivery records. Provider adapters,
 conversation state, scheduling, and coordination logic execute in the
 replaceable coordinator.
 
-The supported live adapters are Codex and Claude. An active Kimi, Antigravity,
-or Muse workload defers a passive replacement. An explicit update pauses those
-turns within a bound and continues each confirmed turn once in its saved native
-session; see [explicit updates with coordinator-owned providers](runtime-updates.md#explicit-updates-with-coordinator-owned-providers). Candidate metadata must declare compatible
+Codex, Claude, Kimi, Antigravity and Muse can use the retained transport. Each
+active ACP conversation and Muse workflow needs a channel owned by the
+transport to transfer. A coordinator that still owns private provider pipes
+must wait for that work to finish. Older outgoing builds can perform a guarded
+interruption when an operator selects it. See the [first-adoption procedure](runtime-updates.md#explicit-updates-with-coordinator-owned-providers).
+Candidate metadata must declare compatible
 transport and projection versions. This contract covers replacement of the
 coordinator and its adapters; it does not replace the transport owner itself,
 upgrade an already running provider executable, or survive a machine restart.

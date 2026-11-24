@@ -8,6 +8,13 @@ from .organization import repository_root
 from .store import CoordinationError
 
 
+class WorkspaceAccessError(CoordinationError):
+    code = "workspace_access_denied"
+
+    def __init__(self):
+        super().__init__("Work thread not found in this workspace.")
+
+
 def resolve_workspace(path: str, *, workspace: str | None = None) -> str:
     """Validate an explicitly chosen working folder without starting an agent."""
     if not isinstance(path, str) or not path.strip() or len(path) > 4000 or "\0" in path:
@@ -30,7 +37,7 @@ def resolve_workspace(path: str, *, workspace: str | None = None) -> str:
 
 def matches_workspace(cwd: str, workspace: str | None) -> bool:
     """Include descendants and preserve grouping of a repository's worktrees."""
-    if workspace is None:
+    if workspace is None or cwd == workspace:
         return True
     directory = Path(cwd).expanduser().resolve()
     root = Path(workspace).expanduser().resolve()
@@ -40,15 +47,48 @@ def matches_workspace(cwd: str, workspace: str | None) -> bool:
     return repository is not None and repository == repository_root(str(root))
 
 
-def require_thread_workspaces(store, thread_ids, workspace):
+def require_thread_workspaces(store, thread_ids, workspace, *, exclude_managed=False):
     """Check a bounded set of saved threads without projecting their live state."""
     identities = set(thread_ids)
     with store.reading(), store._connection() as db:
         slots = ",".join("?" for _ in identities)
-        rows = db.execute(f"""SELECT s.cwd FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
-            WHERE t.thread_id IN ({slots})""", tuple(identities)).fetchall()
-    if len(rows) != len(identities) or not all(matches_workspace(cwd, workspace) for cwd in {r["cwd"] for r in rows}):
-        raise CoordinationError("Work thread not found in this workspace.")
+        browser = any(column[1] == "cwd" for column in db.execute("PRAGMA table_info(browser_sessions)"))
+        browser_cwd = "b.cwd" if browser else "NULL"
+        join = "LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id" if browser else ""
+        managed = """AND NOT EXISTS (SELECT 1 FROM delegations d JOIN work_threads parent
+            ON parent.thread_id=d.parent_session_id WHERE d.child_session_id=t.thread_id)""" if exclude_managed else ""
+        rows = db.execute(f"""SELECT s.cwd, {browser_cwd} FROM work_threads t
+            JOIN sessions s ON s.session_id=t.thread_id {join}
+            WHERE t.thread_id IN ({slots}) {managed}""", tuple(identities)).fetchall()
+    directories = {directory for row in rows for directory in row if directory is not None}
+    if len(rows) != len(identities) or not all(matches_workspace(directory, workspace) for directory in directories):
+        raise WorkspaceAccessError()
+
+
+def directory_roots(directories):
+    if not isinstance(directories, list) or len(directories) > 16 or any(
+            not isinstance(value, str) or not value or len(value) > 4000 or "\0" in value
+            or not Path(value).is_absolute() for value in directories):
+        raise CoordinationError("Choose up to 16 absolute directory filters.")
+    return list(dict.fromkeys(str(Path(root).resolve()) for root in directories))
+
+
+def workspace_members(query):
+    """Build a view selector independent of server authorization and launch cwd."""
+    project = query.get("project", [""])[0]
+    location = query.get("project_cwd", [""])[0]
+    roots = tuple(map(Path, directory_roots(query.get("directory_root", []))))
+    folder = Path(location).expanduser().resolve() if location and project in {"", "__none__"} else None
+
+    def includes(thread):
+        if project and thread["project_id"] != (None if project == "__none__" else project):
+            return False
+        if roots and not any(Path(thread["cwd"]).resolve().is_relative_to(root) for root in roots):
+            return False
+        paths = (thread["project_cwd"], thread.get("project_launch_cwd"), *thread.get("orchestration_workspaces", ()))
+        return folder is None or any(path and Path(path).resolve() == folder for path in paths)
+
+    return includes
 
 
 def workspace_choices(cwd: str, known: Iterable[str] = (), *, workspace: str | None = None) -> list[dict]:

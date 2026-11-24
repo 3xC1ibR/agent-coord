@@ -64,8 +64,9 @@ const WorkingSet = (() => {
     }
     for (const g of [all, ...map.values()]) {
       g.touch = 0;
-      for (const list of g.levels) {
-        list.sort((a, b) => (b.attention_since || touchOf(b)) - (a.attention_since || touchOf(a)) || a.thread_id.localeCompare(b.thread_id));
+      for (const [level, list] of g.levels.entries()) {
+        list.sort(level === 0 ? grouping.attentionOrder :
+          (a, b) => (b.attention_since || touchOf(b)) - (a.attention_since || touchOf(a)) || a.thread_id.localeCompare(b.thread_id));
         for (const t of list) g.touch = Math.max(g.touch, touchOf(t));
       }
     }
@@ -73,11 +74,11 @@ const WorkingSet = (() => {
       .sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
     return [all, ...order.filter(key => map.has(key)).map(key => map.get(key)), ...newcomers];
   }
-  function create({document, window, storage, renderCard, onOpen, onRead, onDismiss, onGroupChange, isActive = () => true}) {
+  function create({document, window, storage, renderCard, onOpen, onDismiss, onGroupChange, isActive = () => true}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     let host, viewport, vtrack, minimap, tracks = [], panes = [], groups = [], source = [], byId = new Map();
     let workspace = "all", context = "", positionKey = "", dimension = "group", level = 0, pageKey = ALL, pageIdx = 0, order = [], signature = "";
-    let selectedGroup;
+    let selectedGroup, revision;
     const positions = new Map(), scroll = new Map(), expanded = new Set();
     let wheelTimer, touch, observer, horizontal = 0, vertical = 0, cooldown = -Infinity, lastNative = -Infinity;
     const active = () => host && !host.hidden && host.isConnected && isActive();
@@ -123,16 +124,12 @@ const WorkingSet = (() => {
         wrap.append(card);
         const links = el("div", "ws-card-links");
         if (t.pinned) links.append(el("span", "ws-pin", "Pinned"));
-        if (onDismiss && (t.can_handle_response ?? t.unhandled_response) && !running(t)) {
+        if (onDismiss && grouping.actionFor(t) === "dismiss") {
           const dismiss = button("Dismiss", "quiet ws-dismiss", event => { event?.stopPropagation(); onDismiss(t); }, "Dismiss response · " + t.title);
           dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss";
           const actions = card.querySelector(".card-actions") || el("div", "card-actions");
           const end = el("div", "card-end-actions"); end.append(dismiss); actions.append(end);
           if (!card.contains(actions)) card.append(actions);
-        }
-        if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
-          const read = button("Mark read", "quiet ws-read", () => onRead(t), "Mark response read · " + t.title);
-          read.dataset.thread = t.thread_id; read.dataset.action = "read"; links.append(read);
         }
         if (links.children.length) wrap.append(links); cards.append(wrap);
       }
@@ -316,8 +313,10 @@ const WorkingSet = (() => {
         if (!host) build(target);
         const controlled = options.selectedGroup !== undefined;
         const nextContext = JSON.stringify([options.workspace || "all", controlled ? "groups" : options.view || "all", options.placement || "active"]);
-        const nextSignature = JSON.stringify([threads, nextContext, options.selectedGroup, options.groupName, options.revision]);
-        if (signature === nextSignature) { layout(); return; }
+        const nextRevision = options.revision;
+        const nextSignature = JSON.stringify([nextContext, options.selectedGroup, options.groupName,
+          nextRevision === undefined ? threads : undefined]);
+        if (revision === nextRevision && signature === nextSignature) { layout(); return; }
         const changedContext = context !== nextContext;
         if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v3:" + context, options.placement); }
         if (controlled && (changedContext || selectedGroup !== options.selectedGroup)) {
@@ -331,7 +330,7 @@ const WorkingSet = (() => {
           groups.push({key: pageKey, name: options.groupName || "Unnamed group", levels: LEVELS.map(() => [])});
         }
         pageIdx = Math.max(0, groups.findIndex(g => g.key === pageKey)); pageKey = groups[pageIdx].key;
-        signature = nextSignature; save(); paint(!changedContext);
+        revision = nextRevision; signature = nextSignature; save(); paint(!changedContext);
       },
       destroy() { document.removeEventListener("keydown", keydown); window.clearTimeout(wheelTimer); observer?.disconnect(); host?.replaceChildren(); },
     };
@@ -344,7 +343,7 @@ const WorkingSet = (() => {
   const DAY = 86400, IDLE_CAP = 50;
   // Pinned leads the inbox and is shown only when it holds threads; Attention keeps meaning "needs you now".
   const SECTIONS = [["pinned", "Pinned"], ["attention", "Attention"], ["working", "Working"], ["quiet", "Quiet"], ["idle", "Idle"]];
-  const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", "needs-you": "Needs you"};
+  const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", stalled: "Stalled", "needs-you": "Needs you"};
   const PROVIDERS = {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code", muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"};
   // Until the payload carries the user's last message, the latest turn start stands in for it.
   const engagedAt = t => t.last_user_message_at || t.turn_started_at || t.created_at || 0;
@@ -361,19 +360,21 @@ const WorkingSet = (() => {
   }
   function requestOf(t) {
     if (t.status === "needs input") return "approval";
-    if (t.open_ask) return "question";
-    if (t.snooze_due) return "reminder";
+    if (t.open_ask && t.open_ask.blocking !== false) return "question";
     if (t.response_state === "failed" && !running(t)) return "failed";
+    if (grouping.activeStall(t)) return "stalled";
+    if (t.snooze_due) return "reminder";
     const checkpoint = t.checkpoint;
     if (!t.checkpoint_stale && checkpoint?.next_actor === "user" && checkpoint.next_action && (checkpoint.id || 0) > (t.handled_checkpoint_id || 0)) return "needs-you";
+    if (grouping.actionFor(t) === "dismiss") return "needs-you";
     return null;
   }
-  const interrupts = request => ["approval", "question", "reminder", "failed"].includes(request);
+  const interrupts = request => ["approval", "question", "reminder", "failed", "stalled"].includes(request);
   // What surfaces from a thread whose ordinary results stay out of Attention:
   // failure, a stall, or a provider permission approval. A supervised agent's
   // questions and checkpoint requests go to its supervisor; only a thread with
   // no supervisor (including a quiet one) raises those to the user itself.
-  const escalates = t => t.status === "stalled" || ["approval", "failed"].includes(requestOf(t));
+  const escalates = t => grouping.activeStall(t) || ["approval", "failed"].includes(requestOf(t));
   function unreadNow(t, request, now) {
     // Unread replies and agent requests leave Attention once read, or after a day.
     const unread = request === "needs-you" ? t.unread || t.unread_result : !request && t.unread_result;
@@ -387,8 +388,9 @@ const WorkingSet = (() => {
     if (request === "approval" || request === "question") return "attention";
     if (request === "reminder") return "attention";
     if (t.attention === "later" || t.snoozed) return "later";
-    if (request === "failed" || t.status === "stalled") return "attention";
+    if (request === "failed" || request === "stalled") return "attention";
     if (running(t)) return "working";
+    if (request === "needs-you" && grouping.actionFor(t) === "dismiss") return "attention";
     if (t.quiet) {
       if (request === "needs-you" && unreadNow(t, request, now)) return "attention";
       return workingRoots.has(t.thread_id) ? "working" : "quiet";
@@ -420,8 +422,6 @@ const WorkingSet = (() => {
       return t;
     };
     const agents = new Map(), workingRoots = new Set(), escalated = [];
-    const attentionOrder = (a, b) => Number(interrupts(requestOf(b))) - Number(interrupts(requestOf(a))) ||
-      arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id);
     for (const t of visible) {
       const parent = parents.get(t.thread_id);
       if (!parent) continue;
@@ -465,11 +465,12 @@ const WorkingSet = (() => {
       const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
       sections[empty ? "empty" : place].push(thread);
     }
-    sections.attention.sort(attentionOrder);
+    sections.attention.sort(grouping.attentionOrder);
     // Pinned: what needs you, then what is working, then the rest by recency.
     const origins = new Map(rows.map(row => [row.thread.thread_id, row.origin]));
-    const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
-    sections.pinned.sort((a, b) => pinOrder(a) - pinOrder(b) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
+    const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed", "stalled"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
+    sections.pinned.sort((a, b) => pinOrder(a) - pinOrder(b) ||
+      (pinOrder(a) === 0 ? grouping.attentionOrder(a, b) : engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id)));
     for (const key of ["working", "quiet", "idle", "empty"])
       sections[key].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
     // Agents waiting on you lead their orchestrator's list, then the ones still working.
@@ -481,7 +482,7 @@ const WorkingSet = (() => {
     const s = Math.max(0, now - at);
     return !at ? "" : s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < DAY ? Math.round(s / 3600) + "h" : Math.round(s / DAY) + "d";
   }
-  function createList({document, onOpen, onRead, onClose, onMenu, now = () => Date.now() / 1000}) {
+  function createList({document, onOpen, onDismiss, onClose, onMenu, now = () => Date.now() / 1000}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     const button = (text, cls, fn, label) => {
       const b = el("button", cls, text); b.type = "button";
@@ -546,9 +547,9 @@ const WorkingSet = (() => {
       if (at) stamp.title = (place === "attention" ? "Arrived " : "Last active ") + new Date(at * 1000).toLocaleString();
       li.append(stamp);
       const actions = el("span", "tl-actions");
-      if (unread && onRead) {
-        const read = button("Mark read", "tl-action", () => onRead(t), "Mark read · " + t.title);
-        read.dataset.thread = t.thread_id; read.dataset.action = "read"; actions.append(read);
+      if (onDismiss && grouping.actionFor(t) === "dismiss") {
+        const dismiss = button("Dismiss", "tl-action", () => onDismiss(t), "Dismiss response · " + t.title);
+        dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; actions.append(dismiss);
       }
       if (onMenu) {
         const more = button("…", "tl-action tl-icon", event => onMenu(t, more, event), "Thread options · " + t.title);

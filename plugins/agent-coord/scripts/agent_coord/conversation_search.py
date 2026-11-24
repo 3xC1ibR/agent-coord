@@ -311,8 +311,15 @@ def search_metrics(store, *, refresh_coverage=True):
             result[operation] = {key: value for key, value in values.items() if key != "samples_ms"}
             result[operation]["p50_ms"] = samples[(len(samples) - 1) // 2]
             result[operation]["p95_ms"] = samples[min(len(samples) - 1, int(len(samples) * .95))]
-    from .conversation_substrings import metrics as substring_metrics
-    result["substring_index"] = substring_metrics(store, refresh_coverage=refresh_coverage)
+    from .search_store import active_search
+    external = active_search(store)
+    if external is not None:
+        result["substring_index"] = {"supported": True, "state": "active", "backend": "search.sqlite3"}
+        if refresh_coverage:
+            result["substring_index"].update(external.coverage(wait=False))
+    else:
+        from .conversation_substrings import metrics as substring_metrics
+        result["substring_index"] = substring_metrics(store, refresh_coverage=refresh_coverage)
     return result
 
 

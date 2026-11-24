@@ -67,6 +67,31 @@ class SendWorkTests(unittest.TestCase):
         with self.assertRaisesRegex(CoordinationError, "different input"):
             send_work.submit(self.runtime, self.body(message="Another request"))
 
+    def test_explicit_workspace_member_can_receive_work_in_another_repository(self):
+        launch = Path(self.root) / "launch"
+        execution = Path(self.root) / "execution"
+        for directory in (launch, execution):
+            (directory / ".git").mkdir(parents=True)
+        group = self.store.threads.organization.create_project("Release", str(launch))
+        target = self.sessions.create({"cwd": str(execution), "project_id": group["id"]})["session"]["thread_id"]
+        request = self.body(cwd=str(launch), destination={"kind": "thread", "id": target}, project_id=group["id"])
+        accepted = send_work.submit(self.runtime, request)["receipt"]
+        self.assertTrue(self.runtime.process_once())
+        self.sessions.queue._dispatch(target)
+        self.assertEqual(self.runtime.get(accepted["id"])["state"], "accepted")
+        self.assertEqual(self.sessions._record(target)["cwd"], str(execution))
+        self.store.threads.update(target, project_id=None)
+        replay = send_work.submit(self.runtime, request)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["receipt"]["id"], accepted["id"])
+        with self.assertRaisesRegex(CoordinationError, "Choose a normal conversation"):
+            send_work.submit(self.runtime, {**request, "requestId": "new"})
+        self.store.threads.update(target, project_id=group["id"])
+        scoped = BrowserSessions(self.store, str(launch), rpc_factory=FakeCodex)
+        self.addCleanup(scoped.close)
+        with self.assertRaisesRegex(CoordinationError, "not found in this workspace"):
+            send_work.submit(scoped.dispatch, {**request, "requestId": "out-of-scope"})
+
     def test_busy_thread_queues_without_steering(self):
         self.sessions.send(self.target, {"message": "Current task"})
         self.send(); self.sessions.queue._dispatch(self.target)

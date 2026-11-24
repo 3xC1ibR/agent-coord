@@ -43,7 +43,7 @@ function setup({data = new Map(), broken = false, onGroupChange} = {}) {
   const win = {performance: {now: () => timestamp}, setTimeout: f => { timers.set(++counter, f); return counter; }, clearTimeout: n => timers.delete(n),
     ResizeObserver: class { constructor(f) { this.callback = f; observers.push(this); } observe() {} disconnect() { this.disconnected = true; } }};
   const host = new Element("section"); host.hidden = false; doc.body.append(host);
-  const opened = [], read = [], dismissed = [], rendered = [];
+  const opened = [], dismissed = [], rendered = [];
   const ui = WorkingSet.create({document: doc, window: win,
     storage: {getItem(k) { if (broken) throw Error(); return data.get(k); }, setItem(k, v) { if (broken) throw Error(); data.set(k, v); }},
     isActive: () => enabled,
@@ -52,7 +52,7 @@ function setup({data = new Map(), broken = false, onGroupChange} = {}) {
       const b = new Element("button"); b.className = "session"; b.dataset.thread = t.thread_id; b.textContent = t.title; b.onclick = () => opened.push(t.thread_id);
       card.append(b); rendered.push([t.thread_id, needs]); return card;
     },
-    onOpen: id => opened.push(id), onRead: t => read.push(t.thread_id), onDismiss: t => dismissed.push(t.thread_id), onGroupChange});
+    onOpen: id => opened.push(id), onDismiss: t => dismissed.push(t.thread_id), onGroupChange});
   const render = (threads, options = {}) => ui.render(threads, host, {workspace: "/work", ...options});
   const key = (value, target = doc.body, extra = {}) => { const e = {key: value, target, preventDefault() { this.prevented = true; }, ...extra}; doc.events.keydown(e); return e; };
   const page = () => host.querySelectorAll(".ws-page").find(p => p.attrs["aria-hidden"] === "false");
@@ -60,7 +60,7 @@ function setup({data = new Map(), broken = false, onGroupChange} = {}) {
   const selectLevel = n => host.querySelectorAll(".ws-level")[n].onclick();
   const selectGroup = key => host.querySelectorAll(".ws-cell").find(cell => cell.title.startsWith(key + " · ") && cell.dataset.level === page().dataset.level).onclick();
   const event = extra => ({target: page(), deltaX: 0, deltaY: 0, preventDefault() { this.prevented = true; }, ...extra});
-  return {ui, doc, host, data, observers, rendered, opened, read, dismissed, render, key, page, ids, selectLevel, selectGroup, event,
+  return {ui, doc, host, data, observers, rendered, opened, dismissed, render, key, page, ids, selectLevel, selectGroup, event,
     advance: n => { timestamp += n; }, enable: value => { enabled = value; }};
 }
 
@@ -88,7 +88,7 @@ test("group IDs distinguish equal names, children inherit root groups, missing p
   assert.equal(groups.find(g => g.key === "group:two").levels.flat().length, 1);
   assert.equal(groups.slice(1).flatMap(g => g.levels.flat()).length, list.length);
 });
-test("child findings stay in Attention after reading until dismissed", () => {
+test("opening child findings clears Attention when the displayed receipts are acknowledged", () => {
   const c = setup(), parent = thread("parent", {project_id: "evaluations", project_name: "Evaluations"});
   const child = thread("child", {creation_mode: "orchestration", created_by_thread_id: "parent", response_state: "update",
     attention_reason: "findings", needs_attention: true, unread_result: true, unhandled_response: true});
@@ -96,23 +96,25 @@ test("child findings stay in Attention after reading until dismissed", () => {
   assert.deepEqual(c.ids(), ["child"]);
   c.selectLevel(1); assert.deepEqual(c.ids(), ["child"]); c.selectLevel(0);
   c.selectGroup("Evaluations"); assert.deepEqual(c.ids(), ["child"]);
-  c.render([parent, {...child, unread_result: false}]); assert.deepEqual(c.ids(), ["child"]);
-  c.selectLevel(1); assert.deepEqual(c.ids(), []); c.selectLevel(0);
-  c.page().querySelector('[data-action="dismiss"]').onclick({stopPropagation() {}}); assert.deepEqual(c.dismissed, ["child"]);
+  assert.equal(c.page().querySelector('[data-action="dismiss"]'), null);
+  c.page().querySelector(".session").onclick(); assert.deepEqual(c.opened, ["child"]);
   c.render([parent, {...child, unread_result: false, unhandled_response: false, needs_attention: false}]);
-  assert.deepEqual(c.ids(), []); c.selectLevel(2); assert.deepEqual(c.ids().sort(), ["child", "parent"]);
+  assert.deepEqual(c.ids(), []);
+  c.selectLevel(1); assert.deepEqual(c.ids(), []);
+  c.selectLevel(2); assert.deepEqual(c.ids().sort(), ["child", "parent"]);
 });
-test("attention sorts all classifications by recent activity and keeps read responses until dismissal", () => {
+test("attention sorts by severity ahead of recency and offers Dismiss for a saved review", () => {
   const c = setup(), items = [
-    thread("old-blocker", {status: "needs input", turn_started_at: 100}),
+    thread("old-approval", {status: "needs input", turn_started_at: 100}),
     thread("new-findings", {unhandled_response: true, unread_result: true, response_classification: classified("findings"), turn_completion: {completed_at: 300}}),
     thread("middle-review", {unhandled_response: true, response_classification: classified("review"), turn_completion: {completed_at: 200}}),
     thread("pinned-old", {pinned: true, unhandled_response: true, response_classification: classified("done"), turn_completion: {completed_at: 150}})];
-  c.render(items); assert.deepEqual(c.ids(), ["new-findings", "middle-review", "pinned-old", "old-blocker"]);
-  c.page().querySelector('[data-action="read"]').onclick(); assert.deepEqual(c.read, ["new-findings"]);
-  c.render(items.map(t => t.thread_id === "new-findings" ? {...t, unread_result: false} : t));
-  assert.deepEqual(c.ids(), ["new-findings", "middle-review", "pinned-old", "old-blocker"]);
-  c.page().querySelector('[data-action="dismiss"]').onclick({stopPropagation() {}}); assert.deepEqual(c.dismissed, ["new-findings"]);
+  c.render(items); assert.deepEqual(c.ids(), ["middle-review", "old-approval", "new-findings", "pinned-old"]);
+  assert.equal(c.page().querySelector('[data-action="read"]'), null);
+  const controls = c.page().querySelectorAll('[data-action="dismiss"]');
+  assert.deepEqual(controls.map(control => control.dataset.thread), ["middle-review"]);
+  controls[0].onclick({stopPropagation() {}});
+  assert.deepEqual(c.dismissed, ["middle-review"]);
 });
 test("empty attention columns remain visible, and running work takes precedence over prior input", () => {
   const c = setup(); c.render([]);
@@ -192,12 +194,11 @@ test("due reminders and new Later activity remain visible in Attention", () => {
   assert.equal(WorkingSet.levelOf({...later, needs_attention: false}), 2);
   assert.equal(WorkingSet.levelOf({...reminder, snooze_due: false, needs_attention: false}), 2);
 });
-test("a response remains in Attention when read and leaves when handled", () => {
+test("a running response remains visible when new results are acknowledged on open", () => {
   const c = setup(), answer = thread("question", {unread_result: true, unhandled_response: true, response_classification: classified("findings")});
   c.render([{...answer, status: "running", response_state: "working"}]); assert.deepEqual(c.ids(), ["question"]);
   c.render([answer]); assert.deepEqual(c.ids(), ["question"]);
-  c.page().querySelector('[data-action="read"]').onclick(); assert.deepEqual(c.read, ["question"]);
-  c.render([{...answer, unread_result: false}]); assert.deepEqual(c.ids(), ["question"]);
+  c.page().querySelector(".session").onclick(); assert.deepEqual(c.opened, ["question"]);
   c.render([{...answer, unread_result: false, unhandled_response: false}]); assert.deepEqual(c.ids(), []);
   c.selectLevel(2); assert.deepEqual(c.ids(), ["question"]);
 });
@@ -233,7 +234,7 @@ test("fresh visits start at All groups / Attention; each child appears independe
 });
 test("read receipts move responses to Idle without changing phase or dismissing required input", () => {
   const c = setup(), t = thread("findings", {unread_result: true}); c.render([t]); c.selectLevel(1);
-  c.page().querySelector(".ws-read").onclick(); assert.deepEqual(c.read, ["findings"]);
+  c.page().querySelector(".session").onclick(); assert.deepEqual(c.opened, ["findings"]);
   c.render([{...t, unread_result: false}]); assert.deepEqual(c.ids(), []);
   c.selectLevel(2); assert.deepEqual(c.ids(), ["findings"]);
   assert.equal(c.page().querySelector(".ws-section-title").querySelector("h4").textContent, "Investigating");
@@ -575,23 +576,26 @@ function listSetup({data = new Map()} = {}) {
   const calls = [], host = new Node("section");
   const ui = WorkingSet.createList({document: doc, now: () => NOW,
     storage: {getItem: k => data.get(k), setItem: (k, v) => data.set(k, v)},
-    onOpen: id => calls.push(["open", id]), onRead: t => calls.push(["read", t.thread_id]), onClose: t => calls.push(["close", t.thread_id]),
+    onOpen: id => calls.push(["open", id]), onDismiss: t => calls.push(["dismiss", t.thread_id]), onClose: t => calls.push(["close", t.thread_id]),
     onMenu: (t, anchor) => calls.push(["menu", t.thread_id, anchor.dataset.action]), onGroupChange: id => calls.push(["group", id])});
   const rows = name => host.querySelectorAll(".tl-section").find(s => s.dataset.section === name)?.querySelectorAll(".tl-row").map(r => r.dataset.thread) || [];
   const control = (id, action) => host.querySelectorAll("[data-thread]").find(n => n.dataset.thread === id && n.dataset.action === action);
   return {ui, host, calls, rows, control, data, render: (threads, options = {}) => ui.render(threads, host, {workspace: "/work", revision: Math.random(), ...options})};
 }
-test("list rows open, read, close and open the thread menu without opening the row", () => {
+test("List shows Dismiss for a sticky response and opens informational responses directly", () => {
   const c = listSetup();
   c.render([listThread("reply", {unread_result: true, attention_since: NOW - 60, checkpoint: {id: 1, summary: "Done"}}),
-    listThread("quiet", {checkpoint: {id: 2, summary: "Earlier"}}), listThread("busy", {status: "running", response_state: "working"})]);
-  assert.deepEqual([c.rows("attention"), c.rows("working"), c.rows("idle")], [["reply"], ["busy"], ["quiet"]]);
-  assert.equal(c.control("quiet", "read"), undefined);
-  for (const action of ["read", "more", "close"]) c.control("reply", action).onclick({stopPropagation() {}});
+    listThread("quiet", {checkpoint: {id: 2, summary: "Earlier"}}), listThread("busy", {status: "running", response_state: "working"}),
+    listThread("review", {response_state: "action", attention_reason: "review", can_handle_response: true})]);
+  assert.deepEqual([c.rows("attention"), c.rows("working"), c.rows("idle")], [["review", "reply"], ["busy"], ["quiet"]]);
+  assert.equal(c.control("reply", "read"), undefined);
+  assert.equal(c.control("reply", "dismiss"), undefined);
+  c.control("review", "dismiss").onclick({stopPropagation() {}});
+  for (const action of ["more", "close"]) c.control("reply", action).onclick({stopPropagation() {}});
   c.control("reply", "open").onclick({stopPropagation() {}});
   const row = c.host.querySelectorAll(".tl-row").find(r => r.dataset.thread === "quiet");
   row.onclick({target: row.children[0]}); row.onclick({target: c.control("quiet", "more")});
-  assert.deepEqual(c.calls, [["read", "reply"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
+  assert.deepEqual(c.calls, [["dismiss", "review"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
 });
 test("list agents start collapsed beneath their parent; an approval gives the agent its own Attention row", () => {
   const c = listSetup();
@@ -802,27 +806,37 @@ test("Idle shows fifty rows until asked, and empty threads collapse into one con
   c.render([...many, listThread("blank")]);
   assert.equal(c.rows("idle").length, 55); assert.deepEqual(c.rows("empty"), ["blank"]);
 });
-test("production integration renders the list beside Focus with the shared thread menu", async () => {
+test("production List uses the shared thread menu and explicit dismissal receipts", async () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const nodes = {"atlas-overview": {hidden: false}, "working-set-overview": {hidden: false}, "thread-list-overview": {hidden: true},
     overview: {classList: {toggle() {}}}, welcome: {hidden: false}, view: {value: "active"}};
   let config, options; const calls = [];
-  const c = {state: {overviewLayout: {mode: "list"}, projectCwd: "/work", listSignature: "rev",
+  const c = {state: {overviewLayout: {mode: "list"}, projectCwd: "/work", listSignature: "rev", updatingThreads: new Set(),
       threadActions: {showMenu: (...args) => calls.push(["menu", ...args])}},
     document: {}, window: {}, savedViews: {activeId: "all", openGroup: id => calls.push(["group", id])}, $: id => nodes[id],
     WorkingSet: {createList(value) { config = value; return {render(t, host, opts) { options = opts; }}; }},
-    threadMenuItems: t => [{label: "Pin " + t.thread_id}], action: f => f(), select: id => calls.push(["open", id]),
-    toggleThreadClosed: t => calls.push(["close", t.thread_id]), threadPath: id => "threads/" + id,
-    api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
+    threadMenuItems(t, context) { assert.equal(context.inbox, true); return [{label: "Pin " + t.thread_id}]; },
+    action: f => f(), select: id => calls.push(["open", id]), toggleThreadClosed: t => calls.push(["close", t.thread_id]),
+    updateThreadAttention: async (t, patch) => calls.push(["dismiss", t.thread_id, {...patch}]),
+    refreshList: async () => calls.push(["refresh"])};
+  c.state.threadActions.notify = (id, message) => calls.push(["notify", id, message]);
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
-  vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function markThreadHandled("), source.indexOf("async function markThreadRead(")), c);
   c.renderOverviewLayout([]);
   assert.equal(nodes["thread-list-overview"].hidden, false); assert.equal(nodes["working-set-overview"].hidden, true); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.selectedGroup, null); assert.equal(options.placement, "active"); assert.equal(options.revision, "rev");
-  const t = thread("a", {checkpoint: {id: 8}, turn_completion: {id: 12}});
-  config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onRead(t);
+  c.savedViews.activeId = "group-fabrication";
+  c.renderOverviewLayout([], [{id: "inspection-schedule"}]);
+  assert.equal(options.selectedGroup, "fabrication");
+  assert.equal(nodes.overview.hidden, false, "scheduled prompts remain visible beside List");
+  const t = thread("a", {can_handle_response: true, checkpoint: {id: 8}, turn_completion: {id: 12}});
+  config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onDismiss(t);
   assert.deepEqual(calls.slice(0, 3), [["open", "a"], ["close", "a"], ["menu", "anchor", "Thread a", [{label: "Pin a"}], "event"]]);
-  assert.equal(JSON.stringify(calls[3]), JSON.stringify(["threads/a", {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}]));
+  assert.deepEqual(calls.slice(3), [
+    ["dismiss", "a", {handled: true, handled_checkpoint_id: 8, handled_completion_id: 12}],
+    ["notify", "dismiss:a", "Update dismissed · Thread remains in Now"],
+    ["refresh"],
+  ]);
 });
 
 test("Pinned leads the inbox: every pinned thread or app agent appears once, needs-you first, then working, then recency", () => {

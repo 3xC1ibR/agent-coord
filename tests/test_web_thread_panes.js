@@ -167,7 +167,7 @@ test("tiling shortcut toggles overview while retaining resized layout, selected 
   layout.widths = [1.4, .6]; layout.heights = {0: [1.2, .8]}; shell.focus("b", false);
   let draft = {text: "Keep this", images: [{id: "image"}], scroll: 220};
   state.drafts.set("b", draft.text); state.attachments.drafts.set("b", draft.images);
-  record.api = {exportDraft: () => draft, restoreDraft: value => { draft = value; }, setActive() {}, focus() {}};
+  record.api = {exportDraft: () => draft, restoreDraft: value => { draft = value; }, setActive() {}, focus() {}, dispose() {}};
   let prevented = false;
   listeners.keydown({key: "t", code: "KeyT", ctrlKey: true, altKey: true, metaKey: true,
     preventDefault() { prevented = true; }});
@@ -189,8 +189,8 @@ test("toggle returns to the original single conversation and resyncs its edited 
   shell.tileCurrent();
   const layout = shell.layout, record = shell.records.get("a"), source = {};
   let draft = {text: "Edited in pane", images: [], scroll: 260};
-  record.frame = {contentWindow: source};
-  record.api = {exportDraft: () => draft, restoreDraft: value => { draft = value; }, setActive() {}, focus() {}};
+  record.frame = source;
+  record.api = {exportDraft: () => draft, restoreDraft: value => { draft = value; }, setActive() {}, focus() {}, dispose() {}};
   shell.draft(source, draft); shell.focus("b", false);
   await shell.toggleCurrent();
   assert.deepEqual(visits, ["a"]); assert.equal(state.selected, "a");
@@ -199,21 +199,22 @@ test("toggle returns to the original single conversation and resyncs its edited 
   doc.getElementById("message").value = "Edited outside panes";
   await shell.toggleCurrent();
   assert.equal(shell.layout, layout); assert.equal(shell.selected, "b");
-  assert.equal(draft.text, "Edited outside panes"); assert.equal(draft.scroll, 260);
+  assert.equal(record.initialDraft.text, "Edited outside panes");
+  assert.equal(record.initialDraft.scroll, 80);
 });
 
-test("toggle respects modal/send guards and view restoration returns to that view's overview", async () => {
+test("toggle respects the modal and restores that view's overview despite pending sends", async () => {
   const {shell, state, doc, visits, errors, setView} = shellFixture();
   // Tiling would copy an unaccepted send's draft into its pane.
   state.sending = new Set(["a"]);
-  assert.equal(shell.tileCurrent(), false); assert.equal(shell.active, false); assert.equal(errors.length, 1);
-  state.sending.clear();
+  assert.equal(shell.tileCurrent(), true);
+  assert.deepEqual(errors, []);
+  shell.leave();
   state.selected = "a"; shell.tileCurrent();
   doc.querySelector = () => ({});
   assert.equal(await shell.toggleCurrent(), false); assert.equal(shell.active, true);
-  doc.querySelector = () => null; state.busy = true;
-  assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 2);
-  state.busy = false;
+  doc.querySelector = () => null;
+  assert.deepEqual(errors, []);
   shell.leave(); state.selected = null; setView("second"); await shell.toggleCurrent();
   assert.equal(shell.viewId, "second");
   shell.leave(); setView("first"); shell.restoreView();
@@ -262,7 +263,7 @@ test("manual tab moves reuse live documents, drafts and scroll, including after 
   const {panes} = setup(); panes.tile("view", [thread("a"), thread("b"), thread("c")]);
   const record = panes.records.get("b"), draft = {text: "Unsent", images: [{id: "image"}], mentions: [{id: "ref"}], scroll: 260};
   record.frame = {contentWindow: {}, hidden: false};
-  record.api = {setActive() {}, focus() {}, exportDraft: () => draft};
+  record.api = {setActive() {}, focus() {}, dispose() {}, exportDraft: () => draft};
   const frame = record.frame, api = record.api;
   panes.moveThread(thread("b"), 0, "bottom");
   assertLayout(panes.layout);
@@ -321,7 +322,7 @@ test("closing the last split collapses to a normal tab and preserves draft, imag
   const draft = {text: "Unsent draft", images: [{id: "image"}], mentions: [{id: "reference"}], scroll: 272};
   let mentions;
   state.mentions = {restore: (...args) => { mentions = args; }};
-  shell.records.get("a").api = {exportDraft: () => draft, setActive() {}, focus() {}};
+  shell.records.get("a").api = {exportDraft: () => draft, setActive() {}, focus() {}, dispose() {}};
   shell.close(shell.layout.groups.findIndex(group => group.includes("b")));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(shell.active, false); assert.equal(shell.layouts.has("first"), false);
@@ -430,7 +431,7 @@ test("pane tabs expose status and unread-response indicators that follow thread 
   assert.deepEqual(indicator("answered"), {status: "reply", unread: "true"});
   // A later read marks the response seen without touching the other tabs.
   const record = shell.records.get("answered"), source = {};
-  record.frame = {contentWindow: source};
+  record.frame = source;
   shell.chrome = {querySelectorAll: () => [tabOf("answered")]};
   shell.changed(source, {...record.thread, unread_result: false});
   assert.deepEqual(indicator("answered"), {status: "reply", unread: "false"});
@@ -525,70 +526,51 @@ test("overflow tabs switch without replacing records and keyboard focus follows 
   panes.open(thread("extra")); assert.equal(panes.selected, "extra");
 });
 
-test("only owned conversation frames may attach or claim focus", () => {
+test("only panes in the current layout can claim focus", () => {
   const {panes} = setup();
   panes.tile("view", [thread("a"), thread("b")]);
-  const source = {}, calls = [];
-  const record = panes.records.get("a"); record.frame = {contentWindow: source}; record.initialDraft = {text: "draft"};
-  const api = {restoreDraft: draft => calls.push(draft), setActive: active => calls.push(active)};
-  assert.equal(panes.attach({}, api), false);
-  assert.equal(panes.attach(source, api), true);
-  assert.deepEqual(calls.slice(0, 2), [{text: "draft"}, true]);
-  assert.equal(record.initialDraft, null);
-  panes.focus("b", false); panes.focused({}); assert.equal(panes.selected, "b");
-  record.frame.hidden = true; panes.focused(source); assert.equal(panes.selected, "b");
-  record.frame.hidden = false; panes.focused(source); assert.equal(panes.selected, "a");
+  const calls = [], active = [];
+  for (const id of ["a", "b"]) panes.records.get(id).api = {
+    setActive: enabled => active.push([id, enabled]), focus: () => calls.push(id),
+  };
+  assert.equal(panes.focus("outside"), false);
+  assert.equal(panes.selected, "a");
+  assert.deepEqual(calls, []);
+  assert.equal(panes.focus("b"), true);
+  assert.deepEqual(active, [["a", false], ["b", true]]);
+  assert.deepEqual(calls, ["b"]);
 });
 
-test("explicitly opening a loading pane focuses it once after its draft is restored", () => {
+test("pane removal exports draft and disposes the in-process view once", () => {
   const {panes} = setup();
-  panes.tile("dispatcher", [thread("a")]);
-  const source = {}, record = panes.records.get("a"), calls = [];
+  panes.tile("view", [thread("a")]);
   const draft = {text: "Follow up on these findings", images: [], scroll: 120};
-  record.frame = {contentWindow: source, hidden: false}; record.initialDraft = draft;
-  const api = {restoreDraft: value => calls.push(["draft", value]),
-    setActive() {}, focus: () => calls.push(["focus"])};
-
-  assert.equal(panes.focus("a"), true);
-  assert.deepEqual(calls, [], "opening must wait for the conversation API to attach");
-  assert.equal(panes.attach(source, api), true);
-  assert.deepEqual(calls, [["draft", draft], ["focus"]]);
-  panes.attach(source, api);
-  assert.deepEqual(calls, [["draft", draft], ["focus"]], "reattaching must not repeat the original focus request");
+  const record = panes.records.get("a"), saved = [];
+  let disposed = 0;
+  panes.onDraft = (id, value) => saved.push({id, value});
+  record.frame = {};
+  record.api = {exportDraft: () => draft, dispose: () => disposed++};
+  panes.hide();
+  panes.hide();
+  assert.deepEqual(saved, [{id: "a", value: draft}]);
+  assert.equal(record.initialDraft, draft);
+  assert.equal(record.frame, null);
+  assert.equal(record.api, null);
+  assert.equal(disposed, 1);
 });
 
-test("automatic tiles never steal focus when their conversation frames attach", () => {
+test("automatic tiling and focus-free selection leave the existing input focused", () => {
   const {panes} = setup(), focused = [];
   panes.tile("dispatcher", [thread("a"), thread("b")]);
-  for (const id of ["a", "b"]) {
-    const source = {};
-    panes.records.get(id).frame = {contentWindow: source, hidden: false};
-    assert.equal(panes.attach(source, {setActive() {}, focus: () => focused.push(id)}), true);
-  }
+  for (const id of ["a", "b"]) panes.records.get(id).api = {
+    setActive() {}, focus: () => focused.push(id),
+  };
   assert.equal(panes.selected, "a");
-  assert.deepEqual(focused, [], "even the selected automatic tile leaves focus with the dispatcher input");
-});
-
-test("leaving a loading pane cancels its deferred focus when it attaches", async t => {
-  for (const destination of ["another pane", "overview"]) {
-    await t.test(destination, () => {
-      const {panes} = setup();
-      panes.tile("dispatcher", [thread("a"), thread("b")]);
-      const source = {}, record = panes.records.get("a");
-      record.frame = {contentWindow: source, hidden: false};
-      let focused = 0;
-      const api = {setActive() {}, focus: () => focused++};
-      panes.focus("a");
-      if (destination === "another pane") panes.focus("b", false);
-      else panes.hide();
-
-      assert.equal(panes.attach(source, api), true);
-      assert.equal(focused, 0, "a late-loading conversation must not pull focus back from the destination");
-      panes.show("dispatcher"); panes.focus("a", false);
-      panes.attach(source, api);
-      assert.equal(focused, 0, "the abandoned focus request must not survive a later return");
-    });
-  }
+  assert.deepEqual(focused, []);
+  panes.focus("b", false);
+  assert.deepEqual(focused, []);
+  panes.focus("a");
+  assert.deepEqual(focused, ["a"]);
 });
 
 test("workspace pane dismissal delegates visibility without closing the session or losing its draft", () => {
@@ -598,7 +580,7 @@ test("workspace pane dismissal delegates visibility without closing the session 
   const record = panes.records.get("a");
   const draft = {text: "Keep this follow-up", mentions: [{id: "reference"}], images: [{id: "image"}], scroll: 260};
   record.frame = {contentWindow: {}, hidden: false};
-  record.api = {setActive() {}, focus() {}, exportDraft: () => draft};
+  record.api = {setActive() {}, focus() {}, dispose() {}, exportDraft: () => draft};
   const frame = record.frame, api = record.api;
   panes.focus("b", false);
   panes.workspaceClose = id => {
@@ -621,44 +603,52 @@ test("workspace pane dismissal delegates visibility without closing the session 
   assert.deepEqual(panes.exportDraft("a"), draft, "reopening the tile preserves its text, images, references, and scroll position");
 });
 
-test("background conversations keep unread results until actual focus and consume shared events", async () => {
-  const vm = require("node:vm"), fs = require("node:fs");
-  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/thread-panes.js"), "utf8");
-  const requests = [], events = [], listeners = {};
-  let focused = false, pane, refreshed = 0;
-  const state = {selected: "a", detail: {work_thread: {thread_id: "a", checkpoint: {id: 2}, turn_completion: {id: 3}}},
-    attachments: {items: () => [], drafts: new Map()}, drafts: new Map()};
-  const controls = {message: {value: "Draft A"}, timeline: {scrollTop: 0, scrollHeight: 123}, composer: {hidden: false}};
-  const host = {from: () => ({}), attach: (_source, api) => { pane = api; api.setActive(true); },
-    requestList() {}, draft() {}, changed() {}, focused() {}, keydown() {}};
-  const window = {parent: {agentCoordPanes: host, dispatchEvent() {}}};
-  const document = {body: {classList: {add() {}}}, hasFocus: () => focused,
-    getElementById: id => controls[id], querySelector: () => null,
-    addEventListener: (type, callback) => { listeners[type] = callback; }};
-  const threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
-  const c = vm.createContext({window, document, location: {hash: "#a"}, Event, threadViews,
-    setTimeout, console, EventSource: class { constructor() { throw new Error("Pane opened a duplicate event stream"); } }});
-  vm.runInContext(source, c);
-  await c.setupPaneConversation({state, document, api: async (path, body) => requests.push({path, body}),
-    select: async () => {}, refreshDetail: async () => {}, refreshThread: async () => {},
-    applyEvent: event => events.push(event), scheduleDetail: () => refreshed++, renderStatus() {}, showError: error => { throw error; }});
-  assert.equal(requests.length, 0);
-  focused = true; pane.setActive(true); await new Promise(resolve => setImmediate(resolve));
-  assert.equal(requests.length, 1); assert.equal(requests[0].body.seen_completion_id, 3);
-  pane.setActive(true); assert.equal(requests.length, 1);
-  focused = false; state.detail.work_thread.turn_completion.id = 4; pane.setActive(true);
-  assert.equal(requests.length, 1);
-  pane.receive({events: [{method: "item/agentMessage/delta", params: {threadId: "a"}}], completions: [{thread_id: "a"}]});
-  assert.equal(events.length, 1); assert.equal(refreshed, 1);
-  pane.receive({events: [], approvals: [{thread_id: "other", request_key: "unrelated"}]});
-  assert.equal(refreshed, 1, "another conversation's approval does not refresh this pane");
-  pane.receive({events: [], approvals: [{thread_id: "a", request_key: "approval"}]});
-  assert.equal(refreshed, 2, "approval notifications recover controls even without their item event");
-  assert.deepEqual(JSON.parse(JSON.stringify(pane.exportDraft())), {text: "Draft A", mentions: [], images: [], scroll: 123});
+test("background in-process panes acknowledge only when focused and consume shared events", async () => {
+  const vm = require("node:vm");
+  const {loadWebModule} = require("./web_application_fixture.js");
+  const reads = [], frames = [];
+  let focused = false, painted = 0, refreshed = 0, scroll = 123;
+  const c = vm.createContext({
+    document: {hasFocus: () => focused}, threadPath: id => "threads/" + id,
+    api: async (path, body) => reads.push({path, body}),
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    showError: error => { throw error; },
+    EventSource: class { constructor() { throw new Error("Pane opened a duplicate event stream"); } },
+  });
+  loadWebModule(c, "conversation-pane.js");
+  const pane = vm.runInContext("Object.create(ConversationPane.prototype)", c);
+  const work = {thread_id: "a", checkpoint: {id: 2}, turn_completion: {id: 3}};
+  Object.assign(pane, {id: "a", input: {value: "Draft A"},
+    images: {items: () => []}, attachButton: {}, imageList: {replaceChildren() {}},
+    view: {detail: {work_thread: work},
+      timelineScroll: {position: () => scroll, restore: value => { scroll = value; }}},
+    workspace: {attachments: {items: () => [], drafts: new Map()}, drafts: new Map()},
+    render() { painted++; }, scheduleRefresh() { refreshed++; },
+  });
+  pane.setActive(true);
+  assert.equal(reads.length, 0);
+  focused = true; pane.setActive(true);
+  assert.equal(reads.length, 1);
+  assert.equal(reads[0].body.seen_completion_id, 3);
+  pane.setActive(true);
+  assert.equal(reads.length, 1);
+  focused = false; work.turn_completion.id = 4; pane.setActive(true);
+  assert.equal(reads.length, 1);
+  pane.receive({events: [{method: "item/agentMessage/delta", params: {threadId: "a"}}],
+    completions: [{thread_id: "a"}]});
+  frames.shift()();
+  assert.equal(painted, 1);
+  assert.equal(refreshed, 1);
+  pane.receive({approvals: [{thread_id: "other"}]});
+  assert.equal(refreshed, 1);
+  pane.receive({approvals: [{thread_id: "a"}]});
+  assert.equal(refreshed, 2);
+  assert.equal(pane.exportDraft().text, "Draft A");
+  assert.equal(pane.exportDraft().scroll, 123);
   pane.restoreDraft({text: "New", images: [], scroll: null});
-  assert.equal(controls.timeline.scrollTop, 123, "new panes retain the transcript's initial scroll position");
+  assert.equal(scroll, 123);
   pane.restoreDraft({text: "Existing", images: [], scroll: 0});
-  assert.equal(controls.timeline.scrollTop, 0, "an explicitly saved position at the top is restored");
+  assert.equal(scroll, 0);
 });
 
 test("explicit overview links leave old tiles; Back restores tiling only for a tiled history entry", async () => {

@@ -168,7 +168,7 @@ class CoordinationMetrics:
             environment = os.environ.copy()
             environment["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
             environment["TIKTOKEN_CACHE_DIR"] = os.environ.get("TIKTOKEN_CACHE_DIR", str(self.root_dir / "tokenizer-cache"))
-            command = [self._interpreter(), "-m", "agent_coord.coordination_metrics_worker",
+            command = [self._interpreter(), "-B", "-m", "agent_coord.coordination_metrics_worker",
                        "--state-dir", str(self.state_dir), "--codex-home", str(self.codex_home),
                        "--max-seconds", str(PASS_SECONDS), "--max-bytes", str(PASS_BYTES)]
             if self.cwd:

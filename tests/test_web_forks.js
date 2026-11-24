@@ -143,13 +143,16 @@ test("sidebar relationships contain origin and every direct fork with current ti
 test("fork metadata and title changes invalidate cached timeline nodes", () => {
   const c = harness();
   vm.runInContext(source.slice(source.indexOf("function sameConversation("), source.indexOf("async function select(")), c);
-  const detail = {thread: {turns: []}, work_thread: {client: "claude", browser_session: true}};
+  const detail = {history_revision: 1, stream_seq: 0, metadata_revision: 1,
+    thread: {turns: []}, work_thread: {client: "claude", browser_session: true}};
   assert.equal(c.sameConversation(detail, structuredClone(detail)), true);
   const changed = structuredClone(detail);
   changed.work_thread.forked_sessions = [fork("child")];
+  changed.metadata_revision++;
   assert.equal(c.sameConversation(detail, changed), false);
   const renamed = structuredClone(changed);
   renamed.work_thread.forked_sessions[0].title = "New fork title";
+  renamed.metadata_revision++;
   assert.equal(c.sameConversation(changed, renamed), false);
 });
 

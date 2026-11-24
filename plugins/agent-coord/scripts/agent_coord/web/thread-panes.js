@@ -152,7 +152,7 @@ class ThreadPanes {
   hide() {
     this.endDrag();
     this.active = false; this.container.hidden = true;
-    for (const record of this.records.values()) record.api?.setActive(false);
+    for (const record of this.records.values()) this.unmount(record);
   }
   record(thread) {
     let record = this.records.get(thread.thread_id);
@@ -162,33 +162,21 @@ class ThreadPanes {
   }
   ensureFrame(record) {
     if (record.frame) return;
-    const frame = record.frame = this.el("iframe", "conversation-pane-frame");
-    frame.title = "Conversation · " + record.thread.title;
-    const query = new URLSearchParams(this.search); query.set("pane", "1");
-    frame.src = "/?" + query + "#" + encodeURIComponent(record.thread.thread_id);
-    frame.hidden = true;
-    // Frames stay in the deck for their lifetime: moving an iframe between DOM
-    // parents reloads it and loses the draft/selection/scroll state.
-    this.deck.append(frame);
+    record.frame = this.el("section", "conversation-pane-frame pane-document");
+    record.frame.setAttribute("aria-label", "Conversation · " + record.thread.title);
+    this.deck.append(record.frame);
+    record.api = new ConversationPane(record.frame, this, record, this.workspace);
+    record.initialDraft = null;
   }
-  attach(source, api) {
-    const record = [...this.records.values()].find(r => r.frame?.contentWindow === source);
-    if (!record) return false;
-    record.api = api;
-    if (record.initialDraft) { api.restoreDraft(record.initialDraft); record.initialDraft = null; }
-    api.setActive(this.active && this.selected === record.thread.thread_id && this.document.hasFocus());
-    this.position();
-    if (record.focusOnAttach && this.active && this.selected === record.thread.thread_id && !record.frame.hidden) api.focus();
-    delete record.focusOnAttach;
-    return true;
+  unmount(record) {
+    if (!record.api) return;
+    record.initialDraft = record.api.exportDraft();
+    this.onDraft?.(record.thread.thread_id, record.initialDraft);
+    record.api.dispose(); record.api = null; record.frame = null;
   }
-  from(source) { return [...this.records.values()].find(r => r.frame?.contentWindow === source); }
-  focused(source) {
-    const record = this.from(source);
-    if (record && this.active && !record.frame.hidden) this.focus(record.thread.thread_id, false);
-  }
+  from(source) { return source && [...this.records.values()].find(r => r.frame === source); }
   changed(source, thread) {
-    const record = this.from(source);
+    const record = this.from(source) || this.records.get(thread.thread_id);
     if (!record || thread.thread_id !== record.thread.thread_id) return;
     record.thread = thread;
     for (const button of this.chrome.querySelectorAll("[data-pane-thread]")) {
@@ -450,7 +438,7 @@ class ThreadPanes {
       pane.classList.toggle("pane-focused", id === this.selected);
     }
     for (const [id, record] of this.records) {
-      if (record.frame) record.frame.hidden = !visible.has(id);
+      if (!visible.has(id)) { this.unmount(record); continue; }
       record.api?.setActive(visible.has(id) && id === this.selected && this.document.hasFocus());
     }
   }
@@ -515,6 +503,7 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
       notifications()?.syncFocus(); window.dispatchEvent(new Event("agent-coord-pane-state"));
     },
     onExit: () => goHome(), onTile: () => shell.toggleCurrent(), onError: showError});
+  shell.workspace = state;
   window.agentCoordPanes = shell;
   shell.requestList = options => refreshList(options).catch(showError);
   shell.openThread = async (id, {messageId} = {}) => {
@@ -554,15 +543,8 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   // its text here, and an image being read has no URL yet: copying either
   // could send the message twice or lose the image. Other conversations keep
   // their drafts in this window, so their sends and attachments can continue.
-  function canChangeLayout(ids = []) {
-    if (document.querySelector("dialog[open]") || shell.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")) return false;
-    // A new conversation is identified by its draft until creation finishes.
-    const moving = [...(state.sending || [])].some(key => typeof key !== "string" || ids.includes(key));
-    if (state.busy || moving || ids.some(id => state.attachments.pending(id))) {
-      showError(new Error("Wait for this conversation's send or image attachment to finish before tiling it."));
-      return false;
-    }
-    return true;
+  function canChangeLayout() {
+    return !document.querySelector("dialog[open]");
   }
   function syncDrafts() {
     for (const id of shell.layout.order) {
@@ -726,112 +708,4 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
   return shell;
 }
 
-async function setupPaneConversation({state, document, api, select, refreshDetail, refreshThread, applyEvent, scheduleDetail, renderStatus, showError}) {
-  const host = window.parent.agentCoordPanes;
-  if (!host?.from(window)) throw new Error("Open this conversation from Tile threads in the workspace.");
-  const $ = id => document.getElementById(id);
-  document.body.classList.add("pane-document");
-  let active = false, seen = "", restoredScroll = null;
-  const exportDraft = () => ({text: $("message").value, mentions: state.mentions?.snapshot() || [], images: state.attachments.items(),
-    scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop, following: state.timelineScroll?.following});
-  const markSeen = async () => {
-    const work = state.detail?.work_thread;
-    if (!active || !document.hasFocus() || !work) return;
-    const signature = JSON.stringify([work.thread_id, work.checkpoint?.id, work.turn_completion?.id]);
-    if (signature === seen) return;
-    seen = signature;
-    try { await api("threads/" + encodeURIComponent(work.thread_id), {seen: true,
-      seen_checkpoint_id: work.checkpoint?.id || 0, seen_completion_id: work.turn_completion?.id || 0});
-      host.requestList();
-    } catch (error) { seen = ""; showError(error); }
-  };
-  const pane = window.agentCoordPane = {
-    exportDraft,
-    canTransfer: () => !state.busy && !state.sending?.size && !state.attachments.pending() && !document.querySelector("dialog[open]"),
-    setTransferLock: locked => {
-      state.transferLocks ||= new Set();
-      if (locked) state.transferLocks.add(state.selected); else state.transferLocks.delete(state.selected);
-      renderStatus();
-    },
-    focusMessage: id => window.agentCoordFocusMessage?.(id),
-    saveDraft: () => {
-      if (!state.selected) return;
-      host.draft(window, exportDraft());
-    },
-    updateStatus: () => {
-      if (state.detail?.work_thread) host.changed(window, state.detail.work_thread);
-      window.parent.dispatchEvent(new Event("agent-coord-pane-state"));
-    },
-    restoreDraft: draft => {
-      $("message").value = draft.text || ""; state.drafts.set(state.selected, draft.text || "");
-      state.attachments.drafts.set(state.selected, draft.images || []);
-      state.mentions?.restore(state.selected, draft.text || "", draft.mentions || []);
-      if (Number.isFinite(draft.scroll)) {
-        restoredScroll = draft.scroll;
-        if (state.timelineScroll) state.timelineScroll.restore(draft.scroll);
-        else $("timeline").scrollTop = draft.scroll;
-      }
-      renderStatus(); pane.saveDraft();
-    },
-    setActive: value => { active = value; markSeen(); },
-    focus: () => { if (!document.querySelector("dialog[open]")) ($("message").disabled || $("composer").hidden ? $("session-name") : $("message")).focus(); },
-    receive: batch => {
-      const approvals = batch.approvals?.some(event => event.thread_id === state.selected);
-      if (approvals) {
-        const entry = state.conversations?.get(state.selected);
-        if (entry) entry.revision++;
-      }
-      if (batch.reset || approvals || batch.completions?.some(event => event.thread_id === state.selected)) scheduleDetail();
-      for (const event of batch.events || []) {
-        if (event.method === "bridge/disconnected") { showError(new Error("Codex disconnected. Restart Ribbon Field to reopen saved sessions.")); if (state.detail && state.detail.work_thread?.client === "codex") state.detail.running = false; renderStatus(); }
-        else applyEvent(event);
-      }
-    },
-    refresh: () => refreshThread().then(markSeen).catch(showError),
-  };
-  state.attachments.onChange = () => { renderStatus(); pane.saveDraft(); };
-  // A window with a focused iframe dispatches OS focus changes to that child.
-  // Let the shell distinguish those from ordinary focus moves between panes.
-  if (state.activity) {
-    window.addEventListener("focus", () => state.activity.windowFocused?.());
-    window.addEventListener("blur", () => state.activity.windowBlurred?.());
-  }
-  document.addEventListener("focusin", () => host.focused(window));
-  document.addEventListener("pointerdown", event => {
-    host.focused(window);
-    if (event.isTrusted && active && !document.hidden && document.hasFocus()) {
-      state.activity?.setForeground(true); state.activity?.interact(state.selected, "navigation");
-    }
-  }, true);
-  document.addEventListener("input", () => pane.saveDraft());
-  document.addEventListener("click", event => {
-    const link = event.target.closest("a[href]");
-    if (!link?.getAttribute("href")?.startsWith("agentcoord:") || event.button !== 0) return;
-    event.preventDefault(); window.parent.agentCoordNavigate?.(link.getAttribute("href"));
-  });
-  document.addEventListener("keydown", event => {
-    if (event.isTrusted && active && !document.hidden && document.hasFocus()) {
-      state.activity?.setForeground(true); state.activity?.interact(state.selected, "focus");
-    }
-    if (!document.querySelector("dialog[open]")) host.keydown(event);
-  }, true);
-  const id = decodeURIComponent(location.hash.slice(1));
-  await select(id);
-  // Booting background panes must not consume unread results or steal focus.
-  host.attach(window, pane);
-  window.parent.agentCoordDesktop?.bindPane?.(document);
-  await refreshDetail();
-  // The first transcript can render before the frame has its final size. Start
-  // at the latest message unless this conversation already had a saved position.
-  if (state.timelineScroll) {
-    if (restoredScroll !== null) state.timelineScroll.restore(restoredScroll);
-    else state.timelineScroll.latest();
-  } else $("timeline").scrollTop = restoredScroll ?? $("timeline").scrollHeight;
-  const record = host.from(window);
-  if (record?.messageTarget != null) {
-    pane.focusMessage(record.messageTarget);
-    delete record.messageTarget;
-  }
-}
-
-if (typeof module !== "undefined" && module.exports) module.exports = {paneLayout, ThreadPanes, setupPaneShell, setupPaneConversation};
+if (typeof module !== "undefined" && module.exports) module.exports = {paneLayout, ThreadPanes, setupPaneShell};

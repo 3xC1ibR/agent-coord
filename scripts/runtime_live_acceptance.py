@@ -58,7 +58,7 @@ class Acceptance:
         fixture = REPO / "tests/fixtures/runtime_live_provider.py"
         for provider in ("codex", "claude"):
             executable = self.bin / provider
-            executable.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " +
+            executable.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " -B " +
                                   shlex.quote(str(fixture)) + " " + provider + ' "$@"\n')
             executable.chmod(0o700)
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]

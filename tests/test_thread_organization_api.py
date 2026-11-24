@@ -342,7 +342,8 @@ class ThreadOrganizationTests(unittest.TestCase):
         self.assertIn(other, request("organization")["projects"])
         self.assertNotIn(group, request("organization")["projects"])
         for id, original in before.items():
-            self.assertEqual(request("threads/" + id), {**original, "project_id": None, "project_name": None})
+            self.assertEqual(request("threads/" + id), {**original, "project_id": None, "project_name": None,
+                                                       "project_launch_cwd": None})
         self.assertEqual(self.sessions.rpc.calls, calls)
 
     def test_group_removal_keeps_scheduled_work_usable_without_the_group(self):

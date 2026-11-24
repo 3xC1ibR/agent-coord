@@ -222,9 +222,13 @@
       this.renderList();
       if (!this.$("schedules-dialog").open) this.$("schedules-dialog").showModal();
       await this.refresh();
+      this.setEventsConnected(!!this.connected?.());
+    }
+    setEventsConnected(connected) {
       clearInterval(this.timer);
+      if (connected || !this.$("schedules-dialog").open) return;
       this.timer = setInterval(() => {
-        if (this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
+        if (!this.connected?.() && this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
       }, 5000);
     }
 

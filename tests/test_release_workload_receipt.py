@@ -58,9 +58,10 @@ class ReleaseWorkloadTests(unittest.TestCase):
                           "provider_deliveries": 1}],
         }
 
-    def check_private(self, report):
+    def check_private(self, report, *, stable_origin=False):
         gate.verify_report(report, candidate=self.candidate, version="1.2.3", build="4",
-                           architecture="arm64", digest="e"*64, snapshot_bytes=9045114880)
+                           architecture="arm64", digest="e"*64, snapshot_bytes=9045114880,
+                           stable_origin=stable_origin)
 
     def check_public(self, release, statuses, run=None):
         with mock.patch.object(gate, "release_run", return_value=run or self.run), \
@@ -71,6 +72,27 @@ class ReleaseWorkloadTests(unittest.TestCase):
     def test_matching_release_and_workload(self):
         self.check_private(self.report)
         self.check_public(self.release, self.receipts)
+
+    def test_a_legacy_receipt_cannot_promote_a_stable_origin_release(self):
+        for update in self.release["updates"].values():
+            update["qualification"] = gate.STABLE_ORIGIN_CONTRACT
+        with self.assertRaises(ValueError):
+            self.check_public(self.release, self.receipts)
+        for arch, receipt in zip(gate.ARCHITECTURES, self.receipts):
+            receipt["context"] = gate.context(self.run, "1.2.3", "4", arch, "b"*64, "c"*64, stable_origin=True)
+        self.check_public(self.release, self.receipts)
+
+    def test_stable_origin_qualifies_only_with_continuous_traffic_and_strict_budgets(self):
+        with self.assertRaisesRegex(ValueError, "signed stable origin"):
+            self.check_private(self.report, stable_origin=True)
+        proof = {"verified": True, "cutover_ms": 249.9, "send_p99_ms": 149.9,
+                 "http_failures": 0, "browser_reloads": 0}
+        self.report["stable_origin"] = proof
+        self.check_private(self.report, stable_origin=True)
+        for key, error in (("verified", False), ("cutover_ms", 250), ("send_p99_ms", 150),
+                           ("http_failures", 1), ("browser_reloads", 1)):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "signed stable origin"):
+                self.check_private({**self.report, "stable_origin": {**proof, key: error}}, stable_origin=True)
 
     def test_stream_continuity_uses_original_provider_turns_while_the_composer_starts_new_ones(self):
         turns = [[str(i), 200 + i, "turn-" + str(i)] for i in range(6)]

@@ -87,6 +87,7 @@ test("UI responses preserve action and submitted values as a literal message", (
 
 class Element {
   constructor(name) { this.name = name; this.dataset = {}; this.childNodes = []; this.parentNode = null; this.moves = 0; }
+  contains(other) { return this === other || this.childNodes.some(child => child.contains(other)); }
   get firstChild() { return this.childNodes[0] || null; }
   get nextSibling() { return this.parentNode?.childNodes[this.parentNode.childNodes.indexOf(this) + 1] || null; }
   remove() {
@@ -186,13 +187,17 @@ test("accepted responses remain successful if history refresh fails", async () =
   assert.equal(calls.length, 1);
 });
 
-test("cached-tab restoration rebuilds detached interactive previews", () => {
+test("cached-tab restoration parks and retains interactive previews", () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
+  const node = {dataset: {openuiKey: "thread/turn/item"}};
+  const timeline = {childNodes: [node], scrollTop: 30};
+  let parked;
   const context = {state: {selected: "thread", detail: {}, conversations: new Map()}, isSessionDraft: () => false,
-    $: () => ({childNodes: [{dataset: {openuiKey: "thread/turn/item"}}], scrollTop: 30})};
+    OpenUIThread: {park: element => { parked = element; }}, $: () => timeline};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function sameConversation(")), context);
   vm.runInContext("retainConversation()", context);
-  assert.equal(context.state.conversations.get("thread").nodes, null);
+  assert.equal(context.state.conversations.get("thread").nodes[0], node);
+  assert.equal(parked, timeline);
   assert.equal(context.state.conversations.get("thread").scroll, 30);
 });

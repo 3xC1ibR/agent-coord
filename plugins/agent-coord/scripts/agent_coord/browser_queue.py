@@ -1,6 +1,7 @@
 """Durable follow-ups dispatched after a browser turn, never as steering."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import threading
 import time
@@ -11,6 +12,18 @@ from .image_inputs import message_images
 from .thread_mentions import thread_mentions
 from .navigation import window_id
 from .thread_control import cancel_pending
+
+
+@contextmanager
+def _validate_queue_entry():
+    """Distinguish validation failures from failures during or after insertion."""
+    try:
+        yield
+    except CoordinationError as error:
+        from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
+        if isinstance(error, (BrowserBusyError, BrowserNotSubmittedError)):
+            raise
+        raise BrowserNotSubmittedError(str(error)) from error
 
 
 class BrowserMessageQueue:
@@ -38,17 +51,22 @@ class BrowserMessageQueue:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_id INTEGER")
             if "dispatch_reviewed" not in columns:
                 db.execute("ALTER TABLE browser_message_queue ADD COLUMN dispatch_reviewed INTEGER NOT NULL DEFAULT 0")
+            if "quiet" not in columns:
+                db.execute("ALTER TABLE browser_message_queue ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS browser_queue_dispatch ON browser_message_queue(dispatch_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS browser_queue_thread ON browser_message_queue(thread_id, created_at)")
 
-    def list(self, thread_id):
+    def list(self, thread_id, *, limit=None):
         self.sessions._record(thread_id)
-        with self.sessions.store._connection() as db:
-            rows = db.execute("SELECT * FROM browser_message_queue WHERE thread_id = ? ORDER BY created_at, rowid", (thread_id,)).fetchall()
+        with self.sessions.store.reading(), self.sessions.store._connection() as db:
+            rows = db.execute("""SELECT * FROM browser_message_queue WHERE thread_id = ?
+                ORDER BY created_at, rowid LIMIT ?""", (thread_id, -1 if limit is None else limit)).fetchall()
         result = []
         for row in rows:
             item = dict(row)
             item["images"] = json.loads(item.pop("images_json"))
             item["mentions"] = json.loads(item.pop("mentions_json"))
+            item["quiet"] = bool(item["quiet"])
             if item.pop("owner") != self.owner:
                 item.update(state="paused", error="The server restarted. Review this message before resuming the queue.")
             result.append(item)
@@ -62,24 +80,27 @@ class BrowserMessageQueue:
             raise CoordinationError("Browser sessions are closed.")
 
     def enqueue(self, thread_id, body, *, dispatch_id=None):
-        message, images = message_images(body)
-        if body.get("mentions"):
-            message = body["message"]  # Selected ranges refer to the untrimmed composer text.
-        mentions = thread_mentions(message, body, self.sessions)
-        source_window = window_id(body.get("windowId"))
-        if hasattr(self.sessions, "reviews") and self.sessions.reviews.active(thread_id):
-            raise CoordinationError("Send an update or stop the current review before queueing another request.")
+        with _validate_queue_entry():
+            message, images = message_images(body)
+            if body.get("mentions"):
+                message = body["message"]  # Selected ranges refer to the untrimmed composer text.
+            mentions = thread_mentions(message, body, self.sessions)
+            source_window = window_id(body.get("windowId"))
+            if hasattr(self.sessions, "reviews") and self.sessions.reviews.active(thread_id):
+                raise CoordinationError("Send an update or stop the current review before queueing another request.")
+            images_json, mentions_json = json.dumps(images), json.dumps(mentions)
         with self.sessions._thread_lock(thread_id):
-            if dispatch_id is not None:
-                receipt = self.sessions.dispatch.get(dispatch_id)
-                if thread_id != receipt["dispatcher_id"]:
-                    if not self.sessions.dispatch.recipient_ready(thread_id,
-                            allow_dispatcher=receipt["body"].get("sendWork", {}).get("kind") == "dispatcher"):
-                        raise CoordinationError("The routed destination is paused or closing.")
-                    if self.sessions.store.threads.get(thread_id)["attention"] == "archived":
-                        self.sessions.store.threads.update(thread_id, attention="now")
-            self._open(thread_id)
-            self.sessions.read(thread_id)
+            with _validate_queue_entry():
+                if dispatch_id is not None:
+                    receipt = self.sessions.dispatch.get(dispatch_id)
+                    if thread_id != receipt["dispatcher_id"]:
+                        if not self.sessions.dispatch.recipient_ready(thread_id,
+                                allow_dispatcher=receipt["body"].get("sendWork", {}).get("kind") == "dispatcher"):
+                            raise CoordinationError("The routed destination is paused or closing.")
+                        if self.sessions.store.threads.get(thread_id)["attention"] == "archived":
+                            self.sessions.store.threads.update(thread_id, attention="now")
+                self._open(thread_id)
+                self.sessions.read(thread_id)
             item_id = str(uuid.uuid4())
             with self.sessions.store._connection() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -90,13 +111,16 @@ class BrowserMessageQueue:
                         return {"queued": bool(existing), "id": existing[0] if existing else None}
                 cancel_pending(db, thread_id, self.sessions.store.clock())
                 db.execute("""INSERT INTO browser_message_queue
-                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json, dispatch_id)
-                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?)""",
-                           (item_id, thread_id, message, self.owner, time.time(), json.dumps(images), source_window, json.dumps(mentions), dispatch_id))
+                           (id, thread_id, message, state, error, owner, created_at, images_json, window_id, mentions_json, dispatch_id, quiet)
+                           VALUES (?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?)""",
+                           (item_id, thread_id, message, self.owner, time.time(), images_json, source_window,
+                            mentions_json, dispatch_id, int(body.get("quiet", False))))
                 if dispatch_id is not None:
                     self.sessions.dispatch.transition(db, dispatch_id, "queued", target_id=thread_id, error=None)
-            self.sessions._publish("browser/changed", {"threadId": thread_id})
-            self.wake()
+            try:
+                self.sessions._publish("browser/changed", {"threadId": thread_id})
+            finally:
+                self.wake()
             return {"queued": True, "id": item_id}
 
     def change(self, thread_id, body):
@@ -192,7 +216,8 @@ class BrowserMessageQueue:
                 if dispatch_id is not None:
                     sessions.dispatch.update(dispatch_id, "sending")
                 result = sessions.send(thread_id, {"message": item["message"], "images": item["images"],
-                                          "windowId": item["window_id"], "mentions": item["mentions"]}, start_only=True)
+                                          "windowId": item["window_id"], "mentions": item["mentions"],
+                                          "quiet": item["quiet"]}, start_only=True)
             except Exception as exc:
                 # Keep the message and images for review after transport failures.
                 with sessions.store._connection() as db:

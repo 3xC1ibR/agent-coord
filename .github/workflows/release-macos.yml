@@ -73,6 +73,13 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and verify the release interface
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
+          node --test tests/test_web_build.mjs
       - name: Test release source
         run: |
           sudo apt-get update
@@ -107,6 +114,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -115,6 +123,35 @@ jobs:
         with:
           version: '0.13.1'
           enable-cache: false
+      - name: Set up Node.js for frontend packaging
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and verify the packaged interface
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
+      - name: Qualify coordinator replacement and rollback on macOS
+        timeout-minutes: 3
+        env:
+          RIBBON_REQUIRE_EDGE_BUDGET: '1'
+          RIBBON_SCHEMA_REQUIRE_PREDECESSOR: '1'
+          RIBBON_EDGE_REPORT: ${{ runner.temp }}/runtime-edge.json
+        run: |
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_schema_compatibility.py' -v
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_macos_runtime_updates.py' -v
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_runtime_update.py' -v
+          python3 -W error::ResourceWarning -m unittest discover -s tests -p 'test_runtime_edge.py' -v
+      - name: Retain coordinator qualification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-runtime-qualification-${{ matrix.arch }}
+          path: ${{ runner.temp }}/runtime-edge.json
+          if-no-files-found: ignore
       - name: Install signing and notarization credentials
         env:
           CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
@@ -200,13 +237,14 @@ jobs:
     needs: [validate, build]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
       statuses: read
     # Configure a required reviewer on this environment before enabling uploads.
-    # Download and test the retained DMGs before approving this job.
+    # Submit the private, exact signed workload receipts before approving.
+    # Waiting for review allocates no runner.
     environment:
       name: macos-release
       url: https://downloads.ribbonfield.com
@@ -237,13 +275,28 @@ jobs:
           python3 scripts/publish_macos_release.py --directory build/release \
             --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
             --require-updates --update-public-key "$SPARKLE_PUBLIC_KEY" \
-            --publish --promote-current --receipt-wait-seconds 9000 | tee release-result.json
+            --publish | tee release-result.json
+      - name: Promote the verified, signed update feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: 'true'
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          RELEASE_CHANNEL: ${{ inputs.channel || 'alpha' }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_macos_release.py --directory build/release \
+            --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
+            --update-public-key "$SPARKLE_PUBLIC_KEY" --promote-only | tee promotion-result.json
           {
             echo '### Published macOS downloads'
             echo
             echo "https://downloads.ribbonfield.com/releases/$RELEASE_VERSION/release.json"
             echo
             echo '```json'
-            cat release-result.json
+            cat promotion-result.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

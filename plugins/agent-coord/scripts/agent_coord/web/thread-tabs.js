@@ -1,6 +1,7 @@
 "use strict";
 
 const tabViews = typeof module !== "undefined" ? require("./views.js").threadViews : threadViews;
+const hasDelegatedAgents = (tree, id) => tree?.children.get(id)?.some(child => tree.relationships.get(child) === "agent");
 
 // Tabs are a window's working set, independent of thread placement and filters.
 class ThreadTabs {
@@ -9,7 +10,7 @@ class ThreadTabs {
     this.baseKey = "agent-coord.thread-tabs." + scope;
     this.projects = new Map(); this.selections = new Map(); this.scratchpads = new Map(); this.items = []; this.selected = null;
     container?.setAttribute("role", "tablist");
-    container?.setAttribute("aria-label", "Project tabs");
+    container?.setAttribute("aria-label", "Workspace conversation tabs");
   }
   setProject(cwd = "") {
     if (this.cwd === cwd) return;
@@ -27,6 +28,7 @@ class ThreadTabs {
         if (!item || typeof item.thread_id !== "string" || !item.thread_id || item.thread_id === "new-session" || ids.has(item.thread_id)) return false;
         ids.add(item.thread_id); return true;
       }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation",
+        ...(item.root_thread_id === item.thread_id ? {root_thread_id: item.thread_id} : {}),
         ...(typeof item.conversation_id === "string" && item.conversation_id ? {conversation_id: item.conversation_id} : {}),
         ...(typeof item.tree_root === "string" && item.tree_root ? {tree_root: item.tree_root, tree_open: item.tree_open === true} : {})})) : []);
       this.selections.set(cwd, typeof saved?.selected === "string" ? saved.selected : null);
@@ -43,19 +45,63 @@ class ThreadTabs {
   save(rememberSelection = false, cwd = this.cwd) {
     if (rememberSelection) this.selections.set(this.cwd, this.selected ?? null);
     try { this.storage?.setItem(this.baseKey + ":" + cwd, JSON.stringify({
-      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, title, conversation_id, tree_root, tree_open}) =>
-        ({thread_id, title, ...(conversation_id && conversation_id !== thread_id ? {conversation_id} : {}),
+      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, root_thread_id, title, conversation_id, tree_root, tree_open}) =>
+        ({thread_id, root_thread_id, title, ...(conversation_id && conversation_id !== thread_id ? {conversation_id} : {}),
           ...(tree_root ? {tree_root, tree_open: tree_open === true} : {})})),
       selected: this.destination(cwd),
       scratchpadOpen: this.scratchpads.get(cwd) === true,
     })); } catch { /* Tabs still work without storage. */ }
   }
-  open(thread) {
+  open(thread, tree) {
     if (!thread?.thread_id) return;
-    const item = this.items.find(item => item.thread_id === thread.thread_id);
-    if (item) { Object.assign(item, thread, {conversation_id: thread.thread_id}); delete item.displayedThread; }
-    else this.items.push({...thread, title: thread.title || "Conversation"});
-    this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
+    const id = thread.thread_id;
+    const rootId = tree?.supervisorPath(id)[0] || id;
+    const root = rootId === id ? thread : tree.nodes.get(rootId);
+    let item = this.items.find(item => item.thread_id === rootId);
+    if (!item) { item = {}; this.items.push(item); }
+    Object.assign(item, root, {conversation_id: id, title: root.title || "Conversation"});
+    if (rootId !== id || hasDelegatedAgents(tree, rootId)) item.root_thread_id = rootId;
+    item.displayedThread = rootId === id ? undefined : thread;
+    this.selected = rootId; this.save(true); this.render(); this.reveal(this.selected);
+  }
+  // Inventory can arrive after a deep link or after restoring an older window.
+  // Merge provisional tabs while retaining the current conversation.
+  reconcileFamily(tree, conversationId) {
+    const roots = new Map(), consolidated = new Map();
+    const preferred = this.selected ?? this.selections.get(this.cwd);
+    let changed = false;
+    for (const item of this.items) {
+      const id = item.thread_id, path = tree.supervisorPath(id);
+      const rootId = path[0] || id, displayedId = item.conversation_id || id;
+      roots.set(id, rootId);
+      let candidate = item;
+      if (rootId !== id) {
+        const root = tree.nodes.get(rootId);
+        candidate = {...root, root_thread_id: rootId, title: root.title || "Conversation",
+          tree_root: rootId, tree_open: item.tree_open === true, conversation_id: displayedId,
+          displayedThread: tree.nodes.get(displayedId)};
+        changed = true;
+      } else if (!item.root_thread_id && hasDelegatedAgents(tree, id)) {
+        item.root_thread_id = id;
+        changed = true;
+      }
+      const previous = consolidated.get(rootId);
+      if (!previous || preferred === id || id === rootId && preferred !== previous.originalId)
+        consolidated.set(rootId, {item: candidate, originalId: id});
+    }
+    if (!changed) return false;
+    const selected = roots.get(this.selected);
+    if (selected && conversationId) {
+      const {item} = consolidated.get(selected);
+      item.conversation_id = conversationId;
+      item.displayedThread = tree.nodes.get(conversationId);
+    }
+    this.items.splice(0, this.items.length, ...[...consolidated.values()].map(value => value.item));
+    if (selected) this.selected = selected;
+    const destination = roots.get(this.selections.get(this.cwd));
+    if (destination) this.selections.set(this.cwd, destination);
+    this.save(this.selected != null); this.render();
+    return true;
   }
   // Includes saved project working sets that this window has not displayed yet.
   has(id) {

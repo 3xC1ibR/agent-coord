@@ -11,12 +11,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import historical_gateway_fixture
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
 
-from agent_coord import desktop_runtime as runtime, runtime_gateway_lifecycle as gateway
+from historical_gateway import desktop_runtime as runtime, runtime_gateway_lifecycle as gateway
 
 
 class GatewayLifecycleTests(unittest.TestCase):
@@ -148,7 +149,7 @@ class GatewayLifecycleTests(unittest.TestCase):
         self.assertEqual(gateway.status(self.database, {})["interaction_request_id"], "original")
 
     def test_detached_serve_recovers_authorized_request_after_helper_exits_with_fence_ready(self):
-        from agent_coord import runtime_interaction_gateway
+        from historical_gateway import runtime_interaction_gateway
 
         class HelperExited(BaseException):
             pass
@@ -256,6 +257,7 @@ class DetachedGatewayTests(unittest.TestCase):
     def test_detached_gateway_recovers_its_origin_then_retires_with_receipts(self):
         import signal
         import time
+        from agent_coord import runtime_gateway_retirement as retirement
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -265,6 +267,7 @@ class DetachedGatewayTests(unittest.TestCase):
             package.mkdir(parents=True)
             for module in (ROOT / "plugins/agent-coord/scripts/agent_coord").glob("*.py"):
                 shutil.copyfile(module, package / module.name)
+            historical_gateway_fixture.copy_to(package)
             shutil.copyfile(ROOT / "desktop/macos/backend.py", resources / "backend.py")
             (package / "runtime_interaction_gateway.py").write_text(r'''import json, os, secrets
 from pathlib import Path
@@ -320,22 +323,26 @@ def serve(database, directory, ready_fd):
                     results = [future.result(timeout=8) for future in starts]
                 self.assertEqual(len({result["interaction_url"] for result in results}), 1)
                 before = runtime.read_json(directory / "gateway.json")
-                with self.assertRaisesRegex(RuntimeError, "unfinished intake"):
-                    gateway.retire(database)
+                intake = directory / "message-intake.sqlite3"
+                intake.write_bytes(b"accepted receipt bytes retained through retirement")
+                self.assertEqual(retirement.status(database, {})["interaction_url"], before["url"])
+                with self.assertRaisesRegex(RuntimeError, "preserve the predecessor"):
+                    retirement.retire(database)
                 os.kill(int((directory / "fixture-pid").read_text()), signal.SIGTERM)
                 limit = time.monotonic() + 4
                 while not runtime.owner_available(directory) and time.monotonic() < limit:
                     time.sleep(.02)
                 self.assertTrue(runtime.owner_available(directory))
-                self.assertEqual(gateway.status(database, {})["interaction_url"], before["url"])
+                self.assertEqual(retirement.status(database, {})["interaction_url"], before["url"])
                 restored = runtime.read_json(directory / "gateway.json")
                 self.assertEqual(restored["control_token"], before["control_token"])
                 self.assertNotEqual(restored["instance"], before["instance"])
                 (directory / "settled").touch()
-                archive = gateway.retire(database)
+                archive = retirement.retire(database)
+                self.assertEqual((archive / "message-intake.sqlite3").read_bytes(), b"accepted receipt bytes retained through retirement")
                 self.assertEqual(runtime.read_json(archive / "gateway.json")["instance"], restored["instance"])
                 self.assertFalse(directory.exists())
-                self.assertEqual(gateway.status(database, {}), {})
+                self.assertEqual(retirement.status(database, {}), {})
             except Exception as error:
                 log = directory / "gateway.log"
                 if log.exists():
@@ -396,9 +403,16 @@ state["update"] = ["id":"handover", "target":candidate.path, "phase":"committed"
 try backend.accept(state)
 precondition(origins == [origin] && notices.isEmpty)
 state["interaction_settled"] = true
+state["edge_url"] = "http://127.0.0.1:30125/"
+state["edge_observer"] = String(repeating: "a", count: 43)
 try backend.accept(state)
 try backend.accept(state)
-precondition(origins == [origin, direct] && notices.count == 1 && !backend.updateInProgress)
+precondition(origins == [origin, "http://127.0.0.1:30125/"] && notices.count == 1 && !backend.updateInProgress)
+state["url"] = "http://127.0.0.1:30126/"
+state["instance"] = "later-generation"
+state["pid"] = Int32(103)
+try backend.accept(state)
+precondition(origins.count == 2, "Ordinary stable-origin replacement reloaded the native workspace")
 ''')
             binary = root / "native-gateway-test"
             subprocess.run(["xcrun", "swiftc", "-swift-version", "5", str(root / "RuntimeHost.swift"),

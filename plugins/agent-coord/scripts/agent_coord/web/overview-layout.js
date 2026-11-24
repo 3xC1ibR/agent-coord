@@ -1,11 +1,17 @@
 "use strict";
 
+const overviewLayouts = [["list", "List"], ["working-set", "Focus"], ["atlas", "Atlas"]];
+
 class OverviewLayout {
-  constructor({document, window, storage, onChange, canNavigate = () => true}) {
-    Object.assign(this, {document, window, storage, onChange, canNavigate});
+  constructor({document, window, storage, onChange}) {
+    Object.assign(this, {document, window, storage, onChange});
     this.key = "agent-coord.overview-layout";
-    this.preference = "cards";
-    try { const saved = storage?.getItem(this.key); if (["atlas", "working-set", "list"].includes(saved)) this.preference = saved; } catch { /* Optional preference. */ }
+    this.preference = "list";
+    try {
+      const saved = storage?.getItem(this.key);
+      if (overviewLayouts.some(([mode]) => mode === saved)) this.preference = saved;
+      else if (saved === "cards") storage.setItem(this.key, this.preference);
+    } catch { /* Optional preference. */ }
     this.narrow = window.matchMedia("(max-width: 720px)");
     this.narrow.addEventListener("change", () => { this.close(); this.onChange?.(this.mode, {navigate: false}); });
     document.addEventListener("pointerdown", event => {
@@ -17,9 +23,9 @@ class OverviewLayout {
     window.addEventListener("resize", () => this.close());
     window.addEventListener("scroll", () => this.close(), {capture: true, passive: true});
   }
-  get mode() { return this.narrow.matches && this.preference === "atlas" ? "cards" : this.preference; }
+  get mode() { return this.narrow.matches && this.preference === "atlas" ? "list" : this.preference; }
   choose(mode) {
-    if (!["cards", "atlas", "working-set", "list"].includes(mode) || mode === "atlas" && this.narrow.matches || !this.canNavigate()) return false;
+    if (!overviewLayouts.some(([key]) => key === mode) || mode === "atlas" && this.narrow.matches) return false;
     this.preference = mode;
     try { this.storage?.setItem(this.key, mode); } catch { /* Switching still works without storage. */ }
     this.close(true);
@@ -35,12 +41,11 @@ class OverviewLayout {
   }
   open(anchor, event = {}) {
     event.preventDefault?.(); event.stopPropagation?.();
-    if (!this.canNavigate()) return;
     if (this.menu && this.anchor === anchor) { this.close(true); return; }
     this.close(); this.anchor = anchor;
     const doc = this.document, panel = doc.createElement("div");
     panel.className = "overview-layout-menu"; panel.setAttribute("role", "menu"); panel.setAttribute("aria-label", "Overview layout");
-    for (const [mode, title] of [["cards", "Cards"], ["atlas", "Atlas"], ["working-set", "Focus"], ["list", "List"]]) {
+    for (const [mode, title] of overviewLayouts) {
       const button = doc.createElement("button"); button.type = "button";
       button.dataset.layout = mode; button.setAttribute("role", "menuitemradio"); button.setAttribute("aria-checked", String(this.mode === mode));
       button.disabled = mode === "atlas" && this.narrow.matches;

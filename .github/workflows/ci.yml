@@ -17,7 +17,8 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The full suite takes about 16 minutes before the transcript gate is seeded.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +54,12 @@ jobs:
         run: brew install ripgrep
       - name: Validate plugin packaging
         run: python3 scripts/plugin_tools.py validate
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build content-addressed frontend assets
+        run: python3 scripts/build_web.py
+      - name: Verify canonical interface tokens
+        run: python3 scripts/check_design_tokens.py
       - name: Install the native Codex hook regression client
         run: |
           npm install --prefix "$RUNNER_TEMP/codex-hook-client" --no-audit --no-fund @openai/codex@0.171.0
@@ -62,13 +69,15 @@ jobs:
       - name: Run JavaScript tests
         run: node --test tests/*.js
       - name: Verify isolated OpenUI rendering in WebKit
-        if: runner.os == 'macOS'
+        if: ${{ runner.os == 'macOS' && !cancelled() }}
         run: |
           python3 desktop/macos/openui_smoke.py
           python3 desktop/macos/openui_smoke.py --portfolio
       - name: Run Python tests
+        if: ${{ !cancelled() }}
         run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
       - name: Verify database latency and writer admission
+        if: ${{ !cancelled() }}
         run: python3 scripts/measure_database_contention.py --seconds 15 --writers 6 --check --output build/database-performance.json
       - name: Retain database performance measurements
         if: always()
@@ -77,6 +86,101 @@ jobs:
           name: database-performance-${{ matrix.os }}-python-${{ matrix.python }}
           path: build/database-performance.json
           if-no-files-found: ignore
+          retention-days: 30
+
+  interface-acceptance:
+    name: Interface states and interaction latency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend and browser dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          npm ci --prefix demo --ignore-scripts --omit=dev --no-audit --no-fund
+          demo/node_modules/.bin/playwright install --with-deps chromium
+      - name: Build and verify the interface
+        id: interface_build
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
+      - name: Verify incremental asset publication and recovery
+        run: node --test tests/test_web_build.mjs
+      - name: Verify durable composer drafts
+        run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
+      - name: Verify retained conversation architecture
+        env:
+          RIBBON_FRONTEND_EVIDENCE: ${{ runner.temp }}/interface-acceptance/architecture
+        run: node tests/test_conversation_architecture.mjs
+      - name: Verify interface states and interaction latency
+        run: |
+          node scripts/validate_interface.mjs --source "$PWD" \
+            --output "$RUNNER_TEMP/interface-acceptance" --check
+      - name: Record separate startup CPU samples after an acceptance failure
+        if: ${{ failure() && !cancelled() && steps.interface_build.outcome == 'success' }}
+        run: |
+          node scripts/validate_interface.mjs --source "$PWD" --mode performance \
+            --checks 'Renderer compile and boot' --boot-trace --startup-profile \
+            --output "$RUNNER_TEMP/interface-acceptance/startup-profile"
+      - name: Retain interface measurements and screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interface-acceptance
+          path: ${{ runner.temp }}/interface-acceptance
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ios-companion:
+    name: iOS companion policy and device builds
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify connection and pairing policies
+        run: swift test --package-path mobile/ios
+      - name: Build the iOS companion for the simulator
+        run: |
+          xcodebuild -project mobile/ios/RibbonField.xcodeproj \
+            -scheme RibbonField -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios-simulator CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
+      - name: Retain the simulator application
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-simulator
+          path: build/ios-simulator/Build/Products/Release-iphonesimulator/*.app
+          if-no-files-found: error
+          retention-days: 30
+      - name: Build the iOS companion for a physical device
+        run: |
+          xcodebuild -project mobile/ios/RibbonField.xcodeproj \
+            -scheme RibbonField -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-device CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
+      - name: Retain the device application for local provisioning
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-device-unsigned
+          path: build/ios-device/Build/Products/Release-iphoneos/*.app
+          if-no-files-found: error
           retention-days: 30
 
   macos-build:
@@ -97,6 +201,17 @@ jobs:
         with:
           version: '0.13.1'
           enable-cache: false
+      - name: Set up Node.js for frontend packaging
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build content-addressed frontend assets
+        run: python3 scripts/build_web.py
+      - name: Verify canonical interface tokens
+        run: python3 scripts/check_design_tokens.py
       # Ad hoc signing exercises packaging without release credentials or notarization.
       - name: Build standalone test disk image
         run: |
@@ -110,19 +225,25 @@ jobs:
           python3 desktop/macos/verify_distribution.py \
             --dmg build/ci/Ribbon-Field-arm64-test.dmg \
             --report build/ci/distribution-validation.json
+      - name: Build the separate native smoke harness
+        run: |
+          python3 desktop/macos/build.py --standalone --arch arm64 --smoke-harness \
+            --output 'build/ci-smoke/Ribbon Field.app'
       - name: Verify native window origins across a backend change
         run: |
           python3 desktop/macos/smoke_test.py --origins-only \
-            --app 'build/ci/Ribbon Field.app' --report build/ci/native-window-origins.json
-      - name: Set up Node.js for browser measurements
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-          package-manager-cache: false
+            --app 'build/ci-smoke/Ribbon Field.app' --report build/ci/native-window-origins.json
+      - name: Verify retained windows and drafts across relaunches
+        run: |
+          python3 desktop/macos/window_restore_test.py \
+            --app 'build/ci-smoke/Ribbon Field.app' \
+            --report build/ci/window-restoration/summary.json
       - name: Install the workload browser
         run: |
           npm ci --prefix demo --ignore-scripts --omit=dev
           demo/node_modules/.bin/playwright install chromium
+      - name: Verify durable composer drafts
+        run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
       - name: Measure packaged conversations under streaming load
         run: |
           python3 scripts/measure_packaged_conversation_workload.py \
@@ -135,5 +256,6 @@ jobs:
           path: |
             build/ci/generated-conversation-workload.json
             build/ci/native-window-origins.json
+            build/ci/window-restoration
             build/ci/generated-conversation-workload.sample.txt
           retention-days: 30

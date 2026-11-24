@@ -1,6 +1,18 @@
 import XCTest
 
 final class ConnectionUITests: XCTestCase {
+    private func fixtureRequest(_ url: URL) throws -> Data {
+        let fetched = expectation(description: "Fixture response")
+        var result: Result<Data, Error>?
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error { result = .failure(error) }
+            else if let data, (response as? HTTPURLResponse)?.statusCode == 200 { result = .success(data) }
+            fetched.fulfill()
+        }.resume()
+        wait(for: [fetched], timeout: 20)
+        return try XCTUnwrap(result).get()
+    }
+
     @MainActor
     func testPairRelaunchDraftAndDisconnect() throws {
         continueAfterFailure = false
@@ -8,15 +20,7 @@ final class ConnectionUITests: XCTestCase {
               fixture.hasPrefix("https://"), let origin = URL(string: fixture) else {
             throw XCTSkip("Set RIBBON_SMOKE_URL to an isolated trusted HTTPS backend fixture.")
         }
-        let fetched = expectation(description: "Fetch isolated fixture invitation")
-        var result: Result<Data, Error>?
-        URLSession.shared.dataTask(with: origin.appendingPathComponent("__smoke__/invitation")) { data, response, error in
-            if let error { result = .failure(error) }
-            else if let data, (response as? HTTPURLResponse)?.statusCode == 200 { result = .success(data) }
-            fetched.fulfill()
-        }.resume()
-        wait(for: [fetched], timeout: 20)
-        let data = try XCTUnwrap(result).get()
+        let data = try fixtureRequest(origin.appendingPathComponent("__smoke__/invitation"))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let invitation = try XCTUnwrap(object["url"] as? String)
         let app = XCUIApplication()
@@ -38,6 +42,8 @@ final class ConnectionUITests: XCTestCase {
         }
         let field = app.secureTextFields["connection.invitation"]
         XCTAssertTrue(field.waitForExistence(timeout: 10))
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: field)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 15), .completed)
         field.tap()
         field.typeText(invitation)
         app.buttons["connection.pair"].firstMatch.tap()
@@ -47,19 +53,32 @@ final class ConnectionUITests: XCTestCase {
         app.terminate()
         app.launch()
         guard newSession.waitForExistence(timeout: 30) else { XCTFail("Device cookie and origin must survive relaunch"); return }
-        newSession.tap()
-        // ARIA role=combobox makes this textarea a TextField in WebKit accessibility.
-        let composer = app.webViews.textFields["Message Codex"].firstMatch
+        let skip = app.webViews.buttons["Skip for now"].firstMatch
+        if skip.exists { skip.tap() }
+        let thread = app.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Companion draft")).firstMatch
+        guard thread.waitForExistence(timeout: 15) else {
+            XCTFail("The saved fixture conversation is missing: \(app.debugDescription)"); return
+        }
+        thread.tap()
+        // WebKit exposes the multiline combobox as a text field or a text view.
+        let composer = app.webViews.descendants(matching: .any).matching(NSPredicate(format:
+            "label == %@ AND (elementType == %d OR elementType == %d)", "Message Claude",
+            XCUIElement.ElementType.textField.rawValue, XCUIElement.ElementType.textView.rawValue)).firstMatch
         guard composer.waitForExistence(timeout: 10) else {
-            XCTFail("Composer not found: \(app.webViews.debugDescription)"); return
+            XCTFail("Composer not found: \(app.debugDescription)"); return
         }
         composer.tap()
         let draft = "Unsent iOS lifecycle check"
         composer.typeText(draft)
         XCUIDevice.shared.press(.home)
+        _ = try fixtureRequest(origin.appendingPathComponent("__smoke__/restart"))
         app.activate()
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
-        XCTAssertEqual(composer.value as? String, draft, "Normal foreground recovery must preserve the draft")
+        XCTAssertEqual(composer.value as? String, draft, "A restarted Mac must preserve the current composer")
+        XCTAssertFalse(app.buttons["connection.reload"].waitForExistence(timeout: 3), "Reconnecting must keep the document in place")
+        XCTAssertFalse(app.staticTexts["connection.error"].exists, "The saved device credential must authenticate after restart")
+        let reconnected = XCTAttachment(screenshot: app.screenshot())
+        reconnected.name = "Composer after backend restart"; reconnected.lifetime = .keepAlways; add(reconnected)
         app.buttons["connection.settings"].firstMatch.tap()
         let enable = app.buttons["notifications.enable"].firstMatch
         XCTAssertTrue(enable.waitForExistence(timeout: 5))

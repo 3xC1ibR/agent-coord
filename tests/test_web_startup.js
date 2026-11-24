@@ -3,189 +3,114 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const {readFileSync} = require("node:fs");
 const vm = require("node:vm");
+const {loadWebModule} = require("./web_application_fixture.js");
+
 const html = readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/index.html"), "utf8");
 const source = html.match(/<script id="workspace-startup">([\s\S]*?)<\/script>/)[1];
-const paths = [...html.matchAll(/<link rel="preload" as="script" href="([^"]+)" data-startup>/g)].map(match => match[1]);
+const entries = [...html.matchAll(/<script id="workspace-program" src="([^"]+)" defer><\/script>/g)];
 
-function fixture({themeFailed = false} = {}) {
-  const inserted = [], timers = new Map(), status = {}, message = {}, notice = {hidden: true, querySelector: () => message};
-  let now = 0, sequence = 0;
-  const context = vm.createContext({URL, Array,
-    setTimeout(callback, delay) { const id = ++sequence; timers.set(id, {at: now + delay, callback}); return id; },
-    clearTimeout(id) { timers.delete(id); },
+function startup() {
+  const inserted = [], timers = [], status = {}, message = {}, events = {}, requests = [];
+  const notice = {hidden: true, querySelector: () => message};
+  const script = () => ({remove() { this.removed = true; }});
+  const initial = Object.assign(script(), {id: "workspace-program", src: entries[0][1]});
+  const environment = {
+    fetch(path, options) { requests.push({path, ...options}); return Promise.resolve({ok: true}); },
+    setTimeout(callback, delay) { timers.push({callback, delay}); },
     document: {
       documentElement: {dataset: status},
-      querySelectorAll: () => [
-        ...(themeFailed ? [{src: "http://localhost:8765/theme.js?v=content-digest"}] : []),
-        ...paths.map(path => ({href: "http://localhost:8765" + path + "?v=content-digest"})),
-      ],
-      getElementById: () => notice,
-      createElement: () => ({remove() { this.removed = true; }}),
+      addEventListener(type, listener, capture) { assert.equal(capture, true); events[type] = listener; },
+      getElementById: id => { assert.equal(id, "error"); return notice; },
+      createElement: tag => { assert.equal(tag, "script"); return script(); },
       head: {append(script) { inserted.push(script); }},
     },
-  });
-  const run = () => vm.runInContext(source, context);
-  run();
-  return {inserted, timers, status, notice, message, run,
-    current: () => inserted.at(-1),
-    advance(ms) {
-      const end = now + ms;
-      while (true) {
-        const next = [...timers.entries()].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
-        if (!next) break;
-        timers.delete(next[0]); now = next[1].at; next[1].callback();
-      }
-      now = end;
-    },
   };
+  vm.runInNewContext(source, environment);
+  const current = () => inserted.at(-1) || initial;
+  return {inserted, timers, status, notice, message, current, requests, configuration: environment.agentCoordInitialConfig,
+    emit(type, target = current()) { events[type]({target}); }};
 }
 
-test("startup executes the complete dependency list in document order, once", () => {
-  assert.equal(paths.length, 51);
-  assert.ok(paths.indexOf("/navigation.js") < paths.indexOf("/app.js"));
-  assert.ok(paths.indexOf("/settings.js") < paths.indexOf("/app.js"));
-  assert.ok(paths.indexOf("/app.js") < paths.indexOf("/thread-hover.js"));
-  const page = fixture();
-  for (const [index, path] of paths.entries()) {
-    assert.equal(page.inserted.length, index + 1, "the next dependency waits for load success");
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
-  assert.equal(page.status.startup, "loaded");
-  assert.equal(page.timers.size, 0);
-  page.run();
-  assert.equal(page.inserted.length, paths.length, "a second loader invocation cannot initialize again");
-});
-
-test("a failed before-paint theme script recovers before application dependencies", () => {
-  const page = fixture({themeFailed: true});
-  assert.equal(new URL(page.current().src).pathname, "/theme.js");
-  page.current().onload();
-  for (const path of paths) {
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
-  assert.equal(page.status.startup, "loaded");
-  assert.equal(page.inserted.length, paths.length + 1);
-});
-
-test("several failed assets retry individually before dependents execute", () => {
-  const page = fixture();
-  const failed = new Set(["/navigation.js", "/agent-tree.js", "/settings.js", "/app.js", "/thread-hover.js"]);
-  for (const path of paths) {
-    if (failed.has(path)) {
-      const previous = page.current(), count = page.inserted.length;
-      previous.onerror();
-      previous.onerror();
-      previous.onload();
-      page.advance(99);
-      assert.equal(page.inserted.length, count);
-      page.advance(1);
-      assert.equal(page.inserted.length, count + 1);
-      const url = new URL(page.current().src);
-      assert.equal(url.pathname, path);
-      assert.equal(url.searchParams.get("v"), "content-digest");
-      assert.equal(url.searchParams.get("startup_retry"), "1");
-      assert.equal(previous.removed, true);
-    }
-    const script = page.current();
-    assert.equal(new URL(script.src).pathname, path);
-    script.onload();
-    script.onload();
-    script.onerror();
-  }
-  assert.equal(page.status.startup, "loaded");
-  assert.equal(page.inserted.length, paths.length + failed.size);
-  assert.equal(page.timers.size, 0);
-});
-
-test("persistent failure stops after six attempts and exposes the existing error notice", () => {
-  const page = fixture();
-  page.current().onerror();
-  for (const delay of [100, 200, 400, 800, 1600]) {
-    page.advance(delay);
-    page.current().onerror();
-  }
-  assert.equal(page.inserted.length, 6);
-  assert.equal(page.status.startup, "failed");
-  assert.equal(page.notice.hidden, false);
-  assert.match(page.message.textContent, /Could not load Ribbon Field/);
-  assert.equal(page.timers.size, 0);
-  page.advance(10000);
-  page.run();
-  assert.equal(page.inserted.length, 6);
-});
-
-test("a stalled request reaches the total deadline without unsafe reinsertion", () => {
-  const page = fixture(), script = page.current();
-  page.advance(3999);
+test("workspace defers one program while starting its independent configuration request", async () => {
+  assert.deepEqual(entries.map(match => match[1]), ["/dist/app.js"]);
+  assert.match(html, /<link rel="stylesheet" href="\/dist\/app.css">/);
+  assert.doesNotMatch(html, /data-startup/);
+  const page = startup();
   assert.equal(page.status.startup, "loading");
-  page.advance(1);
-  assert.equal(page.status.startup, "waiting");
-  assert.equal(page.inserted.length, 1);
-  assert.equal(page.notice.hidden, false);
-  assert.equal(page.timers.size, 0);
-  // A late success continues forward without replaying any script or extending
-  // the retry deadline. The real-browser test executes the delayed app itself.
-  script.onload(); script.onerror();
-  for (const path of paths.slice(1)) {
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
-  assert.equal(page.inserted.length, paths.length);
+  assert.deepEqual(page.requests, [{path: "/api/browser/config", cache: "no-store", priority: "high"}]);
+  assert.equal((await page.configuration).ok, true);
+  page.emit("load", {id: "some-other-resource"});
+  assert.equal(page.status.startup, "loading");
+  page.emit("load");
   assert.equal(page.status.startup, "loaded");
+  assert.deepEqual(page.timers, []);
+  assert.equal(page.inserted.length, 0);
+});
+
+test("a failed bundle retries the same artifact and can initialize on retry", () => {
+  const page = startup();
+  const failed = page.current();
+  page.emit("error");
+  assert(failed.removed);
   assert.equal(page.notice.hidden, true);
-  assert.equal(page.timers.size, 0);
+  const next = page.timers.shift();
+  assert(next.delay > 0);
+  next.callback();
+  assert.equal(page.current().src, failed.src);
+  page.emit("load");
+  assert.equal(page.status.startup, "loaded");
+  assert.equal(page.inserted.length, 1);
+  assert.deepEqual(page.timers, []);
+  assert.equal(page.requests.length, 1);
 });
 
-test("late success cannot start another retry window for a failed dependent", () => {
-  const page = fixture();
-  page.advance(4000);
-  page.current().onload();
-  page.current().onerror();
+test("unopened dialog documents stay inert and each first use retains its native frame", () => {
+  const ids = ["settings-frame", "usage-frame", "activity-frame", "html-preview-window"];
+  const frames = new Map(), templates = new Map();
+  for (const id of ids) {
+    assert.match(html, new RegExp(`<template id="${id}-template"><iframe id="${id}"[^>]*></iframe></template>`));
+    templates.set(id + "-template", {
+      content: {firstElementChild: {id}},
+      replaceWith(frame) { frames.set(frame.id, frame); templates.delete(id + "-template"); },
+    });
+  }
+  const context = vm.createContext({crypto: {randomUUID() {}},
+    document: {getElementById: id => frames.get(id) || templates.get(id)}});
+  loadWebModule(context, "browser-compatibility.js");
+  assert.equal(frames.size, 0);
+  for (const id of ids) {
+    const frame = templates.get(id + "-template").content.firstElementChild;
+    assert.equal(context.workspaceDialogFrame(context.document, id), frame);
+    assert.equal(context.workspaceDialogFrame(context.document, id), frame);
+    assert.equal(templates.has(id + "-template"), false);
+  }
+});
+
+test("permanent failure stops retrying and exposes actionable startup feedback", () => {
+  const page = startup();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = page.current();
+    page.emit("error");
+    assert(current.removed);
+    if (attempt < 2) page.timers.shift().callback();
+  }
+  assert.equal(page.inserted.length, 2);
+  assert.deepEqual(page.timers, []);
   assert.equal(page.status.startup, "failed");
   assert.equal(page.notice.hidden, false);
-  page.advance(10000);
-  assert.equal(page.inserted.length, 2);
-  assert.equal(page.timers.size, 0);
+  assert.match(page.message.textContent, /Could not load Ribbon Field.*reload/);
 });
 
-test("late load failure never reinserts the uncertain script", () => {
-  const page = fixture();
-  page.advance(4000);
-  page.current().onerror();
-  assert.equal(page.status.startup, "failed");
-  page.advance(10000);
-  assert.equal(page.inserted.length, 1);
-  assert.equal(page.timers.size, 0);
-});
-
-test("late completion preserves an unrelated application error", () => {
-  const page = fixture();
-  page.advance(4000);
+test("a pending bundle can complete without a premature error, retry, or clearing an application error", () => {
+  const page = startup();
+  assert.deepEqual(page.timers, []);
+  assert.equal(page.notice.hidden, true);
+  assert.equal(page.status.startup, "loading");
+  page.notice.hidden = false;
   page.message.textContent = "Conversation could not be opened.";
-  for (const path of paths) {
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
+  page.emit("load");
   assert.equal(page.status.startup, "loaded");
+  assert.equal(page.inserted.length, 0);
   assert.equal(page.notice.hidden, false);
   assert.equal(page.message.textContent, "Conversation could not be opened.");
-});
-
-test("the recovery deadline covers the whole sequence, not each asset separately", () => {
-  const page = fixture();
-  page.advance(3500);
-  page.current().onload();
-  page.current().onerror();
-  page.advance(100);
-  page.current().onerror();
-  page.advance(200);
-  page.current().onerror();
-  page.advance(200);
-  assert.equal(page.status.startup, "failed");
-  assert.equal(page.timers.size, 0);
-  const attempts = page.inserted.length;
-  page.advance(10000);
-  assert.equal(page.inserted.length, attempts);
 });

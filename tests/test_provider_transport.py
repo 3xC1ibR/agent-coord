@@ -309,6 +309,38 @@ class TransportTests(unittest.TestCase):
     def test_close_refuses_group_signals_after_provider_leader_is_reaped(self):
         self.assert_descendant_shutdown(leader_exits=True)
 
+    def test_close_accepts_group_exit_during_permission_error(self):
+        # Darwin can report EPERM after delivery leaves only zombies. The
+        # observation made before killpg must not override a fresh exit proof.
+        import errno
+        import signal
+        self.open()
+        process = self.owner.processes["provider"]
+        kill_group = os.killpg
+
+        def exit_before_result(group, number):
+            kill_group(group, number)
+            deadline = time.monotonic() + 3
+            while observe_child_exit(process.pid) is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertEqual(observe_child_exit(process.pid), process.pid)
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+        with patch("agent_coord.provider_transport.os.killpg", side_effect=exit_before_result):
+            result = self.command("close", "close", {})
+        self.assertEqual(result["outcome"], "written", result)
+        self.assertEqual(process.returncode, -signal.SIGTERM)
+
+    def test_permission_error_keeps_live_group_shutdown_unconfirmed(self):
+        import errno
+        self.open()
+        process = self.owner.processes["provider"]
+        with patch("agent_coord.provider_transport.os.killpg",
+                   side_effect=PermissionError(errno.EPERM, os.strerror(errno.EPERM))):
+            result = self.command("close", "close", {})
+        self.assertEqual(result["outcome"], "uncertain")
+        self.assertIsNone(observe_child_exit(process.pid))
+
     def test_owner_stop_uses_one_grace_period_for_all_process_groups(self):
         import os
         for index in range(3):

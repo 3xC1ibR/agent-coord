@@ -181,12 +181,15 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
    Intel hardware when available; an Intel runner does not cover every
    supported macOS version.
 3. Run the private workload on the operator Mac for each architecture using
-   the procedure below. Approve `macos-release`. The publisher requires both
+   the procedure below. Submit both receipts before approving `macos-release`.
+   The publisher requires both
    authenticated results for this attempt, validates both complete artifact sets,
    checks their recorded source commit, and uploads versioned files. It then
    downloads them through the public HTTPS host and verifies every checksum.
    Only after all checks pass does it upload `releases/X.Y.Z/release.json`.
-4. CI atomically advances `https://downloads.ribbonfield.com/releases/current.json`.
+4. A separate CI step rechecks both receipts and the published version manifest,
+   then advances the signed Sparkle feeds and
+   `https://downloads.ribbonfield.com/releases/current.json`.
    The website reads its version, channel and both installer URLs through
    `https://api.ribbonfield.com/v1/release`; no website release edit is needed.
    Both manifests include the source commit, CI build number and workflow run URL.
@@ -254,8 +257,9 @@ and a context derived from the signed asset identities are transmitted. The
 publisher verifies the authenticated creator and latest status for each
 architecture against the commit, build, run, attempt and hashes of the signed
 update ZIP and DMG. After a rerun, rerun both private gates for the new attempt.
-The publication step waits up to 150 minutes for the two receipts. If either
-gate fails, retain its private report for diagnosis.
+The publication job starts after environment approval and fails immediately
+when either receipt is missing. If either gate fails, retain its private
+report for diagnosis.
 
 ## Build and install locally
 
@@ -301,13 +305,13 @@ repeat dialogs for that version until the next interface launch; the update menu
 remains available. The staged backend stays inactive until explicitly installed.
 Signed releases use the same two choices while retaining Sparkle's verified
 download, progress, and installation checks. Development builds still do not
-check production release feeds. Runtimes advertising `uninterrupted_updates: 1`
-retain Codex and Claude provider processes and native turns across compatible
-coordinator upgrades. Active unsupported providers defer replacement. First
-adoption from a legacy backend uses one guarded restart, retains rollback state,
-and continues eligible saved conversations; that first transition interrupts
-execution. Approvals, Stop, queued user input and uncertain submissions take
-precedence. Use the matching installed helper's
+check production release feeds. Compatible coordinators retain transport-owned Codex, Claude, Kimi,
+Antigravity and Muse channels across backend upgrades. For first adoption,
+inspect the outgoing runtime. Build 98 can interrupt an eligible Kimi,
+Antigravity or Muse turn during an explicit update. Let those turns finish
+before requesting activation if uninterrupted execution is required. A guarded
+interruption retains rollback state and observes approvals, Stop, queued user
+input and uncertain submissions. Use the matching installed helper's
 [`--runtime-command status`](../../docs/runtime-updates.md#runtime-maintenance-controls)
 to check ownership, pending payload and busy reasons; while work continues,
 verify that its runtime instance remains unchanged. After activation,
@@ -379,8 +383,9 @@ The build command signs local builds using the identity selection above.
   restores open normal and detached windows, their tabs, unsent drafts, reading
   positions and usable window geometry. Secondary windows closed individually
   stay closed; a closed final window is kept and restored with its tabs.
-  Window state is saved on a best-effort basis: Quit, logout and updates are
-  never refused, and an unsaved change falls back to the last saved snapshot.
+  The interface saves window state and composer edits while you work. This
+  keeps ordinary Quit independent of WebKit snapshot collection and pending
+  submissions.
 - Command-Q quits the interface and leaves agents, tools, approvals, and queued
   work running. Opening the app reconnects to the runtime for its database.
   **Ribbon Field → Stop Work and Quit…** explicitly stops that work and exits;
@@ -408,10 +413,10 @@ menu, including development builds without Sparkle. Passive staging still waits
 for idle. An incompatible update or unavailable runtime check defers installation.
 
 An explicit backend update retains the old executable and a SQLite rollback
-snapshot until the candidate is ready and durably committed. Saved conversations
-can continue after restart; running provider/tool processes are not preserved.
-Recovery checks native history for Codex and Claude. Other providers require
-explicit continuation until they supply an authoritative native recovery check.
+snapshot until the candidate is ready and durably committed. The retained transport keeps provider processes,
+active native turns and pending requests across compatible coordinator
+replacements. On older builds that own provider pipes, the guarded restart
+uses saved native-session recovery and reports each outcome separately.
 Runtime status includes per-conversation recovery outcomes and reasons. Failed
 or forced shutdown leaves work paused for review; Stop Work and Quit cancels
 recovery. See the contract for recovery and rollback limits.
@@ -596,8 +601,10 @@ installing the Codex and Claude plugins.
 ```bash
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
 node --test tests/test_desktop_bridge.js tests/test_desktop_palette.js
-python3 desktop/macos/build.py
+python3 desktop/macos/build.py --smoke-harness
 python3 desktop/macos/smoke_test.py
+# Verify both windows across an origin change, then measure Quit and restore drafts:
+python3 desktop/macos/smoke_test.py --origins-only
 # Verify native quit/reconnect preserves the same runtime, then clean it up:
 python3 desktop/macos/smoke_test.py --runtime-only
 # Focused native session-switching check:
@@ -610,7 +617,10 @@ python3 desktop/macos/smoke_test.py --notifications-only
 python3 desktop/macos/smoke_test.py --titlebar-only
 ```
 
-The native smoke mode uses a temporary database and preference domain, starts
+The native smoke build produces `build/macos/Ribbon Field Smoke.app` with a
+separate bundle identity. It cannot be installed or packaged by the builder.
+Use `--app` on the smoke scripts if you selected another output location.
+The smoke harness uses a temporary database and preference domain, starts
 no model turns, and loads the real UI in two WKWebViews. It checks native menu
 shortcuts, independent drafts/navigation/session storage, shared preferences,
 mixed file/image drops through a private pasteboard, directory folder drops into `/cd`, New session/⌘N parity,

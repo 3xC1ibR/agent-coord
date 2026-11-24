@@ -25,7 +25,7 @@ class FakeConnection:
     def poll(self):
         return 0 if self.closed else None
 
-    def control(self, subtype):
+    def control(self, subtype, *, timeout=30):
         return {"models": [{"value": "default", "supportedEffortLevels": ["low", "high"]},
                             {"value": "sonnet", "supportedEffortLevels": ["low", "high"]}]}
 
@@ -136,6 +136,27 @@ class ProviderTests(unittest.TestCase):
         for invalid in ("other", [], None):
             with self.assertRaises(CoordinationError):
                 self.sessions.create({"client": invalid})
+
+    def test_provider_close_failure_preserves_remaining_shutdown_and_reports_error(self):
+        from agent_coord.provider_transport import TransportError
+        self.sessions.loaded.add("uncertain-native")
+        self.sessions.loaded_clients["uncertain-native"] = "antigravity"
+        with patch.object(self.sessions.antigravity, "close", side_effect=TransportError("owned group is still live")), \
+                patch.object(self.sessions.kimi, "close", wraps=self.sessions.kimi.close) as kimi_close, \
+                patch.object(self.sessions.muse, "close", wraps=self.sessions.muse.close) as muse_close, \
+                patch.object(self.sessions.persistence, "close", wraps=self.sessions.persistence.close) as persistence_close, \
+                patch.object(self.sessions.execution, "close", wraps=self.sessions.execution.close) as execution_close, \
+                patch.object(self.sessions, "_event", wraps=self.sessions._event) as event:
+            with self.assertRaisesRegex(CoordinationError, "antigravity.*owned group is still live"):
+                self.sessions.close()
+            kimi_close.assert_called_once()
+            muse_close.assert_called_once()
+            persistence_close.assert_called_once()
+            execution_close.assert_called_once()
+            self.assertNotIn(
+                {"method": "thread/closed", "params": {"threadId": "uncertain-native"}},
+                [call.args[0] for call in event.call_args_list],
+            )
 
     def test_streaming_tools_and_durable_resume(self):
         thread = self.create()

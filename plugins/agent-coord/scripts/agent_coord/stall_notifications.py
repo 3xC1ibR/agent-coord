@@ -12,6 +12,7 @@ import math
 from urllib.parse import quote
 
 from . import supervision
+from .store import CoordinationError
 from .workspaces import matches_workspace
 
 CLASSIFICATIONS = {'stalled', 'unverified_tool', 'long_running_tool', 'waiting_for_approval'}
@@ -49,6 +50,9 @@ def initialize(db):
         sequence INTEGER NOT NULL, created_at REAL NOT NULL, supervisor_id TEXT, message_id INTEGER,
         user_escalated INTEGER NOT NULL, claimed_at REAL, body_json TEXT NOT NULL,
         UNIQUE(incident_id, sequence))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS browser_stall_dismissals (
+        incident_id INTEGER PRIMARY KEY REFERENCES app_agent_stall_incidents(id),
+        thread_id TEXT NOT NULL, dismissed_at REAL NOT NULL)''')
 
 
 # Completion and Stop are authoritative even if an observer's clear callback was lost.
@@ -256,6 +260,26 @@ def snapshot(store, thread_id, turn_id=None):
         return dict(row) if row else None
 
 
+def dismissed(store, incident_id):
+    with store.reading(), store._connection() as db:
+        return db.execute("SELECT 1 FROM browser_stall_dismissals WHERE incident_id=?", (incident_id,)).fetchone() is not None
+
+
+def dismiss(store, thread_id, incident_id):
+    if type(incident_id) is not int or incident_id <= 0:
+        raise CoordinationError("Choose the displayed stall to dismiss.")
+    with store.database_operation("stall.dismiss", priority="foreground"), store._connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT classification FROM app_agent_stall_incidents WHERE id=? AND thread_id=?",
+                         (incident_id, thread_id)).fetchone()
+        if row is None or row["classification"] not in {"stalled", "unverified_tool"}:
+            raise CoordinationError("Choose a stall in this conversation that can be dismissed.")
+        db.execute('''INSERT OR IGNORE INTO browser_stall_dismissals
+            SELECT i.id, i.thread_id, ? FROM app_agent_stall_incidents i
+            JOIN work_threads t ON t.thread_id=i.thread_id WHERE ''' + _LIVE + ' AND i.id=?',
+            (store.clock(), incident_id))
+
+
 def apply_attention(thread, *, now, waiting=False):
     """Project durable health after ordinary attention policy, without provider IO."""
     incident = thread.get('stall_incident')
@@ -272,7 +296,7 @@ def apply_attention(thread, *, now, waiting=False):
         thread.update(status='stalled', response_state='action')
     # A genuinely stalled delegated turn is visible on the first supervisor alert.
     # Device escalation remains governed by the occurrence's user_escalated flag.
-    if thread['attention'] == 'archived' or thread['snoozed']:
+    if incident.get("dismissed") or thread['attention'] == 'archived' or thread['snoozed']:
         return
     if incident['last_user_alert_at'] is None and (state != 'stalled' or waiting):
         return
@@ -284,7 +308,7 @@ def apply_attention(thread, *, now, waiting=False):
         action += f"; {count} queued request{'s' if count != 1 else ''}, oldest {age // 60} min"
     thread.update(needs_attention=True, attention_reason='blocked', attention_key=f"stall:{incident['id']}",
                   attention_since=incident['created_at'], attention_action=action,
-                  attention_owner_thread_id=thread['thread_id'], can_handle_response=False)
+                  attention_owner_thread_id=thread['thread_id'], can_handle_response=not waiting and state == "stalled")
 
 
 def notifications(store, *, include_claimed=False, cwd=None):
@@ -298,6 +322,7 @@ def notifications(store, *, include_claimed=False, cwd=None):
             LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
             LEFT JOIN named_projects p ON p.id=o.project_id LEFT JOIN work_repositories r ON r.id=o.repository_id
             WHERE ''' + _LIVE + ''' AND a.sequence=i.alert_count AND a.user_escalated=1
+            AND NOT EXISTS (SELECT 1 FROM browser_stall_dismissals d WHERE d.incident_id=i.id)
             AND (t.snoozed_until IS NULL OR t.snoozed_until<=?) AND (? OR a.claimed_at IS NULL)
             ORDER BY a.id''', (store.clock(), include_claimed)).fetchall()
     result = []
@@ -334,6 +359,7 @@ def claim_notification(store, key, *, cwd=None):
             JOIN app_agent_stall_incidents i ON i.id=a.incident_id JOIN work_threads t ON t.thread_id=i.thread_id
             JOIN sessions s ON s.session_id=i.thread_id WHERE ''' + _LIVE + ''' AND a.id=?
             AND a.sequence=i.alert_count AND a.user_escalated=1 AND a.claimed_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM browser_stall_dismissals d WHERE d.incident_id=i.id)
             AND (t.snoozed_until IS NULL OR t.snoozed_until<=?)''', (identifier, store.clock())).fetchone()
         if not row or not matches_workspace(row['cwd'], cwd):
             return False

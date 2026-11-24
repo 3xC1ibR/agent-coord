@@ -334,11 +334,11 @@ class AskAttentionTests(unittest.TestCase):
             for path, needle in (("/asks.js", b"class AsksUI"), ("/asks.js", b"class AsksView"), ("/asks.js", b"viewName"),
                                  ("/asks.js", b"class ThreadAsksView"), ("/asks.css", b".thread-asks"),
                                  ("/asks.css", b".asks-toggle-count"),
-                                 ("/asks.css", b".asks-count"), ("/asks.css", b".asks-view"), ("/", b'id="open-asks"'),
+                                 ("/asks.css", b".asks-count"), ("/asks.css", b".asks-view"),
                                  ("/", b'id="open-asks-view"'), ("/", b'id="asks-dialog"'), ("/", b'id="asks-list"'),
                                  ("/", b'<section id="thread-asks" class="asks-view thread-asks" hidden>'),
                                  ("/", b'<section id="thread-asks-history" class="thread-context thread-asks-history"'),
-                                 ("/asks.js", b"Reply in conversation"), ("/asks.css", b".ask-reply"),
+                                 ("/asks.js", b"Discuss in thread"), ("/asks.css", b".ask-reply"),
                                  ("/", b'<span id="asks-toggle-count" class="asks-count asks-toggle-count" hidden>')):
                 with urllib.request.urlopen(base + path) as response:
                     self.assertIn(needle, response.read(), path)

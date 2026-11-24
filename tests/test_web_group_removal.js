@@ -99,7 +99,8 @@ test("hidden groups survive reload, workspace switches and background work witho
   assert.equal(groupTab(fresh, "launch"), undefined);
   for (const response_state of ["working", "reply", "failed", "input"]) {
     fresh.views.sync([], [...groups]);
-    fresh.views.render([{thread_id: "member", attention: "now", project_id: "launch", response_state}]);
+    fresh.views.render([{thread_id: "member", attention: "now", project_id: "launch", response_state,
+      unread_result: response_state === "reply", attention_since: Date.now() / 1000}]);
     assert.equal(groupTab(fresh, "launch"), undefined, response_state);
     if (response_state !== "working") {
       assert.ok(fresh.$("saved-view-tabs").children[0].children.some(child => child.className === "view-attention"));

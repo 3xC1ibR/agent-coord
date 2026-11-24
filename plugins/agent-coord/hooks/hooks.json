@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -51,7 +51,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]
@@ -73,7 +73,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
+            "command": "python3 -B \"${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook\"",
             "timeout": 10
           }
         ]

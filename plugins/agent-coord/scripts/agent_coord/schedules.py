@@ -82,11 +82,18 @@ class ScheduledPrompts:
             raise CoordinationError("Scheduled prompt not found in this workspace.")
         return row
 
-    def list(self):
+    def list(self, *, thread_id=None, limit=None):
         with self.store.reading(), self.store._connection() as db:
-            rows = db.execute("SELECT * FROM scheduled_prompts ORDER BY run_at DESC, id").fetchall()
-            latest = {row["schedule_id"]: dict(row) for row in db.execute("""SELECT r.* FROM scheduled_prompt_runs r
-                WHERE r.id = (SELECT MAX(p.id) FROM scheduled_prompt_runs p WHERE p.schedule_id = r.schedule_id)""")}
+            if thread_id is None:
+                rows = db.execute("SELECT * FROM scheduled_prompts ORDER BY run_at DESC, id").fetchall()
+                latest = {row["schedule_id"]: dict(row) for row in db.execute("""SELECT r.* FROM scheduled_prompt_runs r
+                    WHERE r.id = (SELECT MAX(p.id) FROM scheduled_prompt_runs p WHERE p.schedule_id = r.schedule_id)""")}
+            else:
+                rows = db.execute("""SELECT * FROM scheduled_prompts WHERE target_thread_id = ?
+                    ORDER BY run_at DESC, id LIMIT ?""", (thread_id, limit)).fetchall()
+                latest = {row["id"]: dict(run) for row in rows if (run := db.execute("""
+                    SELECT * FROM scheduled_prompt_runs WHERE schedule_id = ?
+                    ORDER BY run_at DESC LIMIT 1""", (row["id"],)).fetchone())}
         return [{**self._describe(row), "last_run": latest.get(row["id"])}
                 for row in rows if matches_workspace(row["cwd"], self.sessions.cwd)]
 

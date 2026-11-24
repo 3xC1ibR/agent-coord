@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -26,22 +27,29 @@ function setup() {
     response: {status: 200, ok: true, headers: {get: () => "application/json"}, json: async () => ({dispatched: true})}};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("async function api("), source.indexOf("async function openMentionFile(")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   c.$("message").value = "Review the navigation";
   return {c, values, calls, warnings, delays, errors};
 }
 
-test("ordinary conversation retry retains its request ID across provider and window changes", async () => {
+test("checking uncertain conversation delivery reuses its original request and steering precondition", async () => {
   const {c, calls, values} = setup();
   c.state.detail.work_thread.dispatcher = false;
+  c.state.config.ordinarySubmissionReceipts = 1;
   c.response.json = async () => { throw new SyntaxError("Incomplete response"); };
   await assert.rejects(c.sendMessage(), /check the conversation before sending again/);
+  assert.equal(calls.length, 1);
+  const echo = c.state.outgoing.list("dispatcher")[0];
+  assert.equal(echo.status, "uncertain");
   c.state.sourceWindowId = "replacement-window";
   c.state.detail.running = true;
   c.state.detail.activeTurn = "possibly-accepted-turn";
   c.response.json = async () => ({turnId: "possibly-accepted-turn"});
-  await c.sendMessage();
-  assert.equal(calls[1].body.requestId, calls[0].body.requestId);
+  await echo.retry();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].body, calls[0].body);
+  assert.equal(echo.status, "sent");
   assert.equal(values.has("dispatch-request:dispatcher"), false);
 });
 
@@ -77,6 +85,7 @@ test("typing a new draft during an accepted send survives a failed refresh", asy
   const {c, errors} = setup();
   c.response.json = async () => {
     c.$("message").value = "A different request";
+    c.state.drafts.set("dispatcher", c.$("message").value);
     return {dispatched: true};
   };
   c.refreshList = async () => { throw new Error("Disconnected"); };

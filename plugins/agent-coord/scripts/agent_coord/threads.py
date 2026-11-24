@@ -86,6 +86,10 @@ class ThreadStore:
                     handled_checkpoint_id INTEGER NOT NULL DEFAULT 0,
                     handled_completion_id INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS browser_seen_classification (
+                    thread_id TEXT PRIMARY KEY REFERENCES work_threads(thread_id) ON DELETE CASCADE,
+                    checkpoint_id INTEGER NOT NULL, completion_id INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS thread_checkpoints (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
@@ -369,7 +373,9 @@ class ThreadStore:
                  FROM work_threads t JOIN work_projects p ON p.id = t.project_id
                  JOIN sessions s ON s.session_id = t.thread_id"""
 
-    def get(self, thread_id: str, *, history=False) -> dict:
+    def get(self, thread_id: str, *, history=False, connection=None) -> dict:
+        if connection is not None:
+            return self.read_thread(connection, thread_id, history=history)
         with self.store.reading(), self.store._connection() as db:
             return self.read_thread(db, thread_id, history=history)
 
@@ -491,7 +497,8 @@ class ThreadStore:
     def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, quiet=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
                handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
-               snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True) -> dict | None:
+               snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True, auto_handle_seen=None,
+               await_seen_classification=False) -> dict | None:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
@@ -519,7 +526,7 @@ class ThreadStore:
                 raise CoordinationError("Snooze time must be a valid Unix timestamp.")
             if snoozed_until is not UNSET and snoozed_until <= self.store.clock():
                 raise CoordinationError("Choose a snooze time in the future.")
-        with self.store._connection() as db:
+        with self.store.database_operation("threads.update", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if snoozed_until is not UNSET or resume_snooze is not UNSET:
                 current = db.execute("SELECT attention, snoozed_until FROM work_threads WHERE thread_id = ?", (thread_id,)).fetchone()
@@ -536,6 +543,19 @@ class ThreadStore:
                 self._mark_receipts(db, thread_id, handled_checkpoint_id, handled_completion_id, kind="handled")
             if seen:
                 self._mark_seen(db, thread_id, seen_checkpoint_id, seen_completion_id)
+                if await_seen_classification:
+                    db.execute("""INSERT INTO browser_seen_classification VALUES (?, ?, ?)
+                        ON CONFLICT(thread_id) DO UPDATE SET checkpoint_id=excluded.checkpoint_id,
+                            completion_id=excluded.completion_id
+                        WHERE excluded.completion_id >= completion_id AND excluded.checkpoint_id >= checkpoint_id""",
+                        (thread_id, seen_checkpoint_id, seen_completion_id))
+                if (auto_handle_seen is not None and self._informational_receipt_current(
+                        db, thread_id, seen_checkpoint_id, seen_completion_id,
+                        require_classification=await_seen_classification) and auto_handle_seen()):
+                    self._mark_receipts(db, thread_id, seen_checkpoint_id, seen_completion_id, kind="handled")
+                    db.execute("""DELETE FROM browser_seen_classification WHERE thread_id=?
+                        AND checkpoint_id<=? AND completion_id<=?""",
+                        (thread_id, seen_checkpoint_id, seen_completion_id))
             self.organization.update(db, thread_id, repository_id=repository_id, project_id=project_id)
             if title is not None:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
@@ -557,6 +577,37 @@ class ThreadStore:
     @staticmethod
     def _mark_seen(db, thread_id, checkpoint_id=None, completion_id=None):
         ThreadStore._mark_receipts(db, thread_id, checkpoint_id, completion_id, kind="seen")
+
+    def pending_seen_classification(self, thread_id, completion_id):
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("""SELECT checkpoint_id FROM browser_seen_classification
+                WHERE thread_id=? AND completion_id=?""", (thread_id, completion_id)).fetchone()
+        return row["checkpoint_id"] if row else None
+
+    @staticmethod
+    def _informational_receipt_current(db, thread_id, checkpoint_id, completion_id, *, require_classification):
+        """Recheck durable blockers and both displayed cursors at commit."""
+        from .attention import MODEL, POLICY_VERSION
+        return db.execute("""SELECT 1 FROM work_threads t
+            JOIN sessions s ON s.session_id = t.thread_id
+            LEFT JOIN thread_checkpoints cp ON cp.id = (SELECT MAX(id)
+                FROM thread_checkpoints WHERE thread_id = t.thread_id)
+            LEFT JOIN turn_completions c ON c.thread_id = t.thread_id AND c.turn_key = t.turn_key
+            LEFT JOIN response_classification_cache r ON r.completion_id = c.id
+                AND r.checkpoint_id = CASE WHEN cp.refreshed_at >= COALESCE(t.turn_started_at, 0)
+                    THEN cp.id ELSE 0 END AND r.model = ? AND r.policy_version = ?
+            WHERE t.thread_id = ? AND COALESCE(cp.id, 0) = ? AND COALESCE(c.id, 0) = ?
+              AND NOT s.turn_active AND (c.status = 'completed' OR t.turn_key IS NULL)
+              AND COALESCE(cp.next_actor, '') != 'user'
+              AND NOT EXISTS (SELECT 1 FROM asks a
+                  WHERE a.session_id = t.thread_id AND a.status = 'open' AND a.blocking = 1)
+              AND NOT EXISTS (SELECT 1 FROM browser_inbox_wake w
+                  WHERE w.thread_id = t.thread_id AND w.paused = 1)
+              AND NOT EXISTS (SELECT 1 FROM review_runs v WHERE v.state IN ('creating', 'active')
+                  AND (v.owner_id = t.thread_id OR v.critic_id = t.thread_id))
+              AND (r.completion_id IS NULL OR (r.status = 'classified' AND r.choice IN ('update', 'findings', 'done')))
+              AND (NOT ? OR r.completion_id IS NOT NULL)""",
+            (MODEL, POLICY_VERSION, thread_id, checkpoint_id, completion_id, require_classification)).fetchone() is not None
 
     @staticmethod
     def _mark_receipts(db, thread_id, checkpoint_id=None, completion_id=None, *, kind):

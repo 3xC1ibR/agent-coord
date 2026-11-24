@@ -36,8 +36,8 @@ class ThreadScratchpad {
     } catch { /* Saving to the server still works without browser storage. */ }
   }
 
-  select(id) {
-    if (id === this.selected) return;
+  select(id, {snapshot, defer = false} = {}) {
+    if (id === this.selected && !snapshot && (defer || !id || this.entries.get(id)?.loaded)) return;
     this.flush(this.entries.get(this.selected));
     this.selected = id;
     this.panel.hidden = !id;
@@ -51,7 +51,14 @@ class ThreadScratchpad {
       entry.edited = draft !== null;
       this.entries.set(id, entry);
     }
-    if (!entry.saving && (!entry.loaded || entry.text === entry.saved)) this.load(entry);
+    if (!entry.saving && !entry.loading && (!entry.loaded || entry.text === entry.saved)) {
+      if (snapshot && typeof snapshot.text === "string") {
+        entry.saved = snapshot.text; entry.text = entry.draft ?? snapshot.text;
+        entry.draft = null; entry.loaded = true;
+        this.remember(entry);
+        if (entry.text !== entry.saved) this.schedule(entry, 500);
+      } else if (!defer) this.load(entry);
+    }
     this.render();
   }
 

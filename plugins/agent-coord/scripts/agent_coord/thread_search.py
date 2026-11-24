@@ -261,8 +261,19 @@ def _save_context(db, overlay):
 
 
 @contextmanager
-def _search_connection(store):
+def _search_connection(store, external=None):
     """Keep a warm search entirely outside writer admission."""
+    if external is not None:
+        # Attach through a read-only URI without entering coordination writer
+        # admission or modifying its schema. Detach before returning to the pool.
+        with store.reading(), store._connection() as db:
+            db.execute("ATTACH DATABASE ? AS isolated_search", (external.path.as_uri() + "?mode=ro",))
+            try:
+                tables = {row[0] for row in db.execute("SELECT name FROM main.sqlite_master")}
+                yield db, tables
+            finally:
+                db.execute("DETACH DATABASE isolated_search")
+        return
     while True:
         with store.reading(), store._connection() as db:
             names, organization_missing = db.execute(f"""SELECT
@@ -288,6 +299,10 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                    source="all", my_messages=False, thread_ids=None, schedule_index=None, snapshot_dirty=False):
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise CoordinationError("Search query must contain 1–500 characters.")
+    try:
+        query.encode("utf-8")
+    except UnicodeEncodeError:
+        raise CoordinationError("Search query must contain valid Unicode text.") from None
     terms = list(dict.fromkeys(query.casefold().split()))
     phrase = " ".join(query.casefold().split())
     if len(terms) > 10:
@@ -299,7 +314,9 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     if my_messages:
         source = "messages"
     workspace = project_root(cwd) if cwd is not None else None
-    filters = {"ranking": 2, "terms": terms, "phrase": phrase, "cwd": workspace, "app_only": bool(app_only),
+    from .search_store import active_search
+    external = active_search(store)
+    filters = {"ranking": 3 if external is not None else 2, "terms": terms, "phrase": phrase, "cwd": workspace, "app_only": bool(app_only),
                "source": source, "my_messages": bool(my_messages),
                "thread_ids": sorted(thread_ids) if thread_ids is not None else None}
     filters.update({key: value for key, value in (("repository", repository_id), ("project", project_id))
@@ -327,12 +344,15 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     use_context, use_messages = source != "messages", source != "context"
     message_where = message_condition(terms, "user" if my_messages else None)
     message_relevance = _message_relevance_sql(single, closeness)
-    if snapshot_dirty:
-        ensure_message_schema(store)
-    else:
-        refresh_messages(store, schedule_index=schedule_index)
+    if external is None:
+        if snapshot_dirty:
+            ensure_message_schema(store)
+        else:
+            refresh_messages(store, schedule_index=schedule_index)
     settled = []
-    with _measure(store, "query"), _search_connection(store) as (db, tables):
+    context_table = ("(SELECT thread_id,title,request,summary,artifacts || char(10) || domain AS artifacts "
+                     "FROM isolated_search.search_threads)" if external is not None else "conversation_search_context")
+    with _measure(store, "query"), _search_connection(store, external) as (db, tables):
         app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
         if app_only:
             where.append(app)
@@ -341,13 +361,24 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         db.execute("BEGIN")
         try:
             from .conversation_substrings import candidates as substring_candidates, message_source
-            with _measure(store, "substring_query") as index_measurement:
-                indexed = substring_candidates(db, terms, index_measurement) if use_messages else None
-            params["substring_candidates"] = indexed
-            message_rows = message_source(include_text=True, indexed=indexed is not None)
-            folded_rows = message_source(include_text=False, indexed=indexed is not None)
-            history_rows = "conversation_search_history_index"
-            if snapshot_dirty and "browser_history" in tables:
+            if external is not None:
+                indexed = None
+                message_rows, params["external_match"] = external.message_source(terms)
+                folded_rows, _ = external.message_source(terms, include_text=False, evidence_only=True)
+                exact = [f"instr(m.folded, :q{i}) > 0" for i, term in enumerate(terms)
+                         if len(term) < 3 or "\0" in term]
+                if my_messages:
+                    exact.append("m.role = 'user'")
+                message_where = " AND ".join(exact) or "1"
+                message_relevance = "m.native_relevance"
+            else:
+                with _measure(store, "substring_query") as index_measurement:
+                    indexed = substring_candidates(db, terms, index_measurement) if use_messages else None
+                params["substring_candidates"] = indexed
+                message_rows = message_source(include_text=True, indexed=indexed is not None)
+                folded_rows = message_source(include_text=False, indexed=indexed is not None)
+            history_rows = "isolated_search.search_threads" if external is not None else "conversation_search_history_index"
+            if external is None and snapshot_dirty and "browser_history" in tables:
                 projection = getattr(store, "provider_projection", None)
                 published = getattr(projection, "prepared_histories", {})
                 with _measure(store, "pending_history") as measurement:
@@ -370,8 +401,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                     folded_rows = with_dirty(folded_rows)
             if use_context:
                 # Sources first, then the casefolded text that the search compares.
-                overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
-                           for row in json.loads(db.execute(_MISSING_CONTEXT).fetchone()[0])}
+                missing_context = (external is None or db.execute("""SELECT EXISTS(
+                    SELECT 1 FROM work_threads t WHERE NOT EXISTS
+                    (SELECT 1 FROM isolated_search.search_threads h WHERE h.thread_id=t.thread_id))""").fetchone()[0])
+                if missing_context:
+                    overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
+                               for row in json.loads(db.execute(_MISSING_CONTEXT.replace("conversation_search_context", context_table)).fetchone()[0])}
             params["overlay"] = json.dumps(overlay)
             fields = {name: f"CASE WHEN y.thread_id IS NULL THEN IFNULL(x.{name}, '') ELSE y.{name} END"
                       for name in ("title", "summary", "request", "artifacts")}
@@ -383,6 +418,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 context_match = " AND ".join("(" + " OR ".join(f"instr({fields[name]}, :q{i}) > 0" for name in fields) + ")"
                                              for i in range(len(terms)))
                 relevance = {name: _relevance_sql(fields[name], len(terms), single, closeness) for name in _CONTEXT_WEIGHTS}
+                if external is not None:
+                    # Native FTS relevance settles prose ordering. Context keeps
+                    # field weights with a bounded bonus for nonadjacent terms;
+                    # no Python proximity measurement is needed on this path.
+                    relevance = {name: f"CASE WHEN ({value}) = -1 THEN 1 ELSE ({value}) END"
+                                 for name, value in relevance.items()}
             else:
                 weights = context_match = "0"
                 relevance = dict.fromkeys(_CONTEXT_WEIGHTS, "0")
@@ -406,7 +447,25 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
             # SQLite otherwise expands this inventory into both projection
             # branches, evidence aggregation, ranking, and coverage. Build it
             # once so each branch reuses the same filtered thread identifiers.
-            candidates, coverage = db.execute(f"""WITH scope AS MATERIALIZED (
+            eligible_page = (f"{below % 'low' if after else '1'} AND (NOT EXISTS (SELECT 1 FROM floor) "
+                             "OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))")
+            page_cte = f"""floor AS (SELECT low,last_work_at,thread_id FROM bounded
+                {f"WHERE {below % 'low'} AND {below % 'high'}" if after else ""}
+                ORDER BY low DESC,last_work_at DESC,thread_id DESC LIMIT 1 OFFSET :floor)"""
+            page_rows = "bounded WHERE " + eligible_page
+            if external is not None:
+                # Every native score is settled, so an exact SQL page replaces
+                # the legacy uncertain-score floor and repeated bound searches.
+                params["native_limit"] = limit + 1
+                page_cte = f"""selected AS MATERIALIZED (SELECT * FROM bounded
+                    WHERE {below % 'low' if after else '1'}
+                    ORDER BY low DESC,last_work_at DESC,thread_id DESC LIMIT :native_limit)"""
+                page_rows = "selected"
+            native_hits = (f"""(SELECT json_group_array(json_array(m.native_id,m.native_relevance))
+                FROM candidate_messages m WHERE {message_where} AND m.thread_id IN
+                    (SELECT thread_id FROM {page_rows}))"""
+                if external is not None else "'[]'")
+            candidates, coverage, native_matches = db.execute(f"""WITH scope AS MATERIALIZED (
                     SELECT t.thread_id, t.created_at, t.turn_started_at FROM work_threads t
                     JOIN sessions s ON s.session_id = t.thread_id JOIN work_projects w ON w.id = t.project_id
                     JOIN thread_organization o ON o.thread_id = t.thread_id WHERE {' AND '.join(where) or '1'}),
@@ -422,7 +481,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                                  IFNULL(e.uncertain, 0) AS uncertain, e.thread_id IS NOT NULL AS message_match,
                                  MAX(s.created_at, COALESCE(s.turn_started_at, 0), COALESCE(done.completed_at, 0),
                                      COALESCE(c.created_at, 0)) AS last_work_at
-                          FROM scope s LEFT JOIN conversation_search_context x ON x.thread_id = s.thread_id
+                          FROM scope s LEFT JOIN {context_table} x ON x.thread_id = s.thread_id
                           LEFT JOIN ({_OVERLAY}) y ON y.thread_id = s.thread_id
                           LEFT JOIN evidence e ON e.thread_id = s.thread_id
                           LEFT JOIN thread_checkpoints c ON c.id =
@@ -430,18 +489,14 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                           LEFT JOIN turn_completions done ON done.id =
                               (SELECT MAX(id) FROM turn_completions WHERE thread_id = s.thread_id))
                     WHERE {match}),
-                -- A key below the cursor that `limit + 1` candidates certainly reach.
-                -- A candidate whose ceiling is under it cannot be on this page.
-                floor AS (SELECT low, last_work_at, thread_id FROM bounded
-                    {f"WHERE {below % 'low'} AND {below % 'high'}" if after else ""}
-                    ORDER BY low DESC, last_work_at DESC, thread_id DESC LIMIT 1 OFFSET :floor)
+                {page_cte}
                 SELECT (SELECT json_group_array(json_array(thread_id, weights, title, summary, request,
                             context_match, certain, uncertain, low, high, {_number('last_work_at')}))
-                        FROM bounded WHERE {below % 'low' if after else '1'} AND (NOT EXISTS (SELECT 1 FROM floor)
-                            OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))),
+                        FROM {page_rows}),
                        -- Coverage describes the searched inventory, before the keyword filter.
                        (SELECT json_array(COUNT(*), SUM(h.status = 'saved'), SUM(h.status = 'partial'))
-                        FROM scope s LEFT JOIN {history_rows} h ON h.thread_id = s.thread_id)""",
+                        FROM scope s LEFT JOIN {history_rows} h ON h.thread_id = s.thread_id),
+                       {native_hits}""",
                 params).fetchone()
             threads, saved, partial = json.loads(coverage)
             coverage = {"threads": threads, "saved_histories": saved or 0, "partial_histories": partial or 0}
@@ -475,11 +530,14 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 WHERE m.thread_id IN (SELECT value FROM json_each(:measure)) AND {message_where}
                   AND instr(m.folded, :phrase) = 0"""
 
+            if external is not None:
+                uncertain_messages = "SELECT '[]'"
+
             def measure(batch):
                 """Settle scores whose keyword proximity only Python can measure."""
                 stored = [c.thread_id for c in batch if c.unknown and c.thread_id not in overlay]
                 texts, rows = db.execute(f"""SELECT (SELECT json_group_array(json_array(thread_id, title, request, summary))
-                        FROM conversation_search_context WHERE thread_id IN (SELECT value FROM json_each(:context))),
+                        FROM {context_table} WHERE thread_id IN (SELECT value FROM json_each(:context))),
                     ({uncertain_messages})""", {**params, "context": json.dumps(stored),
                     "measure": json.dumps([c.thread_id for c in batch if c.uncertain])}).fetchone()
                 context = {thread_id: dict(zip(("title", "request", "summary"), values))
@@ -497,6 +555,12 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
 
             selected = _select(pool, after, limit + 1, measure)
             page = selected[:limit]
+            if external is not None:
+                # Hydration/counts seek only selected threads. Repeating a global
+                # posting-list scan here multiplies common-query archive cost.
+                params["native_matches"] = native_matches
+                message_rows = external.native_message_source()
+                folded_rows = message_rows
             details, counts, ranked, unmeasured = db.execute(f"""SELECT
                 (SELECT json_group_array(json_array(t.thread_id, t.title, t.attention, t.original_request, s.client,
                         s.cwd, s.turn_active, o.repository_id, r.name, o.project_id, p.name, c.phase, c.summary,
@@ -532,7 +596,7 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     if settled and schedule_index is not None:
         schedule_index(lambda: index_search_snapshot(store, settled, schedule_index),
                        coalesce="search-snapshot")
-    if overlay:
+    if overlay and external is None:
         from .browser_persistence import database_busy
         try:
             with _operation(store, "search.context"), store.connection_timeout(250), store._connection() as db:
@@ -598,12 +662,15 @@ def search_browser_threads(store, sessions, query):
     only when the current view filters on derived attention or stage.
     """
     from .thread_inventory import listed_threads
+    from .workspaces import workspace_members
     scope = query.get("scope", ["all"])[0]
     if scope not in {"all", "all_projects", "current"}:
         raise CoordinationError("Search scope must be all, all_projects, or current.")
     show = query.get("show", ["active"])[0]
     phase = query.get("phase", [""])[0]
     placement = "archived" if show == "archived" else "later" if show == "later" else "now"
+    filters = {key: val for key, val in query.items() if key == "directory_root"
+               or key == "project_cwd" and scope != "all_projects" or key == "project" and scope == "current"}
     if scope == "current" and (show in {"attention", "completed"} or phase):
         # No detail reads, provider resumes, or seen marks.
         threads = [t for t in sessions.list_work_threads(archived=show == "archived")
@@ -614,18 +681,15 @@ def search_browser_threads(store, sessions, query):
             threads = [t for t in threads if (t["work_phase"] or "new") == phase]
     else:
         with store.reading(), store._connection() as db:
-            threads = listed_threads(store.threads, db, sessions.cwd)
+            folder_filter = filters.get("project_cwd", [""])[0] and filters.get("project", [""])[0] in {"", "__none__"}
+            threads = listed_threads(store.threads, db, sessions.cwd, include_family=bool(folder_filter))
         if scope == "current":
             threads = [t for t in threads if t["attention"] == placement]
     if scope == "current":
-        for field in ("repository", "project"):
-            selected = query.get(field, [""])[0]
-            if selected:
-                threads = [t for t in threads if t[field + "_id"] == (None if selected == "__none__" else selected)]
-    if scope != "all_projects" and "project_cwd" in query:
-        directory = query["project_cwd"][0]
-        directory = str(Path(directory).expanduser().resolve()) if directory else ""
-        threads = [t for t in threads if t["project_cwd"] == directory]
+        repository = query.get("repository", [""])[0]
+        if repository:
+            threads = [t for t in threads if t["repository_id"] == (None if repository == "__none__" else repository)]
+    threads = list(filter(workspace_members(filters), threads))
     return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
                           my_messages=query.get("my_messages") == ["true"], snapshot_dirty=True,
                           schedule_index=partial(sessions.persistence.submit, key="conversation-substring-index", required=False),

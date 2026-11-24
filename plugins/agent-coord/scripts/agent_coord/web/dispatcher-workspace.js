@@ -151,10 +151,13 @@
       this.sync();
     }
     protectedIds() {
+      const focused = this.document.activeElement;
       return this.model.visible.filter(id => {
         const record = this.panes.records.get(id), draft = record?.api?.exportDraft();
-        return this.document.activeElement === record?.frame || draft?.text?.trim() || draft?.images?.length ||
-          record?.frame?.contentDocument?.querySelector("dialog[open]");
+        const host = record?.frame;
+        return host && (host === focused || host.contains?.(focused) ||
+          host.querySelector?.("dialog[open]") || host.contentDocument?.querySelector("dialog[open]")) ||
+          draft?.text?.trim() || draft?.images?.length;
       });
     }
     sync() {

@@ -56,6 +56,7 @@
         if (refreshAgain) { refreshAgain = false; refresh(); }
       }
     }
+    window.agentCoordJev.refreshStatus = refresh;
     let channel;
     try { if (typeof BroadcastChannel !== "undefined") channel = new BroadcastChannel("ribbon-field-jev-settings"); }
     catch { /* Some browser profiles do not permit cross-window messaging. */ }
@@ -64,7 +65,7 @@
     dialog?.addEventListener("close", refresh);
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
-    const timer = setInterval(refresh, 30000);
+    const timer = setInterval(() => { if (!window.agentCoordStreamConnected?.()) refresh(); }, 30000);
     function close() {
       closed = true; clearInterval(timer); channel?.close();
       dialog?.removeEventListener("close", refresh);
@@ -151,11 +152,14 @@
     card.querySelector("[data-jev-setup]").onclick = () => dismiss(true);
     card.querySelector("[data-jev-skip]").onclick = () => dismiss(false);
   }
-  window.agentCoordJev = {mountSettings: controls, mountStatus, onboard};
-  if (!document.body.classList.contains("settings-page")) {
-    fetch("/api/browser/config", {cache: "no-store"}).then(response => {
-      if (!response.ok) throw Error("Settings unavailable");
-      return response.json();
-    }).then(config => { mountStatus(config); return onboard(config); }).catch(() => {});
-  }
+  window.agentCoordJev = {mountSettings: controls, mountStatus, onboard, start(config) {
+    const send = client(config);
+    let reading;
+    const request = body => {
+      if (body !== undefined) return send(body);
+      return reading ||= send().finally(() => { reading = null; });
+    };
+    mountStatus(config, request);
+    onboard(config, request).catch(() => {});
+  }};
 })();

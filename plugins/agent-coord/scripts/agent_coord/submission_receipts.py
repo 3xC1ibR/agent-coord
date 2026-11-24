@@ -12,6 +12,16 @@ import uuid
 from .store import CoordinationError
 
 
+class SubmissionOutcomeUnknownError(CoordinationError):
+    """The original identity must be retained because its effect is unconfirmed."""
+
+    code = "submission_outcome_unknown"
+
+
+UNCONFIRMED_SUBMISSION = ("This submission has an unconfirmed outcome. "
+                          "Check the conversation before sending again; it has not been replayed.")
+
+
 class SubmissionReceipts:
     def __init__(self, store):
         self.store = store
@@ -40,24 +50,28 @@ class SubmissionReceipts:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
                              (thread_id, key)).fetchone()
-            if row:
-                if row["payload_hash"] != digest:
-                    raise CoordinationError("Submission request ID was already used for different input.")
-                if row["state"] == "completed":
-                    return json.loads(row["result_json"])
-                if row["state"] != "rejected":
-                    raise CoordinationError("This submission has an unconfirmed outcome. Check the conversation before sending again; it has not been replayed.")
-                db.execute("UPDATE browser_submission_receipts SET state='accepted', error=NULL, updated_at=? WHERE thread_id=? AND request_id=?",
-                           (now, thread_id, key))
-            else:
+            if row is None:
                 db.execute("INSERT INTO browser_submission_receipts VALUES (?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?)",
                            (thread_id, key, digest, encoded, now, now))
+            elif row["payload_hash"] != digest:
+                raise CoordinationError("Submission request ID was already used for different input.")
+            elif row["state"] == "rejected":
+                db.execute("UPDATE browser_submission_receipts SET state='accepted', error=NULL, updated_at=? WHERE thread_id=? AND request_id=?",
+                           (now, thread_id, key))
+            elif row["state"] != "completed":
+                raise SubmissionOutcomeUnknownError(UNCONFIRMED_SUBMISSION)
+        if row is not None and row["state"] == "completed":
+            try:
+                return json.loads(row["result_json"])
+            except (ValueError, TypeError) as error:
+                raise SubmissionOutcomeUnknownError(UNCONFIRMED_SUBMISSION) from error
         # No database transaction spans the external operation.
         try:
             result = callback()
         except Exception as error:
             from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
-            state = "rejected" if isinstance(error, (BrowserBusyError, BrowserNotSubmittedError)) else "uncertain"
+            rejected = isinstance(error, (BrowserBusyError, BrowserNotSubmittedError))
+            state = "rejected" if rejected else "uncertain"
             try:
                 with self.store._connection() as db:
                     db.execute("UPDATE browser_submission_receipts SET state=?, error=?, updated_at=? WHERE thread_id=? AND request_id=?",
@@ -66,16 +80,21 @@ class SubmissionReceipts:
                 # The durable accepted record already prevents a replay even
                 # when failure bookkeeping cannot be committed.
                 pass
-            raise
+            if rejected:
+                raise
+            message = f"{error} {UNCONFIRMED_SUBMISSION}" if isinstance(error, CoordinationError) else UNCONFIRMED_SUBMISSION
+            raise SubmissionOutcomeUnknownError(message) from error
         try:
             if result.get("acceptedMessage"):
                 result = {**result, "acceptedMessage": {**result["acceptedMessage"],
                           "threadId": thread_id, "requestId": key}}
+            payload = json.dumps(result)
             with self.store._connection() as db:
                 db.execute("UPDATE browser_submission_receipts SET state='completed', result_json=?, updated_at=? WHERE thread_id=? AND request_id=?",
-                           (json.dumps(result), self.store.clock(), thread_id, key))
+                           (payload, self.store.clock(), thread_id, key))
         except Exception as error:
-            raise CoordinationError("Your submission may have been received, but its receipt could not be saved. Check the conversation before sending again.") from error
+            raise SubmissionOutcomeUnknownError("Your submission may have been received, but its receipt could not be saved. "
+                                                "Check the conversation before sending again.") from error
         return result
 
     def accepted(self, thread_id, history, *, active_turn=None):

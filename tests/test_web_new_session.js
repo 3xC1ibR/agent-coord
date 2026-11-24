@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
@@ -27,8 +28,13 @@ function setup() {
       return {session: {thread_id: "created"}};
     },
     goHome: () => { if (c.state.selected) c.state.drafts.set(c.state.selected, c.$("message").value); c.state.selected = null; c.state.detail = null; },
-    select: async id => { c.state.selected = id; c.$("message").value = c.state.drafts.get(id) || ""; },
-    renderTitle() {}, renderQueuedMessages() {}, renderStatus() { c.renderModelPicker(); }, refreshList: async () => {}, showError() {}, calls,
+    select: async id => {
+      c.state.selected = id;
+      c.state.detail = c.state.conversations.get(id)?.detail;
+      c.$("message").value = c.state.drafts.get(id) || "";
+    },
+    renderTitle() {}, renderQueuedMessages() {}, renderStatus() { c.renderModelPicker(); },
+    refreshDetail: async () => {}, refreshList: async () => {}, showError() {}, calls,
   };
   c.sessionContext = () => newThreadContext(c.state.organization,
     {repository: c.$("repository").value, project: c.$("project").value}, c.state.folders.selected);
@@ -36,6 +42,7 @@ function setup() {
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function filtersChanged()")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   return c;
 }
@@ -262,6 +269,7 @@ test("one unavailable provider does not block the draft or the other model catal
   const c = setup(), api = c.api;
   c.api = async (path, body) => { if (path.endsWith("codex")) throw new Error("Codex missing"); return api(path, body); };
   await c.newSession();
+  await new Promise(setImmediate);
   assert.equal(c.$("model-picker").children[1].children[1].text, "Sonnet");
   assert.match(c.$("model-picker-status").textContent, /Codex models unavailable/);
   c.$("model-picker").value = c.modelValue("claude", "sonnet"); await c.changeSessionModel();
@@ -388,17 +396,21 @@ test("first session requires a folder, retains its group, and cancellation start
   assert.equal(c.state.detail.session.project_id, "evaluation");
 });
 
-test("failed first send preserves the draft and retries the already-created session", async () => {
+test("a rejected first send restores the draft in its created conversation for retry", async () => {
   const c = setup(); await c.newSession();
   c.$("message").value = "Keep this";
   const api = c.api; let fail = true;
-  c.api = async (path, body) => { if (path.endsWith("/messages") && fail) throw new Error("Unavailable"); return api(path, body); };
+  c.api = async (path, body) => {
+    if (path.endsWith("/messages") && fail) throw Object.assign(new Error("Unavailable"), {status: 400});
+    return api(path, body);
+  };
   await assert.rejects(c.sendSessionDraft("Keep this", []), /Unavailable/);
-  assert.equal(c.state.selected, "new-session");
+  assert.equal(c.state.selected, "created");
   assert.equal(c.$("message").value, "Keep this");
   assert.equal(c.sessionBusy(), false);
-  fail = false; await c.sendSessionDraft("Keep this", []);
+  fail = false; await c.sendMessage();
   assert.equal(c.calls.filter(call => call.path === "sessions").length, 1);
+  assert.equal(c.calls.filter(call => call.path === "sessions/created/messages").length, 1);
   assert.equal(c.state.selected, "created");
 });
 
@@ -420,7 +432,9 @@ test("pending send does not navigate away from another thread or lose newly type
   c.api = async (path, body) => path.endsWith("/messages") ? new Promise(resolve => { release = resolve; }) : api(path, body);
   const pending = c.sendSessionDraft("First", []);
   await new Promise(resolve => setImmediate(resolve));
-  c.state.selected = "other"; c.state.drafts.set("new-session", "Next message");
+  assert.equal(c.state.selected, "created");
+  c.state.drafts.set("created", "Next message");
+  await c.select("other");
   release({}); await pending;
   assert.equal(c.state.selected, "other");
   assert.equal(c.state.drafts.get("created"), "Next message");
@@ -551,7 +565,7 @@ test("first sends stay with their projects while another project's draft is crea
       return {};
     };
     const first = c.sendMessage(); await settle();
-    assert.equal(c.sessionBusy(), true);
+    assert.equal(c.sessionBusy(), phase === "creation");
     await c.sendMessage(); assert.equal(creations, 1, "duplicate submission stays blocked");
     c.$("message").value = "Next A";
     c.state.mentions.draft().text = "Next A";
@@ -566,18 +580,29 @@ test("first sends stay with their projects while another project's draft is crea
     const second = c.sendMessage(); await settle();
     assert.equal(creations, 2);
     gates.a.resolve(); await first;
-    assert.equal(c.state.selected, "new-session");
-    assert.equal(c.state.newSessionDraft, b);
-    assert.equal(c.$("message").value, "Send B");
-    assert.equal(c.state.mentions.draft().text, "Send B");
-    assert.equal(c.state.attachments.snapshot()[0].name, "B.png");
-    assert.equal(c.sessionBusy(), true, "A's completion must not release B's pending send");
+    if (phase === "creation") {
+      assert.equal(c.state.selected, "new-session");
+      assert.equal(c.state.newSessionDraft, b);
+      assert.equal(c.state.attachments.snapshot()[0].name, "B.png");
+      assert.equal(c.sessionBusy(), true, "A's completion must not release B's creation");
+    } else {
+      assert.equal(c.state.selected, "b");
+      assert.equal(c.state.newSessionDraft, null);
+      assert.deepEqual([...c.state.submissionQueue.lanes.keys()], ["b"], "A's completion must not settle B's delivery");
+      assert.equal(c.state.submissionQueue.lanes.get("b").entries.size, 1);
+    }
+    assert.equal(c.$("message").value, "");
+    c.$("message").value = "Next B";
     assert.equal(c.state.drafts.get("a"), "Next A");
     assert.equal(c.state.attachments.snapshot("a")[0].name, "next-A.png");
     assert.equal(c.state.mentions.draft("a").text, "Next A");
     assert.equal(c.state.threadTabs.projects.get("/workspace")[0].thread_id, "a");
     gates.b.resolve(); await second;
     assert.equal(c.state.selected, "b");
+    assert.equal(c.$("message").value, "Next B");
+    assert.deepEqual(c.calls.filter(call => call.path.endsWith("/messages")).map(call =>
+      [call.path, call.body.message, call.body.images[0].name]),
+    [["sessions/a/messages", "Send A", "A.png"], ["sessions/b/messages", "Send B", "B.png"]]);
     await c.switchTo("/workspace");
     assert.equal(c.state.selected, "a");
     assert.equal(c.$("message").value, "Next A");
@@ -586,7 +611,7 @@ test("first sends stay with their projects while another project's draft is crea
   }
 });
 
-test("failed first send preserves its originating draft for retry after switching projects", async () => {
+test("a rejected first send restores its attachments and draft after switching projects", async () => {
   const c = projectSetup(); await c.newSession();
   const a = c.state.newSessionDraft, gate = deferred();
   c.$("message").value = "Keep A";
@@ -599,11 +624,11 @@ test("failed first send preserves its originating draft for retry after switchin
   const sending = c.sendMessage(); await settle();
   await c.switchTo("/other"); await c.newSession();
   c.$("message").value = "Keep B";
-  gate.reject(new Error("Unavailable"));
+  gate.reject(Object.assign(new Error("Unavailable"), {status: 400}));
   await assert.rejects(sending, /Unavailable/);
   assert.equal(c.$("message").value, "Keep B"); assert.equal(c.sessionBusy(), false);
   await c.switchTo("/workspace");
-  assert.equal(c.state.newSessionDraft, a);
+  assert.equal(c.state.selected, a.createdId);
   assert.equal(c.$("message").value, "Keep A");
   assert.equal(c.state.attachments.snapshot()[0].name, "A.png");
   await c.sendMessage();
@@ -664,17 +689,17 @@ test("an existing send and its refresh cannot block another project's send or cl
   assert.equal(c.sessionBusy(), false, "A's refresh must not disable B's composer");
   assert.equal(c.$("message").value, "Next B");
   refresh.resolve(); await first;
-  assert.equal(c.state.drafts.has("a"), false);
-  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.state.drafts.get("a") || "", "");
+  assert.equal(c.state.submissionQueue.lanes.size, 0);
 });
 
-test("first acceptance seeds a usable conversation and refreshes inventory only once in background", async () => {
+test("first submission seeds a usable conversation and refreshes inventory once after acceptance", async () => {
   const c = setup(); await c.newSession();
   c.$("message").value = "First message";
-  const api = c.api, detail = deferred(), inventory = deferred();
+  const api = c.api, detail = deferred(), inventory = deferred(), acceptance = deferred();
   let inventories = 0;
   c.api = async (path, body) => path.endsWith("/messages")
-    ? {turn: {id: "accepted-turn", status: "inProgress", items: []}} : api(path, body);
+    ? acceptance.promise : api(path, body);
   c.refreshList = () => { inventories++; return inventory.promise; };
   c.select = async (id, options) => {
     assert.equal(options.refreshInventory, false);
@@ -686,12 +711,13 @@ test("first acceptance seeds a usable conversation and refreshes inventory only 
   const sending = c.sendMessage(); await settle();
   assert.equal(c.state.selected, "created");
   assert.equal(c.state.detail.work_thread.thread_id, "created");
-  assert.equal(c.state.detail.activeTurn, "accepted-turn");
-  assert.equal(c.state.detail.running, true);
-  assert.equal(c.state.sending.size, 0, "the accepted first send is released before the detail read");
+  assert.equal(c.state.outgoing.list("created")[0].status, "sending");
+  assert.equal(c.state.sending.size, 0, "the new composer is usable before acceptance and the detail read");
   assert.equal(c.$("message").value, "");
   c.$("message").value = "Next message";
+  acceptance.resolve({turn: {id: "accepted-turn", status: "inProgress", items: []}});
   detail.resolve(); await sending;
+  assert.equal(c.state.outgoing.list("created")[0].status, "sent");
   assert.equal(inventories, 1);
   assert.equal(c.$("message").value, "Next message");
   inventory.resolve();

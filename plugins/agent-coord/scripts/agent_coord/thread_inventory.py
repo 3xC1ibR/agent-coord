@@ -109,7 +109,7 @@ class ThreadInventory:
         associations = {}
         for row in db.execute("""
             SELECT o.thread_id, o.repository_id, r.name AS repository_name,
-                   r.root AS repository_root, o.project_id, p.name AS project_name
+                   r.root AS repository_root, o.project_id, p.name AS project_name, p.cwd AS project_launch_cwd
             FROM thread_organization o
             LEFT JOIN work_repositories r ON r.id = o.repository_id
             LEFT JOIN named_projects p ON p.id = o.project_id
@@ -139,9 +139,13 @@ class ThreadInventory:
         self.notification_owners = available_owners(db, self.threads.store)
         self.sessions = {row["session_id"]: self.threads.store._row_to_session(row) for row in db.execute(
             "SELECT * FROM sessions WHERE session_id IN (" + self.selected + ")", self.params)}
-        self.browser = set(json.loads(db.execute(
-            "SELECT json_group_array(thread_id) FROM browser_sessions WHERE thread_id IN (" + self.selected + ")",
-            self.params).fetchone()[0]))
+        # Some read-only fixtures and older observer databases know only the
+        # browser identity. When present, its execution location is independent
+        # authorization evidence alongside sessions.cwd.
+        directory = "cwd" if any(row[1] == "cwd" for row in db.execute("PRAGMA table_info(browser_sessions)")) else "NULL"
+        self.browser = json.loads(db.execute(
+            f"SELECT json_group_object(thread_id, {directory}) FROM browser_sessions WHERE thread_id IN (" +
+            self.selected + ")", self.params).fetchone()[0])
         self.dispatchers = {row[0] for row in db.execute(
             "SELECT thread_id FROM dispatch_settings WHERE enabled != 0 AND thread_id IN (" + self.selected + ")", self.params)}
         self.delegated = {row[0] for row in db.execute("""SELECT d.child_session_id FROM delegations d
@@ -169,13 +173,14 @@ _LISTED = """SELECT json_group_array(json_array(t.thread_id, s.cwd,
         o.thread_id IS NOT NULL,
         o.repository_id, o.project_id, t.thread_id IN (SELECT d.child_session_id FROM delegations d
             JOIN work_threads parent ON parent.thread_id = d.parent_session_id
-            WHERE d.child_session_id IS NOT NULL)))
+            WHERE d.child_session_id IS NOT NULL), {browser_cwd}, n.cwd))
     FROM work_threads t JOIN work_projects p ON p.id = t.project_id
     JOIN sessions s ON s.session_id = t.thread_id
-    LEFT JOIN thread_organization o ON o.thread_id = t.thread_id"""
+    LEFT JOIN thread_organization o ON o.thread_id = t.thread_id
+    LEFT JOIN named_projects n ON n.id = o.project_id {browser_join}"""
 
 
-def listed_threads(threads, db, workspace=None):
+def listed_threads(threads, db, workspace=None, *, include_family=False):
     """Identify the threads an overview lists, without projecting their state.
 
     This is the ThreadInventory and BrowserSessions.list_work_threads boundary
@@ -184,21 +189,32 @@ def listed_threads(threads, db, workspace=None):
     legacy records receive the same read-only organization projection.
     """
     from .workspaces import matches_workspace
-    rows = json.loads(db.execute(_LISTED, (threads.store.clock(),)).fetchone()[0])
-    if not all(row[4] for row in rows):
+    browser = any(row[1] == "cwd" for row in db.execute("PRAGMA table_info(browser_sessions)"))
+    query = _LISTED.format(browser_cwd="b.cwd" if browser else "NULL", browser_join=(
+        "LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id" if browser else ""))
+    rows = json.loads(db.execute(query, (threads.store.clock(),)).fetchone()[0])
+    creators = {}
+    if include_family or not all(row[4] for row in rows):
         creators = app_agent_creators(db)
         for row in rows:
             if not row[4]:
                 association = OrganizationStore.projected_association(db, row[0], row[1], creators=creators)
                 row[5], row[6] = association["repository_id"], association["project_id"]
+                row[9] = association["project_launch_cwd"]
+    if include_family:
+        from .organization import describe_creators
+        describe_creators(creators, lambda cwd: matches_workspace(cwd, workspace))
     matches = {}
     listed = []
-    for thread_id, cwd, project_cwd, attention, _, repository_id, project_id, delegated in rows:
+    for thread_id, cwd, project_cwd, attention, _, repository_id, project_id, delegated, browser_cwd, launch_cwd in rows:
         if delegated:
             continue
-        if cwd not in matches:
-            matches[cwd] = matches_workspace(cwd, workspace)
-        if matches[cwd]:
-            listed.append({"thread_id": thread_id, "attention": attention, "project_cwd": project_cwd,
-                           "repository_id": repository_id, "project_id": project_id})
+        for directory in {cwd, browser_cwd} - {None}:
+            if directory not in matches:
+                matches[directory] = matches_workspace(directory, workspace)
+        if matches[cwd] and (browser_cwd is None or matches[browser_cwd]):
+            listed.append({"thread_id": thread_id, "attention": attention, "cwd": cwd, "project_cwd": project_cwd,
+                           "repository_id": repository_id, "project_id": project_id,
+                           "project_launch_cwd": launch_cwd,
+                           "orchestration_workspaces": creators.get(thread_id, {}).get("workspaces", ())})
     return listed

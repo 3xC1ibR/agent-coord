@@ -14,7 +14,7 @@ test("grouped child needs fold only when their parent is visible", () => {
 });
 const lane = (groups, key) => groups.phases.find(g => g.key === key);
 
-test("all eight lifecycle columns have a fixed order, including empty stages", () => {
+test("all eight lifecycle phases have a fixed order, including empty stages", () => {
   const expected = ["New", "Investigating", "Planning", "Orchestrating", "Implementing", "Validating", "Deploying", "Done"];
   assert.deepEqual(groupThreads([]).phases.map(g => g.label), expected);
   const groups = groupThreads([thread("deploy", "deployment"), thread("findings"), thread("done", "finished")]);
@@ -23,7 +23,7 @@ test("all eight lifecycle columns have a fixed order, including empty stages", (
   assert.deepEqual(ids(lane(groups, "finished").threads), ["done"]);
 });
 
-test("orchestrating occupies its own column and does not itself require user attention", () => {
+test("orchestrating has its own phase and does not itself require user attention", () => {
   const dispatcher = thread("dispatcher", "orchestrating", {checkpoint:{phase:"orchestrating",next_actor:"external"}});
   const specialist = thread("specialist", "deployment");
   const groups = groupThreads([dispatcher,specialist]);
@@ -48,11 +48,11 @@ test("blocked deployment outranks requested review, healthy rollout, findings, a
   assert.equal(reason(items[0]).label, "✓ Done");
 });
 
-test("attention uses newest event before classification, with priority only breaking ties", () => {
+test("attention uses severity before recency", () => {
   const items = [thread("old-blocker", "deployment", {needs_attention: true, attention_reason: "blocked", attention_since: 10}),
     thread("new-findings", "investigation", {needs_attention: true, attention_reason: "findings", attention_since: 30}),
     thread("new-review", "validation", {needs_attention: true, attention_reason: "review", attention_since: 30})];
-  assert.deepEqual(ids(groupThreads(items).priority), ["new-review", "new-findings", "old-blocker"]);
+  assert.deepEqual(ids(groupThreads(items).priority), ["old-blocker", "new-review", "new-findings"]);
 });
 
 test("dismissing findings and success restores the same stage while required actions remain", () => {
@@ -79,7 +79,7 @@ test("stage peers sort by recent activity while attention retains its priority o
   for (const t of [older, newer]) { t.response_state = "reply"; t.attention_since = 5; }
   assert.deepEqual(ids(groupThreads([newer, older]).priority), ["older", "newer"]);
   newer.pinned = true;
-  assert.deepEqual(ids(groupThreads([newer, older]).priority), ["older", "newer"]);
+  assert.deepEqual(ids(groupThreads([newer, older]).priority), ["newer", "older"]);
 });
 
 test("every stage sorts running first then latest activity, regardless of pin or creation time", () => {
@@ -135,11 +135,13 @@ test("Later and Closed stay out of the current board and queue, preserving all c
   assert.equal(later.unread, true);
 });
 
-test("unclassified replies remain visible after reading; running and interrupted turns are separate", () => {
+test("server response state controls Attention; running and interrupted turns are separate", () => {
   const reply = thread("unknown", "new", {response_state: "reply", unread: false});
   const working = thread("work", "implementation", {response_state: "working", unread: true});
   const stopped = thread("stopped", "implementation", {response_state: "interrupted"});
   assert.deepEqual(ids(groupThreads([reply, working, stopped]).priority), ["unknown"]);
+  reply.response_state = "available";
+  assert.deepEqual(ids(groupThreads([reply, working, stopped]).priority), []);
   assert.equal(status(working).key, "running");
   assert.equal(status(stopped).label, "Stopped");
 });
@@ -158,87 +160,82 @@ function overview() {
   const vm = require("node:vm"), fs = require("node:fs");
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const controls = {};
-  function element(tag, text, className = "") {
-    return {tag, textContent: text, className, children: [], dataset: {}, value: "", hidden: false, scrollLeft: 0,
-      get isConnected() { return this.root || Boolean(this.parent?.isConnected); },
-      get clientWidth() { return this.isConnected && !controls.welcome.hidden ? 346 : 0; },
+  const listRenders = [];
+  function element(tag, textContent, className = "") {
+    return {tag, textContent, className, children: [], dataset: {}, value: "", hidden: false,
+      scrollTop: 0, scrollLeft: 0, classList: {toggle() {}},
       setAttribute() {},
-      append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } },
+      append(...items) { this.children.push(...items); },
       replaceChildren(...items) {
-        for (const item of this.children) item.parent = null;
-        this.children = []; this.append(...items);
-        // Model the browser clamping an emptied scrolling region during layout.
+        this.children = items;
+        // Replacing content can cause the browser to clamp an emptied scroller.
         this.scrollTop = 0;
-        if (this === controls.overview && controls.welcome) controls.welcome.scrollTop = 0;
+        if (this === controls.overview) controls.welcome.scrollTop = 0;
       },
     };
   }
-  const c = {conversationSearch: null, node: element, $: id => controls[id] ||= Object.assign(element("div"), {root: true}),
-    document: {activeElement: null}, savedViews: {activeId: "all", render() {}},
-    state: {sessions: [thread("one")], selected: null, pinning: new Set(), updatingThreads: new Set(),
-      phaseScroll: new Map(), organization: {projects: []}, listSignature: "",
-      overviewMotion: {capture() {}, play() {}}},
+  const state = {sessions: [thread("one", "investigation", {metadata_revision: 1})], selected: null,
+    pinning: new Set(), updatingThreads: new Set(), listSignature: "", inventoryRevision: 1,
+    overviewLayout: {mode: "list"}};
+  const c = {conversationSearch: null, node: element, $: id => controls[id] ||= element("div"),
+    document: {activeElement: null}, savedViews: {activeId: "all", render() {}}, state, listRenders,
     threadGrouping: require("../plugins/agent-coord/scripts/agent_coord/web/thread-groups.js"),
     threadOrganization: require("../plugins/agent-coord/scripts/agent_coord/web/organization.js"),
     threadViews: require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews,
-    groupHeading: label => element("h2", label), threadCard: () => element("button"), renderStatus() {}, renderClosedToggle() {},
+    groupHeading: label => element("h2", label),
+    threadCard(row) { return Object.assign(element("button", row.title || row.thread_id), {dataset: {thread: row.thread_id}}); },
+    threadsInProject: threads => threads, renderStatus() {}, renderClosedToggle() {},
+    WorkingSet: {createList: () => ({render: (threads, host, options) => listRenders.push({threads, host, options})})},
   };
-  c.$("welcome"); c.$("view").value = "active"; c.$("group-by").value = "phase";
-  c.threadsInProject = threads => threads; // This fixture supplies one project’s inventory.
+  c.$("welcome");
+  c.$("view").value = "active";
+  c.$("group-by").value = "phase";
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("async function select(")), c);
-  c.board = () => c.$("overview").children.find(el => el.className === "phase-board");
+  c.sidebar = id => c.$("sessions").children.flatMap(section => section.children).find(control => control.dataset.thread === id);
   c.renderList();
   return c;
 }
 
-test("refreshing an open conversation renders the sidebar without allocating hidden overview cards", () => {
-  const c = overview(), original = c.threadCard, cards = [];
-  c.threadCard = (thread, compact, attention) => {
-    cards.push(compact);
-    return original(thread, compact, attention);
-  };
+test("inventory changes refresh the sidebar and defer rendering the hidden List overview", () => {
+  const c = overview();
+  assert.equal(c.listRenders.length, 1);
   c.$("welcome").hidden = true;
-  c.state.selected = c.state.sessions[0].thread_id;
+  c.state.selected = "one";
+  c.state.sessions[0] = {...c.state.sessions[0], title: "Updated title", metadata_revision: 2};
+  c.state.inventoryRevision++;
   c.renderList();
-  assert.ok(cards.includes(true));
-  assert.ok(!cards.includes(false));
-  cards.length = 0;
+  assert.equal(c.sidebar("one").textContent, "Updated title");
+  assert.equal(c.listRenders.length, 1);
   c.$("welcome").hidden = false;
+  c.state.selected = null;
   c.renderList();
-  assert.ok(cards.includes(false), "the current overview cards must be built on return");
+  assert.equal(c.listRenders.length, 2);
+  assert.equal(c.listRenders[1].threads[0].title, "Updated title");
+  assert.equal(c.listRenders[1].host, c.$("thread-list-overview"));
 });
 
 test("changing one inventory row retains the other sidebar button", () => {
-  const c = overview(), original = c.threadCard, drawn = [];
-  c.threadCard = (row, compact, attention) => {
-    if (compact) drawn.push(row.thread_id);
-    return original(row, compact, attention);
-  };
+  const c = overview();
   c.$("welcome").hidden = true;
-  c.state.sessions = [thread("one"), thread("two")];
+  c.state.sessions.push(thread("two", "investigation", {metadata_revision: 1}));
+  c.state.inventoryRevision++;
   c.renderList();
-  drawn.length = 0;
-  c.state.sessions[1] = {...c.state.sessions[1], title: "Changed"};
+  const first = c.sidebar("one"), second = c.sidebar("two");
+  c.state.sessions[1] = {...c.state.sessions[1], title: "Changed", metadata_revision: 2};
+  c.state.inventoryRevision++;
   c.renderList();
-  assert.deepEqual(drawn, ["two"]);
+  assert.equal(c.sidebar("one"), first);
+  assert.notEqual(c.sidebar("two"), second);
+  assert.equal(c.sidebar("two").textContent, "Changed");
+  const updated = c.sidebar("two");
   c.state.selected = "one";
   c.renderList();
-  assert.deepEqual(drawn, ["two", "one"]);
+  assert.notEqual(c.sidebar("one"), first);
+  assert.equal(c.sidebar("two"), updated);
 });
 
-test("mobile board keeps its horizontal position when a checkpoint refresh rebuilds cards", () => {
-  const c = overview(), oldBoard = c.board();
-  oldBoard.scrollLeft = 930; oldBoard.onscroll();
-  c.state.sessions[0].checkpoint = {summary: "Investigation updated"}; c.renderList();
-  assert.notEqual(c.board(), oldBoard);
-  assert.equal(c.board().scrollLeft, 930);
-  oldBoard.scrollLeft = 0; oldBoard.onscroll(); // A queued event from the detached board must not reset it.
-  c.state.sessions[0].updated_at = 2; c.renderList();
-  assert.equal(c.board().scrollLeft, 930);
-});
-
-test("closing a card and later polling preserve the overview and sidebar scroll positions", () => {
+test("closing a thread and later inventory updates preserve overview and sidebar scroll positions", () => {
   const c = overview();
   c.state.sessions.push(thread("two")); c.renderList();
   c.$("welcome").scrollTop = 780; c.$("sessions").scrollTop = 320;
@@ -248,152 +245,43 @@ test("closing a card and later polling preserve the overview and sidebar scroll 
   assert.equal(c.$("sessions").scrollTop, 320);
   assert.match(c.$("results-count").textContent, /^1 thread/);
   c.$("welcome").scrollTop = 910;
-  c.state.sessions[1].updated_at = 2; c.renderList();
-  assert.equal(c.$("welcome").scrollTop, 910, "polling preserves the user's latest position");
+  c.state.sessions[1].updated_at = 2;
+  c.state.inventoryRevision++;
+  c.renderList();
+  assert.equal(c.$("welcome").scrollTop, 910, "inventory refresh preserves the user's latest position");
   c.state.pendingCloses.clear(); c.renderList();
-  assert.match(c.$("results-count").textContent, /^2 threads/, "rollback restores the closing card");
+  assert.match(c.$("results-count").textContent, /^2 threads/, "rollback restores the closing thread");
   assert.equal(c.$("welcome").scrollTop, 910);
 });
 
-test("opening a thread and refreshing its hidden overview does not forget the mobile column", () => {
+test("hidden inventory refresh preserves the List overview scroll when returning from a thread", () => {
   const c = overview();
-  c.board().scrollLeft = 620; c.board().onscroll();
-  c.$("welcome").hidden = true; c.state.selected = "one"; c.renderList();
-  c.board().scrollLeft = 0; c.board().onscroll();
-  c.state.sessions[0].updated_at = 2; c.renderList();
-  c.$("welcome").hidden = false; c.state.selected = null; c.renderList();
-  assert.equal(c.board().scrollLeft, 620);
+  c.$("welcome").scrollTop = 620;
+  c.$("welcome").hidden = true;
+  c.state.selected = "one";
+  c.renderList();
+  c.state.sessions[0].updated_at = 2;
+  c.state.inventoryRevision++;
+  c.renderList();
+  c.$("welcome").hidden = false;
+  c.state.selected = null;
+  c.renderList();
+  assert.equal(c.$("welcome").scrollTop, 620);
 });
 
-test("saved views retain independent horizontal positions even with identical filters", () => {
+test("sidebar Attention appears for a reply and clears independently of lifecycle groups", () => {
   const c = overview();
-  c.board().scrollLeft = 310; c.board().onscroll();
-  c.savedViews.activeId = "feature"; c.renderList();
-  assert.equal(c.board().scrollLeft, 0);
-  c.board().scrollLeft = 1240; c.board().onscroll();
-  c.savedViews.activeId = "all"; c.renderList();
-  assert.equal(c.board().scrollLeft, 310);
-  c.savedViews.activeId = "feature"; c.renderList();
-  assert.equal(c.board().scrollLeft, 1240);
-});
-
-test("Attention appears only while it contains a thread and never hides the lifecycle board", () => {
-  const c = overview(), attention = () => c.$("overview").children.filter(el => el.className === "attention-panel");
-  assert.equal(attention().length, 0);
-  assert.equal(c.board().children.length, 8);
-  c.state.sessions[0].response_state = "reply"; c.renderList();
-  assert.equal(attention().length, 1);
-  assert.equal(c.board().children.length, 8);
-  c.state.sessions[0].response_state = "available"; c.renderList();
-  assert.equal(attention().length, 0);
-  assert.equal(c.board().children.length, 8);
-});
-
-function motionHarness() {
-  const vm = require("node:vm"), fs = require("node:fs");
-  const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
-  const animations = [], copies = [], listeners = {}, reduced = {matches: false, addEventListener(_, fn) { this.change = fn; }};
-  let items = [];
-  function card(id, group, left, top = 100) {
-    const rect = {left, top, width: 200, height: 120, right: left + 200, bottom: top + 120};
-    const el = {dataset: {cardThread: id}, group, rect, style: {setProperty() {}},
-      closest(selector) { return selector === "[data-group]" ? {dataset: {group: this.group}} : null; },
-      getBoundingClientRect() { return this.rect; }, querySelectorAll() { return []; },
-      cloneNode() { return card(id, group, left, top); }, removeAttribute() {}, setAttribute() {},
-      remove() { this.removed = true; },
-      animate(frames, timing) {
-        const animation = {el: this, frames, timing, cancel() { this.cancelled = true; }};
-        animations.push(animation); return animation;
-      },
-    };
-    return el;
-  }
-  const welcome = {hidden: false};
-  const c = {window: {matchMedia: () => reduced, innerHeight: 900, innerWidth: 1400,
-    addEventListener: (name, fn) => { listeners[name] = fn; }}, Element: {prototype: {animate() {}}},
-    document: {body: {append(el) { copies.push(el); }}}, getComputedStyle: () => [],
-    $: id => id === "welcome" ? welcome : {querySelectorAll: () => items},
-  };
-  vm.createContext(c);
-  vm.runInContext(source.slice(source.indexOf("function createOverviewMotion("), source.indexOf("function renderList(")), c);
-  const motion = c.createOverviewMotion();
-  function render(next, view = "all") { const before = motion.capture(view); items = next; motion.play(before); }
-  return {render, card, animations, copies, listeners, reduced, welcome};
-}
-
-test("section moves glide above the layout, settle neighbors, and clean up on finish", () => {
-  const h = motionHarness();
-  h.render([h.card("moving", "planning", 10), h.card("peer", "implementation", 300, 100)]);
-  assert.equal(h.animations.length, 0);
-  h.render([h.card("moving", "implementation", 300), h.card("peer", "implementation", 300, 240)]);
-  assert.equal(h.copies.length, 1);
-  assert.equal(h.copies[0].inert, true);
-  assert.equal(h.copies[0].style.position, "fixed");
-  assert.equal(h.animations[0].frames[0].transform, "translate(-290px, 0px) scale(1, 1)");
-  assert.equal(h.animations[3].frames[0].transform, "translate(0px, -140px)");
-  for (const animation of h.animations) animation.onfinish?.();
-  assert.equal(h.copies[0].removed, true);
-  assert.ok(h.animations.every(animation => animation.cancelled));
-});
-
-test("motion skips metadata changes, view switches, hidden boards, and reduced motion", () => {
-  for (const scenario of ["metadata", "view", "hidden", "reduced"]) {
-    const h = motionHarness();
-    h.render([h.card("one", "planning", 10)]);
-    h.welcome.hidden = scenario === "hidden";
-    h.reduced.matches = scenario === "reduced";
-    h.render([h.card("one", scenario === "metadata" ? "planning" : "priority", 300)], scenario === "view" ? "other" : "all");
-    assert.equal(h.animations.length, 0, scenario);
-  }
-});
-
-test("pinned and stage copies stay still during metadata refreshes", () => {
-  const h = motionHarness();
-  const cards = () => [h.card("one", "pinned", 10), h.card("one", "implementation", 300, 300)];
-  h.render(cards());
-  h.render(cards());
-  h.render(cards());
-  assert.equal(h.animations.length, 0);
-  assert.equal(h.copies.length, 0);
-});
-
-test("a pinned thread's stage copy moves independently and continues from its own position", () => {
-  const h = motionHarness();
-  h.render([h.card("one", "pinned", 10), h.card("one", "planning", 300, 300)]);
-  h.render([h.card("one", "pinned", 10), h.card("one", "implementation", 600, 300)]);
-  assert.equal(h.copies.length, 1);
-  assert.equal(h.animations.length, 3);
-  assert.equal(h.animations[0].frames[0].transform, "translate(-300px, 0px) scale(1, 1)");
-  h.copies[0].rect = {...h.copies[0].rect, left: 450, right: 650};
-  h.render([h.card("one", "pinned", 10), h.card("one", "implementation", 600, 300)]);
-  assert.equal(h.copies.length, 2);
-  assert.equal(h.animations.length, 6);
-  assert.equal(h.animations[3].frames[0].transform, "translate(-150px, 0px) scale(1, 1)");
-  assert.equal(h.copies[0].removed, true);
-  h.listeners.scroll();
-  assert.ok(h.copies.every(copy => copy.removed));
-});
-
-test("interrupted movement continues from its visible position and removes previous copies", () => {
-  const h = motionHarness();
-  h.render([h.card("one", "planning", 10)]);
-  h.render([h.card("one", "implementation", 300)]);
-  h.copies[0].rect = {...h.copies[0].rect, left: 150, right: 350};
-  h.render([h.card("one", "implementation", 300)]);
-  assert.equal(h.copies[0].removed, true);
-  assert.equal(h.animations[3].frames[0].transform, "translate(-150px, 0px) scale(1, 1)");
-  h.listeners.scroll();
-  assert.ok(h.copies.every(copy => copy.removed));
-  assert.ok(h.animations.every(animation => animation.cancelled));
-});
-
-test("offscreen cards do not fly across the viewport and motion preference changes cancel copies", () => {
-  const h = motionHarness();
-  h.render([h.card("one", "planning", -210)]);
-  h.render([h.card("one", "implementation", 300)]);
-  assert.equal(h.animations.length, 0);
-  h.render([h.card("one", "priority", 10)]);
-  h.reduced.matches = true; h.reduced.change();
-  assert.ok(h.copies.every(copy => copy.removed));
-  assert.ok(h.animations.every(animation => animation.cancelled));
+  const sections = () => Array.from(c.$("sessions").children, section => section.className);
+  c.state.sessions.push(thread("working", "implementation", {response_state: "working"}));
+  c.state.inventoryRevision++;
+  c.renderList();
+  assert.deepEqual(sections(), ["thread-group investigation", "thread-group implementation"]);
+  c.state.sessions[0].response_state = "reply";
+  c.state.inventoryRevision++;
+  c.renderList();
+  assert.deepEqual(sections(), ["thread-group priority", "thread-group implementation"]);
+  c.state.sessions[0].response_state = "available";
+  c.state.inventoryRevision++;
+  c.renderList();
+  assert.deepEqual(sections(), ["thread-group investigation", "thread-group implementation"]);
 });

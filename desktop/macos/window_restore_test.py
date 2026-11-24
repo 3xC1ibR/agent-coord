@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from smoke_test import require_smoke_bundle
 
 
 def main() -> int:
@@ -18,6 +19,7 @@ def main() -> int:
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
     app = args.app.resolve()
+    require_smoke_bundle(app)
     resources = app / "Contents/Resources"
     executable = app / "Contents/MacOS/Agent Coord"
     config = json.loads((resources / "backend.json").read_text())
@@ -85,6 +87,7 @@ def main() -> int:
                 if len(saved["windows"]) != expected_count:
                     raise RuntimeError(f"Quit-time window set at {stage} had {len(saved['windows'])}, expected {expected_count}")
                 current["persisted_ids"] = [window["id"] for window in saved["windows"]]
+                current["persisted_minimized"] = [window["id"] for window in saved["windows"] if window["minimized"]]
                 current["state_file_mode"] = oct((directory / "windows/state.json").stat().st_mode & 0o777)
                 results.append(current)
             if len({(r["backend_pid"], r["url"]) for r in results}) != 1:

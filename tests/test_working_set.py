@@ -7,6 +7,7 @@ import threading
 import unittest
 import urllib.request
 from pathlib import Path
+from workspace_http_fixture import assert_workspace_bundles
 
 
 class WorkingSetTests(unittest.TestCase):
@@ -31,8 +32,8 @@ class WorkingSetTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="working-set-overview"', page)
-                    self.assertIn(b'href="/working-set.css?v=', page)
-                    self.assertIn(b'rel="preload" as="script" href="/working-set.js?v=', page)
+                assert_workspace_bundles(self, base, page, script=(b"Idle threads by phase",),
+                                         stylesheet=(b".ws-page", b".tl-row"))
                 for path, mime in [("working-set.js", "javascript"), ("working-set.css", "css")]:
                     with urllib.request.urlopen(base + "/" + path) as response:
                         self.assertEqual(response.status, 200)

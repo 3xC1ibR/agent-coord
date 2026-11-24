@@ -126,7 +126,8 @@ test('a streamed chunk re-renders only the changed message, not the whole histor
   const h=harness([...history,live]);
   h.render();
   const before=h.timeline.children.filter(n=>n.tag==='article');
-  h.state.detail.thread.turns.at(-1).items[1].text='Partial';
+  const items = h.state.detail.thread.turns.at(-1).items;
+  items[1] = {...items[1], text: 'Partial'};
   h.render();
   const after=h.timeline.children.filter(n=>n.tag==='article');
   assert.equal(after.length,before.length);

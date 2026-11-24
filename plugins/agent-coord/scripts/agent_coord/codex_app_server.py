@@ -17,7 +17,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,7 +44,7 @@ from .claude_code import ClaudeRPC
 from .antigravity import AntigravityRPC
 from .kimi import KimiRPC
 from .muse_code import MuseRPC
-from .attention import AttentionClassifier
+from .attention import AttentionClassifier, load_config as load_attention_config
 from .thread_mentions import thread_mentions, provider_message
 from .image_inputs import message_images
 from .navigation import NavigationStore, window_id
@@ -52,7 +52,7 @@ from .organization import OrganizationStore, app_agent_creators, describe_creato
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
-from .workspaces import matches_workspace, workspace_choices
+from .workspaces import WorkspaceAccessError, matches_workspace, workspace_choices
 from .activity_api import activity_context, record_accepted
 
 
@@ -329,6 +329,7 @@ class BrowserSessions:
         self.events_changed = threading.Condition()
         self.events: deque[dict] = deque(maxlen=1500)
         self.sequence = 0
+        self.thread_stream_sequences: dict[str, int] = {}
         self.turn_revisions: dict[str, int] = {}
         self.requests: dict[str, dict] = {}
         self.active: dict[str, str | None] = {}
@@ -364,6 +365,7 @@ class BrowserSessions:
         self.history_rpc = None
         self.rpc_factory = rpc_factory
         self.permission_catalogs = {}
+        self.model_catalogs = {}
         self.permission_effective = {}
         from .execution_state import RuntimeExecution
         self.execution = RuntimeExecution(self)
@@ -389,8 +391,10 @@ class BrowserSessions:
             )""")
             ensure_history_schema(connection)
         self.navigation = NavigationStore(store)
+        from .session_creation_receipts import SessionCreationReceipts
         from .submission_receipts import SubmissionReceipts
         self.submissions = SubmissionReceipts(store)
+        self.creation_receipts = SessionCreationReceipts(self)
         self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
         self.claude = claude_factory(store, self._event)
@@ -442,6 +446,8 @@ class BrowserSessions:
         self.dispatch = DispatchRuntime(self)
         from .turn_watchdog import TurnWatchdog
         self.watchdog = TurnWatchdog(self)
+        from .conversation_open import ConversationOpen
+        self.conversation_open = ConversationOpen(self)
         from .session_control import SessionControl
         self.session_control = SessionControl(store)
         from .desktop_runtime import install_session_admission
@@ -452,6 +458,8 @@ class BrowserSessions:
             from .coordinator_projection import CoordinatorProjection
             self.projection = store.provider_projection = CoordinatorProjection(self, store.provider_transport)
             self.projection.load()
+        from .snapshot_cache import prepare_snapshot_cache
+        prepare_snapshot_cache(store)
 
     @contextmanager
     def _persistence_context(self):
@@ -562,6 +570,12 @@ class BrowserSessions:
     def append_committed_events(self, events):
         """Publish under the session lock only after the corresponding storage commit."""
         with self.events_changed:
+            for event in events:
+                params, method = event["params"], event["method"]
+                thread_id = params.get("threadId") or params.get("thread_id")
+                if isinstance(thread_id, str) and (method.startswith(("item/", "turn/", "thread/"))
+                                                   or method == "browser/messageAccepted"):
+                    self.thread_stream_sequences[thread_id] = event["seq"]
             self.events.extend(events)
             self.sequence = events[-1]["seq"]
             self.events_changed.notify_all()
@@ -766,7 +780,11 @@ class BrowserSessions:
             # controlled shutdown is not an unexpected provider interruption.
             params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
-        public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
+        projection = getattr(self, "projection", None)
+        if projection is not None and getattr(projection.in_event, "streaming", False):
+            public, review_stage = projection.stream_public_event(method, params)
+        else:
+            public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
             if (method == "turn/completed" and self.active.get(thread_id)
@@ -1187,9 +1205,20 @@ class BrowserSessions:
                 existing.update(copy.deepcopy(item))
         item = next((i for i in turn["items"] if i["id"] == params.get("itemId")), None)
         if item and isinstance(params.get("delta"), str):
-            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput"}.get(method)
+            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput",
+                     "item/mcpToolCall/outputDelta": "visibleOutput"}.get(method)
             if field:
-                item[field] = (item.get(field) or "") + params["delta"]
+                previous = item.get(field)
+                if previous is None and field == "visibleOutput" and isinstance(item.get("result"), str):
+                    previous = item["result"]
+                item[field] = (previous or "") + params["delta"]
+            elif method == "item/reasoning/summaryTextDelta":
+                index = params.get("summaryIndex", 0)
+                if type(index) is int and 0 <= index < 1024:
+                    summary = item.setdefault("summary", [])
+                    while len(summary) <= index:
+                        summary.append("")
+                    summary[index] += params["delta"]
         if method in {"turn/started", "turn/completed"}:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
         if method in {"item/completed", "turn/completed"}:
@@ -1631,19 +1660,39 @@ class BrowserSessions:
             health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
             return waiting, thread_id in self.active, thread_id in self.loaded, health
 
-    def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None, _runtime=None) -> dict:
-        thread = (self.store.threads.get(thread_id, history=history) if _inventory is None
+    def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None, _runtime=None,
+                    _related=None) -> dict:
+        if _inventory is None:
+            # One query-only observation covers the complete public metadata.
+            # Keep detail-only usage recovery outside this read transaction.
+            with self.store.reading(), self.store._connection() as db:
+                if not db.in_transaction:
+                    db.execute("BEGIN")
+                thread = self._project_work_thread(thread_id, history=history, _creators=_creators,
+                                                   _runtime=_runtime, _related=_related, _db=db)
+        else:
+            thread = self._project_work_thread(thread_id, history=history, _creators=_creators,
+                                               _inventory=_inventory, _runtime=_runtime, _related=_related)
+        if history:
+            self._work_thread_usage(thread_id, thread)
+        return thread
+
+    def _project_work_thread(self, thread_id, *, history, _creators=None, _inventory=None, _runtime=None,
+                             _related=None, _db=None):
+        thread = (self.store.threads.get(thread_id, history=history, connection=_db) if _inventory is None
                   else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
-            raise CoordinationError("Work thread not found in this workspace.")
-        creators = self._app_agent_creators(shared=True) if _creators is None else _creators
+            raise WorkspaceAccessError()
+        creators = self._app_agent_creators(db=_db, shared=True) if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
-        if _inventory is None:
+        if _related is not None:
+            related = _related
+        elif _inventory is None:
             from .supervision import relations
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 related = relations(db)
         else:
             related = _inventory.supervision
@@ -1651,14 +1700,18 @@ class BrowserSessions:
         thread.update(display_fields(thread_id, thread["created_by"], related))
         if _inventory is None:
             from .asks import AskStore
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
-                owners = notification_policy.available_owners(db, self.store)
+                context = thread.get("notification_context") or {}
+                owners = notification_policy.available_owners(db, self.store, thread_ids=(
+                    context.get("owner_thread_id"), thread.get("created_by_thread_id")))
                 open_ask = AskStore.open_blocking(db, [thread_id]).get(thread_id)
                 wake_pause = (db.execute(WAKE_PAUSES + " AND w.thread_id = ?", (thread_id,)).fetchone()
                               if has_table(db, "browser_inbox_wake") else None)
-            thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
-            session = self.store.get_session(thread_id)
+            dispatcher = (_db.execute("SELECT enabled FROM dispatch_settings WHERE thread_id=?", (thread_id,)).fetchone()
+                          if hasattr(self, "dispatch") else None)
+            thread["dispatcher"] = bool(dispatcher and dispatcher[0])
+            session = self.store._row_to_session(_db.execute("SELECT * FROM sessions WHERE session_id=?", (thread_id,)).fetchone())
         else:
             owners = _inventory.notification_owners
             thread["browser_session"] = thread_id in _inventory.browser
@@ -1762,9 +1815,14 @@ class BrowserSessions:
                           attention_since=wake_pause["paused_at"] or thread["updated_at"], can_handle_response=False)
         thread.update(wake_fields(wake_pause))
         thread["turn_health"] = health
+        from . import stall_notifications
+        incident = thread.get("stall_incident")
+        stall_dismissed = bool(incident and stall_notifications.dismissed(self.store, incident["id"]))
+        if stall_dismissed:
+            thread["stall_incident"] = {**incident, "dismissed": True}
         policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners,
                                             provider_input=bool(waiting))
-        if health and health["state"] == "stalled" and not waiting:
+        if health and health["state"] == "stalled" and not waiting and not stall_dismissed:
             thread.update(status="stalled", response_state="action", needs_attention=thread["attention"] != "archived",
                           attention_reason="blocked", attention_key=f"stall:{health['turn_id']}",
                           can_handle_response=False)
@@ -1780,8 +1838,7 @@ class BrowserSessions:
         if policy["quiet"] and not thread["snooze_due"] and not (thread["quiet"] and thread["status"] == "stalled"):
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
-        from .stall_notifications import apply_attention
-        apply_attention(thread, now=self.store.clock(), waiting=bool(waiting))
+        stall_notifications.apply_attention(thread, now=self.store.clock(), waiting=bool(waiting))
         thread["can_read_history"] = bool(thread["browser_session"] or thread["client"] == "codex")
         # Stale registrations can request an explicit handoff. The action, not
         # inventory projection, verifies native history and process ownership.
@@ -1795,36 +1852,39 @@ class BrowserSessions:
         thread["forked_from"] = None
         if thread["forked_from_thread_id"]:
             source_id = thread["forked_from_thread_id"]
-            source_title = (self.store.threads.get(source_id)["title"] if _inventory is None
+            source_title = (_db.execute("SELECT title FROM work_threads WHERE thread_id=?", (source_id,)).fetchone()[0] if _inventory is None
                             else _inventory.titles[source_id])
             thread["forked_from"] = {"thread_id": source_id, "title": source_title}
         if _inventory is None:
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 thread["forked_sessions"] = [dict(row) for row in db.execute(
                     """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
                        WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
         else:
             thread["forked_sessions"] = _inventory.forks[thread_id]
         if history:
-            usage = self.store.usage.summary(thread_id)
-            # Detail-only, bounded, no-model recovery. Durable notes prevent
-            # repeated failed scans after restart; overview never reads logs.
-            if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
-                self.usage_recovery_attempts.add(thread_id)
-                try:
-                    usage = self.store.usage.backfill(thread_id)
-                except Exception:
-                    # An adapter can be unavailable while plugin versions are
-                    # changing; usage must never prevent opening a conversation.
-                    pass
-            thread["usage"] = usage
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
-            thread["children"] = [self.store.threads.get(row["child_session_id"]) for row in children]
+            thread["children"] = [self.store.threads.get(row["child_session_id"], connection=_db) for row in children]
         if hasattr(self, "reviews"):
             self.reviews.project(thread, waiting=bool(waiting) or blocked_on_ask,
-                                 inventory=_inventory.reviews if _inventory is not None else None)
+                                 inventory=_inventory.reviews if _inventory is not None else self.reviews.inventory(_db, thread_id))
         return thread
+
+    def _work_thread_usage(self, thread_id, thread):
+        from .snapshot_cache import read_usage
+        usage = read_usage(self.store, thread_id)
+        # Detail-only, bounded, no-model recovery. Durable notes prevent
+        # repeated failed scans after restart; overview never reads logs.
+        if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
+            self.usage_recovery_attempts.add(thread_id)
+            try:
+                usage = self.store.usage.backfill(thread_id)
+            except Exception:
+                # An adapter can be unavailable while plugin versions are
+                # changing; usage must never prevent opening a conversation.
+                pass
+        thread["usage"] = usage
 
     def list_work_threads(self, *, archived=False, cards_only=False) -> list[dict]:
         from .thread_inventory import ThreadInventory
@@ -1837,7 +1897,8 @@ class BrowserSessions:
             from .supervision import relations
             inventory.supervision = relations(db)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
-                                   if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
+                                   if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)
+                                   and matches_workspace(inventory.browser.get(row["thread_id"]) or row["cwd"], self.cwd)}
         # One consistent snapshot for the entire list. Taking the shared provider
         # lock for every card can make a single list wait for hundreds of checkpoints.
         with self.lock:
@@ -1852,10 +1913,16 @@ class BrowserSessions:
             for thread_id in inventory.projected])
 
     def update_work_thread(self, thread_id: str, body: dict, *, prefer_minimal=False) -> dict:
+        if set(body) == {"dismiss_stall_id"}:
+            from .stall_notifications import dismiss
+            self._authorize_history(thread_id)
+            dismiss(self.store, thread_id, body["dismiss_stall_id"])
+            self._publish("browser/changed", {"threadId": thread_id})
+            return self.work_thread(thread_id)
         with self._thread_lock(thread_id):
             before = self.store.threads.get(thread_id)
             if not matches_workspace(before["cwd"], self.cwd):
-                raise CoordinationError("Work thread not found in this workspace.")
+                raise WorkspaceAccessError()
             minimal_receipt = (prefer_minimal and body.get("seen") is True
                                and body.keys() == {"seen", "seen_checkpoint_id", "seen_completion_id"})
             result = self._update_work_thread(thread_id, body, minimal_receipt=minimal_receipt)
@@ -1882,9 +1949,35 @@ class BrowserSessions:
             raise CoordinationError("Seen must be true or false.")
         if "handled" in body and not isinstance(body["handled"], bool):
             raise CoordinationError("Handled must be true or false.")
-        # Only handling and placement depend on the provider's current state.
-        if body.get("handled") or body.get("attention") is not None:
+        cursors = tuple(body.get(key) for key in ("seen_checkpoint_id", "seen_completion_id"))
+        if any(cursor is not None for cursor in cursors):
+            cursors = tuple(0 if cursor is None else cursor for cursor in cursors)
+        displayed = (body.get("seen") and {"seen_checkpoint_id", "seen_completion_id"} <= body.keys()
+                     and all(type(cursor) is int and cursor >= 0 for cursor in cursors) and any(cursors))
+        # Read the projection before requesting write admission. The store
+        # rechecks durable blockers and cursor identity inside the transaction.
+        if displayed or body.get("handled") or body.get("attention") is not None:
             thread = self.work_thread(thread_id, history=False)
+        auto_handle = bool(displayed and thread["response_state"] in {"reply", "update"}
+                           and thread["status"] not in {"running", "needs input", "stalled"}
+                           and not (thread["open_ask"] or thread["wake_paused"] or thread["snooze_due"]
+                                    or thread.get("review") or thread.get("stall_incident")
+                                    or thread["execution"]["pending_requests"])
+                           and cursors == tuple((thread[key] or {}).get("id", 0)
+                                                for key in ("checkpoint", "turn_completion")))
+        await_classification = False
+        if auto_handle and thread["turn_completion"]:
+            classification = thread["response_classification"]
+            auto_handle = (classification["status"] == "classified" if classification else
+                           not (self.classifier.config or load_attention_config(self.store.database_path)))
+            await_classification = not auto_handle
+
+        def still_informational():
+            # This runs inside the receipt transaction. Copy the current
+            # request map without waiting for the provider's state lock.
+            return (thread_id not in self.active
+                    and not any(request["params"].get("threadId") == thread_id
+                                for request in self.requests.copy().values()))
         if body.get("handled") and thread["status"] in {"running", "needs input"}:
             raise BrowserBusyError("Answer or cancel live input and wait for the running turn before dismissing its response.")
         if "pinned" in body and not isinstance(body["pinned"], bool):
@@ -1900,7 +1993,9 @@ class BrowserSessions:
         if body.get("attention") in {"now", "later"} and thread["browser_session"] and self._record(thread_id)["archived"]:
             self.update(thread_id, {"archived": False})
         self.store.threads.update(thread_id, return_thread=False, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
-                                  seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
+                                  seen_checkpoint_id=cursors[0], seen_completion_id=cursors[1],
+                                  auto_handle_seen=still_informational if auto_handle or await_classification else None,
+                                  await_seen_classification=await_classification,
                                   handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
                                   handled_completion_id=body.get("handled_completion_id"),
                                   **({"domain": body["domain"]} if "domain" in body else {}),
@@ -1908,6 +2003,24 @@ class BrowserSessions:
                                   **{key: body[key] for key in ("pinned", "quiet") if key in body}, **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
+
+    def handle_seen_classified_result(self, thread_id, completion_id):
+        """Clear a previously displayed result once it is classified as informational."""
+        with self._thread_lock(thread_id):
+            pending = self.store.threads.pending_seen_classification(thread_id, completion_id)
+            if pending is None:
+                return
+            try:
+                self._authorize_history(thread_id)
+                thread = self.work_thread(thread_id, history=False)
+            except CoordinationError:
+                return  # A moved or retired thread no longer belongs to this runtime.
+            checkpoint = (thread["checkpoint"] or {}).get("id", 0)
+            if (checkpoint == pending and (thread["turn_completion"] or {}).get("id") == completion_id and
+                    thread["seen_completion_id"] >= completion_id and thread["seen_checkpoint_id"] >= checkpoint and
+                    thread["response_state"] == "update"):
+                self._update_work_thread(thread_id, {"seen": True, "seen_checkpoint_id": checkpoint,
+                                                     "seen_completion_id": completion_id}, minimal_receipt=True)
 
     def close_work_thread(self, thread_id: str, *, stop_timeout: float = 10) -> dict:
         """Stop owned execution, or hide an externally owned conversation.
@@ -2150,6 +2263,7 @@ class BrowserSessions:
             models.extend(result["data"])
             cursor = result.get("nextCursor")
             if not cursor:
+                self.model_catalogs[client] = models
                 return models
 
     def _options(self, record: dict) -> dict:
@@ -2419,6 +2533,9 @@ class BrowserSessions:
         record, associations = self._creation_settings(body)
         if on_validated is not None:
             on_validated(record)
+        return self._create_session(body, record, associations, on_created=on_created)
+
+    def _create_session(self, body, record, associations, *, on_created=None):
         repository, name, client, yolo = (record[key] for key in ("cwd", "name", "client", "yolo"))
         provider = self._provider(client)
         result = provider.request("thread/start", self._options(record))
@@ -2522,11 +2639,73 @@ class BrowserSessions:
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
-    def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
+    def _authorize_history(self, thread_id):
+        """Use overview visibility without provider access or a browser row."""
+        from .workspaces import require_thread_workspaces
+        require_thread_workspaces(self.store, [thread_id], self.cwd, exclude_managed=True)
+
+    def read_history_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
+        """Read an indexed page, falling back for untouched legacy histories."""
+        from .transcript_store import TranscriptStore
+        if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
+            raise CoordinationError("Invalid transcript window")
+        self._authorize_history(thread_id)
+        window = TranscriptStore(self.store).read_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+        if window is not None:
+            return self.reviews.public_history(thread_id, window)
+        saved = read_history(self.store, thread_id) or {"id": thread_id, "turns": []}
+        turns = saved.get("turns") or []
+        if turn_id is not None:
+            position = next((i for i, turn in enumerate(turns) if turn.get("id") == turn_id), None)
+            if position is None:
+                return None
+            before_seq = position + 1
+        end = min(len(turns), before_seq if before_seq is not None else len(turns))
+        start = max(0, end - limit)
+        from .history_window import _abridged_item
+        window = {**saved, "view": "recent", "turns": [
+            {**turn, "items": [_abridged_item(item) for item in turn.get("items") or []]}
+            if turn.get("status") != "inProgress" else turn for turn in turns[start:end]]}
+        window.update(earlierTurns=start, beforeSeq=start, totalTurns=len(turns))
+        return self.reviews.public_history(thread_id, window)
+
+    def read_history_window_json(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
+        """HTTP page body; review-bearing histories retain their public projection."""
+        from .transcript_store import TranscriptStore, encode
+        self._authorize_history(thread_id)
+        if not self.reviews.list(thread_id):
+            body = TranscriptStore(self.store).read_window_json(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+            if body is not None:
+                return body
+        window = self.read_history_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+        return encode(window) if window is not None else None
+
+    def read_history_turn(self, thread_id, turn_id):
+        from .transcript_store import TranscriptStore
+        self._authorize_history(thread_id)
+        turn = TranscriptStore(self.store).read_full_turn(thread_id, turn_id)
+        if turn is None:
+            saved = read_history(self.store, thread_id) or {}
+            turn = next((t for t in saved.get("turns", []) if t.get("id") == turn_id), None)
+        if turn is None:
+            raise CoordinationError("Saved turn was not found.")
+        public = self.reviews.public_history(thread_id, {"id": thread_id, "turns": [turn]})
+        return public["turns"][0]
+
+    def _read_external_snapshot(self, work_thread: dict, *, recent: bool, saved_history_reader=None,
+                                coordination_reader=None) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
-        thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
-        if work_thread["client"] == "codex":
+        self._authorize_history(thread_id)
+        from .transcript_store import TranscriptStore
+        transcripts = TranscriptStore(self.store)
+        thread = saved_history_reader(thread_id) if recent and saved_history_reader is not None else None
+        if thread is None:
+            thread = transcripts.read_window(thread_id) if recent else transcripts.read_full(thread_id)
+        indexed = thread is not None
+        if thread is None:
+            thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
+        if not indexed and work_thread["client"] == "codex":
             try:
                 # The HTTP observer stays query-only. Its serialized provider
                 # reader owns the durable transport command and receipt.
@@ -2538,14 +2717,16 @@ class BrowserSessions:
                 thread["historyUnavailable"] = False
             except (CoordinationError, OSError) as exc:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
-        if recent:
+        if recent and not indexed:
             thread = recent_view(thread)
+        thread["historyPagination"] = indexed
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": (coordination_reader or message_timeline)(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
-    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False) -> dict:
+    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False,
+                       saved_history_reader=None, coordination_reader=None) -> dict:
         """Open from saved history and received events, without provider admission.
 
         Full reads and sends reconcile native execution. Opening a window must
@@ -2589,15 +2770,18 @@ class BrowserSessions:
         needs_outcome = work_thread["turn_id"] and (work_thread["turn_active"] or not work_thread["turn_completion"])
         saved_window = thread is None and recent and not needs_outcome
         if thread is None:
-            thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
-                                  live_turn=active_turn)
+            thread = saved_history_reader(thread_id) if saved_window and saved_history_reader is not None else None
+            if thread is None:
+                thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
+                                      live_turn=active_turn)
             if thread is None:
                 saved_window = False
                 thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if unloaded and projection.unloaded_observation is not observation:
             # A commit or rollback overtook the database read. Recheck live
             # ownership and input once before returning the new history.
-            return self._read_snapshot(thread_id, recent=recent, synchronized=True)
+            return self._read_snapshot(thread_id, recent=recent, synchronized=True,
+                                       saved_history_reader=saved_history_reader, coordination_reader=coordination_reader)
         if not saved_window:
             if omitted_turns and needs_outcome and not any(
                     turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]):
@@ -2617,7 +2801,7 @@ class BrowserSessions:
                 "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": (coordination_reader or message_timeline)(self.store, thread_id, self.cwd),
                 "dispatchRequests": self.dispatch.receipts(thread_id),
                 "dispatchSettings": self.dispatch.settings(thread_id),
                 "reviews": self.reviews.list(thread_id), "queuedMessages": self.queue.list(thread_id)}
@@ -2699,6 +2883,8 @@ class BrowserSessions:
 
     def submit(self, thread_id: str, body: dict, *, queued=False, transfer=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
+        if "quiet" in body and not isinstance(body["quiet"], bool):
+            raise CoordinationError("Quiet must be true or false.")
         context = activity_context(body)
         with self.store._writer.measure_request("send.execution"):
             if transfer:
@@ -2770,7 +2956,7 @@ class BrowserSessions:
                                   preserve_text=preserve_text, literal=literal, submission=submission, recovery=recovery,
                                   completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery,
                                   accepted_input=accepted_input)
-            except BrowserBusyError:
+            except (BrowserBusyError, BrowserNotSubmittedError):
                 raise
             except Exception as exc:
                 if coordination_delivery:
@@ -2786,11 +2972,15 @@ class BrowserSessions:
                         if self.active.get(thread_id) is None:
                             self.active.pop(thread_id, None)
                     raise BrowserNotSubmittedError(str(exc)) from exc
+                if accepted_input is not None and not submission["started"] and isinstance(exc, (CoordinationError, ValueError)):
+                    raise BrowserNotSubmittedError(str(exc)) from exc
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
               preserve_text: bool, submission: dict, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
               coordination_delivery=None, accepted_input=None) -> dict:
+        from .provider_transport import ProviderLaunchRejected
+
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -2886,12 +3076,18 @@ class BrowserSessions:
                 accepted_input.update(message=message, imageCount=len(images), afterItemId=after_item)
             if turn_id:
                 # The server checks this too, covering completion during the RPC.
+                context = {"origin": "user", "owner_thread_id": thread_id, "quiet": body.get("quiet", False)}
                 with self.lock:
-                    self.starting_notification_context[thread_id] = {"origin": "user", "owner_thread_id": thread_id}
+                    self.starting_notification_context[thread_id] = context
                 try:
                     with self.navigation.sending(thread_id, source_window):
                         with self.store._writer.measure_request("send.provider_steer"):
-                            result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                            rpc = self._rpc(thread_id)
+                            submission["started"] = True
+                            result = rpc.request("turn/steer", {**params, "expectedTurnId": turn_id})
+                except ProviderLaunchRejected:
+                    submission["started"] = False
+                    raise
                 except CoordinationError as error:
                     # These provider responses explicitly mean no input was
                     # submitted. Disconnects, timeouts and ambiguous native
@@ -2908,8 +3104,7 @@ class BrowserSessions:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
-                self._record_accepted_input(thread_id, turn_id, {"origin": "user", "owner_thread_id": thread_id},
-                                            user_input=True)
+                self._record_accepted_input(thread_id, turn_id, context, user_input=True)
                 self._publish("browser/changed", {"threadId": thread_id})
                 if accepted_input is not None:
                     accepted_input["turnId"] = turn_id
@@ -2924,7 +3119,7 @@ class BrowserSessions:
             params.update(self._permission_options(record, turn=True))
             try:
                 context = (notification_policy.automatic_context(self.store, thread_id) if automatic or recovery else
-                           {"origin": "user", "owner_thread_id": thread_id})
+                           {"origin": "user", "owner_thread_id": thread_id, "quiet": body.get("quiet", False)})
                 with self.lock:
                     self.starting_notification_context[thread_id] = context
                 with self.navigation.sending(thread_id, source_window):
@@ -2940,12 +3135,11 @@ class BrowserSessions:
                         with self.lock:
                             self.delivery_inflight[thread_id] = {'token': token, 'batch': batch, 'turn_id': None}
                     submission["started"] = True
-                    from .provider_transport import ProviderLaunchRejected
                     try:
                         with self.store._writer.measure_request("send.provider_start"):
                             result = rpc.request("turn/start", params)
                     except ProviderLaunchRejected:
-                        if automatic and record["client"] == "claude":
+                        if accepted_input is not None or (automatic and record["client"] == "claude"):
                             submission["started"] = False
                         raise
                     if coordination_delivery:
@@ -3125,14 +3319,20 @@ class BrowserSessions:
         self.sidecars.close()
         self.inbox_wake.close()
         self.external_work.close()
-        self.rpc.close()
-        self.claude.close()
-        self.antigravity.close()
-        self.kimi.close()
-        self.muse.close()
+        provider_errors = []
+        for name, provider in (("codex", self.rpc), ("claude", self.claude),
+                               ("antigravity", self.antigravity), ("kimi", self.kimi), ("muse", self.muse)):
+            try:
+                provider.close()
+            except Exception as error:
+                # One uncertain native close must not leave other owned
+                # providers or their pending persistence running unattended.
+                provider_errors.append((name, error))
         self.schedules.close()
+        unconfirmed_providers = {name for name, _error in provider_errors}
         for thread_id in list(self.loaded):
-            if self.loaded_clients.get(thread_id) != "codex" and not getattr(self, "transport_handover", False):
+            if (self.loaded_clients.get(thread_id) not in {"codex", *unconfirmed_providers}
+                    and not getattr(self, "transport_handover", False)):
                 self._event({"method": "thread/closed", "params": {"threadId": thread_id}})
         self.queue.close()
         with self.history_lock:
@@ -3144,3 +3344,6 @@ class BrowserSessions:
         if getattr(self.store, "conversation_barrier", None) is self.conversation_barrier:
             del self.store.conversation_barrier
         self.execution.close()
+        if provider_errors:
+            details = "; ".join(f"{name}: {error}" for name, error in provider_errors)
+            raise CoordinationError("Provider shutdown incomplete: " + details) from provider_errors[0][1]

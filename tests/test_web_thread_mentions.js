@@ -1,4 +1,5 @@
 'use strict';
+const {loadComposer, loadTimelineReplacement} = require("./web_application_fixture.js");
 const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm');
 const {ThreadMentionDraft,ThreadMentions}=require('../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.js');
 const one={thread_id:'one',title:'Chat UI',client:'codex',attention:'now',cwd:'/project/one'};
@@ -66,11 +67,14 @@ test('normal send and queue include selected references and failed submission re
     renderStatus(){},refreshDetail:async()=>{},refreshList:async()=>{},api:async(path,body)=>{calls.push({path,body});return{};}});
   ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
   const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
+  loadComposer(ctx);
   vm.runInContext(source.slice(source.indexOf('async function sendMessage('),source.indexOf('$("composer").onsubmit')),ctx);
-  const refs=d.snapshot();await ctx.sendMessage(mode);assert.deepEqual(calls[0].body.mentions,refs);
+  const refs=d.snapshot();
+  state.mentions.restore = (_id, text, mentions) => { d.text = text; d.refs = Array.from(mentions); };
+  await ctx.sendMessage(mode);assert.deepEqual(calls[0].body.mentions,refs);
   assert.equal(calls[0].path,mode==='queue'?'sessions/receiver/queue':'sessions/receiver/messages');
   input.value='@Chat UI';d.text=input.value;d.refs=[{start:0,end:8,text:input.value,session_id:'one'}];
-  ctx.api=async()=>{throw Error('Send failed');};await assert.rejects(ctx.sendMessage(),/Send failed/);assert.equal(d.refs.length,1);
+  ctx.api=async()=>{throw Object.assign(new Error('Send failed'), {status: 400});};await assert.rejects(ctx.sendMessage(),/Send failed/);assert.equal(d.refs.length,1);
  }
 });
 test('appending letters to a selected name clears its identity while punctuation and surrounding instructions preserve it',()=>{
@@ -86,6 +90,7 @@ test('actual conversation navigation restores textarea before rendering mention 
  const ctx=vm.createContext({state,$,savedViews:null,navigation:null,notifications:null,history:{replaceState(){}},
   retainConversation(){},setNavigation(){},conversationEntry:()=>({detail:null}),
   renderStatus(){h.switch(state.selected);h.mentions.render();},renderTitle(){},renderList(){},node:()=>({}),refreshDetail:async()=>false});
+ loadTimelineReplacement(ctx);
  vm.runInContext(source.slice(source.indexOf('async function select('),source.indexOf('async function refreshDetail(')),ctx);
  await ctx.select('second');assert.deepEqual(h.mentions.snapshot('second',d.text),d.snapshot());
 });
@@ -120,10 +125,12 @@ test('schedule editor restores selected identities and sends its edited snapshot
 test('first message in a new conversation carries resolved mentions and clears the submitted draft',async()=>{
  const h=harness(),d=draft(),calls=[];h.switch('new-session');h.input.value=d.text;h.mentions.restore('new-session',d.text,d.refs);
  const state={selected:'new-session',newSessionDraft:{session:{client:'codex'}},drafts:new Map(),commandFeedback:new Map(),mentions:h.mentions};
- const ctx=vm.createContext({state,$:()=>h.input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>state.selected==='new-session',
+ const timeline={replaceChildren() {}};
+ const ctx=vm.createContext({state,$:id=>id==='timeline'?timeline:h.input,sessionPath:id=>'sessions/'+id,isSessionDraft:()=>state.selected==='new-session',
   api:async(path,body)=>{calls.push({path,body});return path==='sessions'?{session:{thread_id:'created'}}:{};},
-  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},refreshList:async()=>{},showError(){}});
- vm.runInContext(source.slice(source.indexOf('function conversationEntry('),source.indexOf('function retainConversation(')),ctx);
+  select:async id=>{state.selected=id;h.switch(id);h.input.value=state.drafts.get(id)||'';},
+  refreshDetail:async()=>{},refreshList:async()=>{},renderStatus(){},showError(){}});
+ loadComposer(ctx);
  vm.runInContext(source.slice(source.indexOf('async function sendSessionDraft('),source.indexOf('$("new-session").onclick',source.indexOf('async function sendSessionDraft('))),ctx);
  ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
  const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};

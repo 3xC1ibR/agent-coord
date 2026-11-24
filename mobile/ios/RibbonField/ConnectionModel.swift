@@ -1,3 +1,4 @@
+import Network
 import SwiftUI
 import WebKit
 
@@ -8,7 +9,6 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     @Published var showingConnection = false
     @Published var message: String?
     @Published var busy = false
-    @Published var needsReload = false
     @Published var externalURL: URL?
     @Published var incomingInvitation: PairingInvitation?
     let notifications = PushNotifications.shared
@@ -20,7 +20,10 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     private var hasPage = false
     private var terminated = false
     private var checking = false
+    private var queuedCheck: Bool?
     private var started = false
+    private var active = false
+    private let network = NWPathMonitor()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -35,8 +38,17 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     func start() async {
         guard !started else { return }
         started = true
+        network.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.active else { return }
+                await self.retryConnection(quietly: true)
+            }
+        }
+        network.start(queue: DispatchQueue(label: "com.agentcoord.ios.connection"))
         busy = true
-        if defaults.bool(forKey: clearingKey) || defaults.string(forKey: addressKey) == nil {
+        let clearing = defaults.bool(forKey: clearingKey)
+        if clearing {
             await clearWebsiteData()
             defaults.removeObject(forKey: clearingKey)
         }
@@ -47,11 +59,13 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
             await notifications.connect(server: address, store: store)
         } else {
             defaults.removeObject(forKey: addressKey)
-            await clearWebsiteData()
+            if !clearing { await clearWebsiteData() }
             showingConnection = true
         }
         busy = false
     }
+
+    deinit { network.cancel() }
 
     func pair(text: String, name: String) async {
         guard !busy else { return }
@@ -76,9 +90,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
             server = invitation.server
             defaults.set(invitation.server.url.absoluteString, forKey: addressKey)
             showingConnection = false
-            // Re-pairing the same origin preserves a loaded conversation and its draft.
-            if webView == nil { createWebView() }
-            if !hasPage || terminated { loadHome() } else { requireReload() }
+            if !hasPage || terminated { loadSavedPage() } else { await checkConnection() }
             await notifications.connect(server: invitation.server, store: store)
         } catch let error as ConnectionError {
             message = error.localizedDescription
@@ -106,7 +118,6 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         externalURL = nil
         hasPage = false
         terminated = false
-        needsReload = false
         await clearWebsiteData()
         defaults.removeObject(forKey: clearingKey)
         message = removedNotifications ? nil : "Disconnected. Your Mac could not confirm notification removal; revoke this device in Remote access on your Mac."
@@ -151,86 +162,92 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
-        view.allowsBackForwardNavigationGestures = false
+        view.allowsBackForwardNavigationGestures = true
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         webView = view
     }
 
-    private func loadHome() {
+    private func loadHome() { loadSavedPage(preserveLocation: false) }
+
+    private func loadSavedPage(preserveLocation: Bool = true) {
         guard let server else { return }
+        let location = webView?.url.flatMap { server.contains($0) && $0.path != "/pair" ? $0 : nil }
         message = nil
         terminated = false
-        needsReload = false
         hasPage = false
-        webView?.load(URLRequest(url: server.url))
-    }
-
-    private func requireReload() {
-        needsReload = true
-        message = "Your connection is restored, but this page needs to reload before you continue. Copy any unsent text first."
-    }
-
-    func reloadPage() {
-        needsReload = false
-        message = nil
-        hasPage = false
-        terminated = false
-        webView?.reload() // Keeps the current thread URL; explicitly confirmed by the user.
+        webView?.load(URLRequest(url: (preserveLocation ? location : nil) ?? server.url))
     }
 
     func retry() async {
-        if terminated || !hasPage { loadHome() } else { await checkConnection() }
+        if terminated { loadSavedPage() }
+        else { await retryConnection(quietly: false) }
     }
+
+    private func retryConnection(quietly: Bool) async {
+        guard !busy, server != nil, !terminated else { return }
+        if hasPage { await checkConnection(quietly: quietly) }
+        else if webView?.isLoading == false { loadSavedPage() }
+    }
+
+    func background() { active = false }
 
     func foreground() async {
+        active = true
         guard !busy, server != nil else { return }
+        await retryConnection(quietly: true)
         await notifications.refresh()
-        // A terminated process cannot retain DOM drafts; require explicit recovery in that case.
-        if terminated { return }
-        if !hasPage, webView?.isLoading == false { loadHome() }
-        else if hasPage { await checkConnection() }
     }
 
-    private func checkConnection() async {
-        guard !checking, let webView, hasPage, !terminated else { return }
+    private func checkConnection(quietly: Bool = false) async {
+        guard let webView, hasPage, !terminated else { return }
+        if checking { queuedCheck = (queuedCheck ?? true) && quietly; return }
         checking = true
-        defer { checking = false }
+        defer {
+            checking = false
+            if let queuedCheck {
+                self.queuedCheck = nil
+                Task { await checkConnection(quietly: queuedCheck) }
+            }
+        }
         do {
             let value = try await webView.callAsyncJavaScript("""
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), 10000);
                 try {
                   const r = await fetch('/api/browser/config', {cache:'no-store', signal:controller.signal});
-                  if (!r.ok) return {status:r.status, reload:false};
+                  if (!r.ok) return r.status;
                   const config = await r.json();
-                  const changed = typeof state !== 'undefined' && state.config && state.config.token !== config.token;
-                  const closed = window.agentCoordNativeEvents?.readyState === 2;
-                  return {status:r.status, reload:!!(changed || closed)};
+                  if (typeof window.agentCoordReconnect === 'function') await window.agentCoordReconnect(config);
+                  else if (typeof state !== 'undefined' && state.config && typeof config.token === 'string') {
+                    // A companion update can be installed before its Mac web assets.
+                    state.config.token = config.token;
+                    if (window.agentCoordNativeEvents?.readyState === EventSource.CLOSED && typeof connect === 'function') connect();
+                  }
+                  return r.status;
                 }
                 finally { clearTimeout(timer); }
                 """, arguments: [:], in: nil, contentWorld: .page)
             guard self.webView === webView, !terminated else { return }
-            let result = value as? [String: Any]
-            let status = result?["status"] as? Int ?? 0
+            let status = value as? Int ?? 0
             if status == 401 || status == 403 {
                 message = "This device needs a fresh pairing link from your Mac. Your open page is kept while you reconnect."
                 showingConnection = true
             } else if (200...299).contains(status) {
-                if result?["reload"] as? Bool == true || needsReload { requireReload() }
-                else { message = nil; await openPendingNotification() }
-            } else {
+                message = nil
+                await openPendingNotification()
+            } else if !quietly {
                 message = "Your Mac is unavailable. Check Tailscale and remote access, then try again."
             }
         } catch {
-            guard self.webView === webView, !terminated else { return }
+            guard self.webView === webView, !terminated, !quietly else { return }
             message = "Connection interrupted. Your open page is kept. Check Tailscale and your Mac, then try again."
         }
     }
 
     private func openPendingNotification() async {
         guard let destination = notificationDestination, destination.server == server,
-              hasPage, !terminated, !needsReload, let webView else { return }
+              hasPage, !terminated, let webView else { return }
         do {
             if webView.url?.path == "/" {
                 _ = try await webView.callAsyncJavaScript("window.location.hash = fragment;", arguments: ["fragment": destination.fragment], in: nil, contentWorld: .page)
@@ -259,11 +276,10 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let server, let url = action.request.url else { decisionHandler(.cancel); return }
-        // The shared web UI reloads on 401; retain its draft until native re-pair/reload confirmation.
+        // Older Mac web assets reload on 401. Check the paired grant in place.
         if action.navigationType == .reload && hasPage {
-            requireReload()
             decisionHandler(.cancel)
-            Task { await checkConnection() }
+            Task { await checkConnection(quietly: true) }
             return
         }
         let decision = NavigationPolicy(server: server).decide(url,
@@ -297,7 +313,9 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard self.webView === webView else { return }
+        // WebKit can finish its initial empty document while pairing is still
+        // installing the cookie. Only a page from the selected Mac is reusable.
+        guard self.webView === webView, let server, let url = webView.url, server.contains(url) else { return }
         hasPage = true
         Task {
             // The server returns its pairing HTML with 200 when a cookie expires at launch.
@@ -307,7 +325,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
                 hasPage = false
                 showingConnection = true
                 message = "Pair this device using a fresh link from your Mac."
-            } else { await checkConnection() }
+            } else { await checkConnection(quietly: true) }
         }
     }
 
@@ -318,7 +336,8 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         message = "Could not load your Mac. Check that Tailscale is connected and Ribbon Field is running, then try again."
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard self.webView === webView else { return }
         terminated = true
-        message = "iOS closed this page to free memory. Reopen it to continue. Unsaved text may need to be entered again."
+        message = "iOS closed this page to free memory. Reopen it to continue."
     }
 }

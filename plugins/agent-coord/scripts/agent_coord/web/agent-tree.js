@@ -44,7 +44,23 @@ const AgentTree = (() => {
       }
       return result;
     }
-    return {nodes, parents, children, relationships, root, family};
+    function supervisorPath(id) {
+      if (!nodes.has(id)) return [];
+      const path = [id];
+      while (relationships.get(id) === "agent") { id = parents.get(id); path.push(id); }
+      return path.reverse();
+    }
+    function supervisorFamily(id) {
+      const result = [], pending = nodes.has(id) ? [id] : [];
+      while (pending.length) {
+        const member = pending.pop();
+        result.push(member);
+        const agents = (children.get(member) || []).filter(child => relationships.get(child) === "agent");
+        for (let index = agents.length - 1; index >= 0; index--) pending.push(agents[index]);
+      }
+      return result;
+    }
+    return {nodes, parents, children, relationships, root, family, supervisorPath, supervisorFamily};
   }
   function layout(tree, root, collapsed = new Set(), compact = new Set()) {
     if (!tree.nodes.has(root)) return {nodes: [], edges: [], width: 0, height: 0};
@@ -117,6 +133,101 @@ const AgentTree = (() => {
     if (!end) return "";
     const seconds = Math.max(0, Math.round(end - t.turn_started_at));
     return seconds >= 60 ? Math.floor(seconds / 60) + "m " + seconds % 60 + "s" : seconds + "s";
+  }
+
+  class Breadcrumb {
+    constructor({document, host, onSelect, onError}) {
+      Object.assign(this, {document, host, onSelect, onError});
+      document.addEventListener("pointerdown", event => {
+        if (this.switcher?.open && !host.contains(event.target)) this.switcher.open = false;
+      });
+      host?.addEventListener("keydown", event => {
+        if (event.key !== "Escape" || !this.switcher?.open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.switcher.open = false;
+        this.trigger.focus({preventScroll: true});
+      });
+    }
+    update(tree, selected) {
+      if (!this.host) return;
+      const path = tree.supervisorPath(selected);
+      const navigable = id => {
+        const thread = tree.nodes.get(id);
+        return thread.browser_session !== false || thread.can_read_history === true;
+      };
+      const family = tree.supervisorFamily(path[0]).filter(id => id === selected || navigable(id));
+      const hidden = family.length < 2;
+      const nodes = hidden ? [] : [...new Set([...path, ...family])].map(id => {
+        const thread = tree.nodes.get(id);
+        return [id, thread.title || "Conversation", status(thread), navigable(id)];
+      });
+      const signature = JSON.stringify([path, family, nodes]);
+      if (signature === this.signature) return;
+      this.signature = signature;
+      this.host.hidden = hidden;
+      const focused = this.host.contains(this.document.activeElement);
+      const focusedId = focused ? this.document.activeElement.dataset.agentThread : null;
+      const sameSelection = this.selected === selected;
+      const wasOpen = sameSelection && this.switcher?.open;
+      this.selected = selected;
+      this.host.replaceChildren();
+      this.switcher = null;
+      if (hidden) return;
+      const records = new Map(nodes.map(([id, ...fields]) => [id, fields]));
+      const buttons = [];
+      const element = (tag, className, text) => {
+        const node = this.document.createElement(tag);
+        node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+      };
+      const entry = (id, className) => {
+        const [title, state, canOpen] = records.get(id);
+        const current = id === selected;
+        const node = element(current || !canOpen ? "span" : "button", className);
+        const dot = element("span", "agent-breadcrumb-status");
+        dot.dataset.status = state.key;
+        dot.setAttribute("aria-hidden", "true");
+        node.append(dot, element("span", "agent-breadcrumb-title", title));
+        node.title = title + " · " + state.label;
+        node.setAttribute("aria-label", node.title);
+        node.dataset.agentThread = id;
+        if (current) node.setAttribute("aria-current", "page");
+        else if (canOpen) {
+          node.type = "button";
+          buttons.push(node);
+          node.onclick = async () => {
+            this.switcher.open = false;
+            this.trigger.focus({preventScroll: true});
+            try { await this.onSelect(id); } catch (error) { this.onError?.(error); }
+          };
+        }
+        return node;
+      };
+      const steps = element("div", "agent-breadcrumb-path");
+      for (const id of path) {
+        if (steps.children.length) {
+          const divider = element("span", "agent-breadcrumb-divider", "›");
+          divider.setAttribute("aria-hidden", "true");
+          steps.append(divider);
+        }
+        steps.append(entry(id, "agent-breadcrumb-step"));
+      }
+      this.switcher = element("details", "agent-breadcrumb-switcher");
+      this.trigger = element("summary", "", "▾");
+      this.trigger.title = "Switch agent";
+      this.trigger.setAttribute("aria-label", "Switch agent");
+      const options = element("div", "agent-breadcrumb-options");
+      for (const id of family) if (id !== selected) options.append(entry(id, "agent-breadcrumb-option"));
+      this.switcher.append(this.trigger, options);
+      this.switcher.open = Boolean(wasOpen);
+      this.host.append(steps, this.switcher);
+      if (focused) {
+        const next = sameSelection ? buttons.find(button => button.dataset.agentThread === focusedId) : null;
+        (next || this.trigger).focus({preventScroll: true});
+      }
+    }
   }
 
   class Panel {
@@ -423,6 +534,6 @@ const AgentTree = (() => {
       if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) e.preventDefault();
     }
   }
-  return {graph, layout, status, duration, Panel, CARD_W, CARD_H};
+  return {graph, layout, status, duration, Panel, Breadcrumb, CARD_W, CARD_H};
 })();
 if (typeof module !== "undefined") module.exports = AgentTree;

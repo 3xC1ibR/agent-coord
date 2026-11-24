@@ -38,6 +38,42 @@ class UpdateTransactionTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT value FROM state").fetchone()[0], "original")
             self.assertEqual(runtime.read_json(self.directory / "schema.json")["schema"], 2)
 
+    def test_snapshot_keeps_committed_pages_when_a_reader_blocks_wal_checkpoint(self):
+        with closing(sqlite3.connect(self.database)) as reader, closing(sqlite3.connect(self.database)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            reader.execute("BEGIN")
+            self.assertEqual(reader.execute("SELECT value FROM state").fetchone()[0], "original")
+            writer.execute("UPDATE state SET value='committed in WAL'")
+            writer.commit()
+            update = runtime_update.snapshot(self.database, self.directory, self.update)
+            self.assertEqual(update["backup_method"], "sqlite-backup")
+            writer.execute("UPDATE state SET value='after snapshot'")
+            writer.commit()
+        runtime_update.restore(self.database, self.directory, update)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT value FROM state").fetchone()[0], "committed in WAL")
+
+    def test_clone_snapshot_includes_wal_when_current_reader_pins_truncation(self):
+        probe = self.directory / "clone-probe"
+        if not runtime_update.clone_file(self.database, probe):
+            self.skipTest("Rollback file cloning is unavailable on this volume")
+        probe.unlink()
+        with closing(sqlite3.connect(self.database)) as reader, closing(sqlite3.connect(self.database)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("UPDATE state SET value='latest committed value'")
+            writer.commit()
+            reader.execute("BEGIN")
+            self.assertEqual(reader.execute("SELECT value FROM state").fetchone()[0], "latest committed value")
+            writer.execute("PRAGMA busy_timeout=0")
+            self.assertEqual(writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0], 1)
+            update = runtime_update.snapshot(self.database, self.directory, self.update)
+            self.assertEqual(update["backup_method"], "clonefile")
+            writer.execute("UPDATE state SET value='after snapshot'")
+            writer.commit()
+        runtime_update.restore(self.database, self.directory, update)
+        with closing(sqlite3.connect(self.database)) as db:
+            self.assertEqual(db.execute("SELECT value FROM state").fetchone()[0], "latest committed value")
+
     def test_stale_failure_write_preserves_stop_cancellation(self):
         runtime_update.write(self.directory, self.update, cancelled=True)
         result = runtime_update.write(self.directory, self.update, phase="rolled-back", error="failure")
