@@ -282,96 +282,109 @@ class CoordinatorEdgeTests(unittest.TestCase):
             fixture.wait(lambda: fixture.api(address, path)["activeTurn"] == original[thread][1])
         initial_epoch = runtime.control(runtime.discover(fixture.database), "status")["transport"]["epoch"]
         edge = runtime_edge.read_address(runtime.runtime_directory(fixture.database))
-        cutovers = []
-        components = []
-        sent_messages, send_samples, offered = {}, [], []
         rotation = tuple(streams.items())
+        resources_by_build = {}
         for build in builds:
             resources = fixture.root / f"Build {build}/Resources"
             shutil.copytree(source, resources)
             metadata = runtime.read_json(resources / "backend.json")
             (resources / "backend.json").write_text(json.dumps({**metadata, "runtime_version": f"1+{build}"}))
-            staged = self.launch(resources, "--runtime-confirm-updates")
-            self.assertEqual(staged["edge_url"], address)
-            record = runtime.discover(fixture.database)
-            stop = threading.Event()
-            started = threading.Event()
+            resources_by_build[build] = resources
 
-            def crossing(thread, path, message=None):
-                began = time.monotonic()
-                timings = {"started_at": began}
-                body = ({"message": message, "requestId": message, "expectedTurnId": original[thread][1]}
-                        if message else None)
-                code, response = request(address, "/" + path + ("/messages" if body else ""),
-                    body=json.dumps(body).encode() if body else None,
-                    headers={"Content-Type": "application/json", runtime_edge.TOKEN_HEADER: token} if body else None,
-                    timings=timings)
-                return code, response, body, thread, path, {**timings, "total_ms": (time.monotonic() - began) * 1000}
+        stop = threading.Event()
+        started = threading.Event()
 
-            def schedule(pool):
-                samples = []
-                frequency = 10
-                origin = time.monotonic()
-                for sample in range(12 * frequency):
-                    if stop.wait(max(0, origin + sample / frequency - time.monotonic())):
-                        break
-                    thread, path = rotation[sample % len(rotation)]
-                    samples.append(pool.submit(crossing, thread, path, f"steer-{build}-{sample}"))
-                    if sample % 2 == 0:
-                        samples.append(pool.submit(crossing, thread, path))
-                    started.set()
-                return [sample.result(timeout=5) for sample in samples]
+        def transact(thread, path, message=None):
+            began = time.monotonic()
+            timings = {"started_at": began}
+            body = ({"message": message, "requestId": message, "expectedTurnId": original[thread][1]}
+                    if message else None)
+            code, response = request(address, "/" + path + ("/messages" if body else ""),
+                body=json.dumps(body).encode() if body else None,
+                headers={"Content-Type": "application/json", runtime_edge.TOKEN_HEADER: token} if body else None,
+                timings=timings)
+            timings["total_ms"] = (time.monotonic() - began) * 1000
+            return code, response, body, thread, path, timings
 
-            with ThreadPoolExecutor(max_workers=32) as pool:
-                traffic = pool.submit(schedule, pool)
-                try:
-                    self.assertTrue(started.wait(2))
+        def schedule(pool):
+            samples = []
+            frequency = 10
+            origin = time.monotonic()
+            for sample in range(40 * frequency):
+                if stop.wait(max(0, origin + sample / frequency - time.monotonic())):
+                    return [sample.result(timeout=5) for sample in samples]
+                thread, path = rotation[sample % len(rotation)]
+                samples.append(pool.submit(transact, thread, path, f"steer-{sample}"))
+                if sample % 2 == 0:
+                    samples.append(pool.submit(transact, thread, path))
+                started.set()
+            self.fail("Coordinator switches exceeded the continuous workload time limit")
+
+        cutovers, components, switches = [], [], []
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            traffic = pool.submit(schedule, pool)
+            try:
+                self.assertTrue(started.wait(2))
+                for build, resources in resources_by_build.items():
+                    began = time.monotonic()
+                    staged = self.launch(resources, "--runtime-confirm-updates")
+                    self.assertEqual(staged["edge_url"], address)
+                    record = runtime.discover(fixture.database)
                     runtime.control(record, "activate-update", request_id=f"edge-{build}", payload=staged["pending"])
+
                     def serving():
                         code, data = request(address, runtime_edge.HEALTH, headers=observer)
                         value = json.loads(data)
                         if code == 200 and value.get("status") == "serving" and value.get("payload") == staged["pending"]:
                             return value
+
                     health = fixture.wait(serving, timeout=10)
-                    time.sleep(.35)  # Include resumed traffic at the same offered rate.
-                finally:
-                    stop.set()
-                samples = traffic.result(timeout=6)
-            failures = [(code, response.decode()) for code, response, *_ in samples if code != 200]
-            self.assertEqual(failures, [])
-            offers = Counter("send" if body else "open" for _, _, body, *_ in samples)
-            self.assertGreaterEqual(offers["send"], 5)
-            self.assertEqual(offers["open"], math.ceil(offers["send"] / 2))
-            offered.append(dict(offers))
-            state = health["update"]
-            for _, response, body, thread, path, timings in samples:
-                value = json.loads(response)
-                if body:
-                    self.assertEqual(value["acceptedMessage"]["turnId"], original[thread][1])
-                    sent_messages[body["requestId"]] = (thread, path, body)
-                    send_samples.append({**timings, "switch": build,
-                        "relative_to_fence_ms": (timings["started_at"] - state["edge_admission_closed_at"]) * 1000})
-                else:
-                    self.assertEqual(value["activeTurn"], original[thread][1])
-            self.assertEqual(health["edge_instance"], edge["instance"])
-            self.assertEqual(health["update"]["phase"], "committed")
-            cutovers.append(health["edge_handover_ms"])
-            timestamps = [state[key] for key in ("edge_admission_closed_at", "edge_admission_drained_at",
-                "edge_projection_saved_at", "edge_source_exited_at", "edge_snapshot_finished_at",
-                "edge_candidate_ready_at")]
-            intervals = [round((end - start) * 1000, 2) for start, end in zip(timestamps, timestamps[1:])]
-            components.append(dict(zip(("drain_ms", "projection_ms", "source_exit_ms", "snapshot_ms",
-                                        "candidate_ready_ms"), intervals)))
-            self.assertEqual(fixture.api(address, "api/browser/config")["token"], token)
-            current = runtime.control(runtime.discover(fixture.database), "status")
-            self.assertEqual(current["transport"]["epoch"], initial_epoch + build - 1)
-            self.assertEqual(fixture.api(address, conversation)["requests"][0]["key"], approval)
-            latest_output = [row for row in wire() if row["kind"] == "output"
-                             and state["edge_admission_closed_at"] <= row["time"]]
-            for thread, (pid, turn) in original.items():
-                output = [row for row in latest_output if row["thread"] == thread]
-                self.assertTrue(output, f"Stream {thread} produced no output after fence {build}")
-                self.assertEqual({(row["pid"], row["turn"]) for row in output}, {(pid, turn)})
+                    self.assertEqual(health["edge_instance"], edge["instance"])
+                    state = health["update"]
+                    self.assertEqual(state["phase"], "committed")
+                    cutover = health["edge_handover_ms"]
+                    cutovers.append(cutover)
+                    fence = state["edge_admission_closed_at"]
+                    switches.append((build, began, fence, fence + cutover / 1000))
+                    timestamps = [state[key] for key in ("edge_admission_closed_at", "edge_admission_drained_at",
+                        "edge_projection_saved_at", "edge_source_exited_at", "edge_snapshot_finished_at",
+                        "edge_candidate_ready_at")]
+                    intervals = [round((end - start) * 1000, 2) for start, end in zip(timestamps, timestamps[1:])]
+                    components.append(dict(zip(("drain_ms", "projection_ms", "source_exit_ms", "snapshot_ms",
+                                                "candidate_ready_ms"), intervals)))
+                    self.assertEqual(fixture.api(address, "api/browser/config")["token"], token)
+                    current = runtime.control(runtime.discover(fixture.database), "status")
+                    self.assertEqual(current["transport"]["epoch"], initial_epoch + len(switches))
+                    self.assertEqual(fixture.api(address, conversation)["requests"][0]["key"], approval)
+                    latest_output = [row for row in wire() if row["kind"] == "output" and fence <= row["time"]]
+                    for thread, (pid, turn) in original.items():
+                        output = [row for row in latest_output if row["thread"] == thread]
+                        self.assertTrue(output, f"Stream {thread} produced no output after fence {build}")
+                        self.assertEqual({(row["pid"], row["turn"]) for row in output}, {(pid, turn)})
+                time.sleep(.35)  # Include resumed traffic at the same offered rate.
+            finally:
+                stop.set()
+            samples = traffic.result(timeout=6)
+
+        failures = [(code, response.decode()) for code, response, *_ in samples if code != 200]
+        self.assertEqual(failures, [])
+        sent_messages, send_samples = {}, []
+        offered = Counter()
+        for _, response, body, thread, path, timings in samples:
+            start = timings["started_at"]
+            build, _, fence, routed = next((window for window in reversed(switches) if start >= window[1]), switches[0])
+            offered[build, "send" if body else "open"] += 1
+            value = json.loads(response)
+            if body:
+                self.assertEqual(value["acceptedMessage"]["turnId"], original[thread][1])
+                sent_messages[body["requestId"]] = (thread, path, body)
+                send_samples.append({**timings, "switch": build, "relative_to_fence_ms": (start - fence) * 1000,
+                    "crossed_fence": start <= routed and start + timings["total_ms"] / 1000 >= fence})
+            else:
+                self.assertEqual(value["activeTurn"], original[thread][1])
+        offered = [{kind: offered[build, kind] for kind in ("send", "open")} for build in resources_by_build]
+        self.assertTrue(all(row["send"] and row["open"] for row in offered))
+        self.assertEqual(sum(row["open"] for row in offered), math.ceil(len(send_samples) / 2))
 
         # A retry of the first accepted send after all upgrades must resolve
         # from the durable receipt without a second native request.
@@ -395,14 +408,17 @@ class CoordinatorEdgeTests(unittest.TestCase):
             self.assertGreater(cutover, 0)
         send_samples.sort(key=lambda sample: sample["total_ms"])
         send_p99 = send_samples[math.ceil(.99 * len(send_samples)) - 1]["total_ms"]
+        fence_sends = [sample["total_ms"] for sample in send_samples if sample["crossed_fence"]]
+        fence_send_p99 = fence_sends[math.ceil(.99 * len(fence_sends)) - 1] if fence_sends else 0
         if report := os.environ.get("RIBBON_EDGE_REPORT"):
             Path(report).write_text(json.dumps({"cutover_ms": cutovers, "accepted": len(sent_messages),
                 "provider_deliveries": len(deliveries), "http_failures": 0, "streams": len(streams),
-                "send_p99_ms": send_p99, "slowest_sends": send_samples[-5:],
+                "send_p99_ms": send_p99, "fence_send_p99_ms": fence_send_p99,
+                "fence_sends": len(fence_sends), "slowest_sends": send_samples[-5:],
                 "offered": offered, "phases": components}, indent=2) + "\n")
         if os.environ.get("RIBBON_REQUIRE_EDGE_BUDGET") == "1":
             self.assertLess(max(cutovers), 250, f"Coordinator handover milliseconds: {cutovers}")
-            self.assertLess(send_p99, 150, "Send latency includes waiting for coordinator admission")
+            self.assertLess(max(send_p99, fence_send_p99), 150, "Send latency includes waiting for coordinator admission")
 
     def test_supervisor_restores_a_lost_listener_at_its_original_origin(self):
         fixture = self.fixture
