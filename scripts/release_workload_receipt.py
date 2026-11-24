@@ -23,6 +23,7 @@ WORKFLOW = ".github/workflows/release-macos.yml"
 ROOT = Path(__file__).resolve().parents[1]
 ARCHITECTURES = ("arm64", "x86_64")
 DESCRIPTION = "Signed upgrade passed the private interactive workload"
+STABLE_ORIGIN_CONTRACT = "stable-origin-v1"
 # The reported slow recent-history read traversed 331 saved turns and 1,714 items.
 MIN_ARCHIVE_TURNS = 300
 MIN_ARCHIVE_ITEMS = 1000
@@ -53,13 +54,15 @@ def release_run(run_id):
     return run
 
 
-def context(run, version, build, architecture, archive_digest, dmg_digest):
+def context(run, version, build, architecture, archive_digest, dmg_digest, *, stable_origin=False):
     if (architecture not in ARCHITECTURES or not re.fullmatch(r"\d+\.\d+\.\d+", version)
             or not re.fullmatch(r"[1-9]\d*", str(build))
             or not all(re.fullmatch("[0-9a-f]{64}", d) for d in (archive_digest, dmg_digest))):
         raise ValueError("Invalid signed release artifact identity")
     identity = [1, REPO, WORKFLOW, run["id"], run["run_attempt"], run["head_sha"],
                 version, str(build), architecture, archive_digest, dmg_digest]
+    if stable_origin:
+        identity.append(STABLE_ORIGIN_CONTRACT)
     fingerprint = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"rf/signed-workload/{architecture}/{fingerprint}"
 
@@ -97,7 +100,8 @@ def require_release_receipts(release, wait_seconds=0):
             or os.environ.get("GITHUB_RUN_ATTEMPT", str(run["run_attempt"])) != str(run["run_attempt"])):
         raise ValueError("Release source or workflow attempt mismatch")
     expected = {context(run, release["version"], release["build_number"], arch,
-                        release["updates"][arch]["sha256"], release["downloads"][arch]["sha256"])
+                        release["updates"][arch]["sha256"], release["downloads"][arch]["sha256"],
+                        stable_origin=release["updates"][arch].get("qualification") == STABLE_ORIGIN_CONTRACT)
                 for arch in ARCHITECTURES}
     deadline = time.monotonic() + wait_seconds
     while pending_contexts(run, expected):
@@ -124,13 +128,21 @@ def database_bytes(database):
         return db.execute("SELECT page_count * page_size FROM pragma_page_count, pragma_page_size").fetchone()[0]
 
 
-def verify_report(report, *, candidate, version, build, architecture, digest, snapshot_bytes):
+def verify_report(report, *, candidate, version, build, architecture, digest, snapshot_bytes,
+                  stable_origin=False):
     if (report.get("schema_version") != 1 or report.get("passed") is not True
             or report.get("workload_contract") != "ribbon-field-saved-interaction-v1"
             or report.get("mode") != "signed_guarded_upgrade" or report.get("guarded_update_phase") != "committed"):
         raise ValueError("Signed guarded upgrade did not pass")
     if any(v.get("phase") != "baseline" for v in report["violations"]):
         raise ValueError("Candidate or guarded upgrade has a recorded violation")
+    if stable_origin:
+        proof = report.get("stable_origin") or {}
+        if (proof.get("verified") is not True or proof.get("http_failures") != 0
+                or proof.get("browser_reloads") != 0
+                or type(proof.get("cutover_ms")) not in {float, int} or not 0 <= proof["cutover_ms"] < 250
+                or type(proof.get("send_p99_ms")) not in {float, int} or not 0 <= proof["send_p99_ms"] < 150):
+            raise ValueError("The signed stable origin did not meet its cutover and submission budgets")
     signed = report["signed_inputs"][1]
     served = report["candidate_runtime"]
     if (Path(signed["application"]).resolve() != candidate.resolve()
@@ -284,17 +296,20 @@ def run_operator_gate(args):
         if (source["version"] != version or source["source_commit"] != head
                 or source["run_url"] != f"https://github.com/{REPO}/actions/runs/{run['id']}"):
             raise ValueError("Downloaded provenance does not match the release run")
-        status_context = context(run, version, source["build_number"], args.architecture,
-                                 file_hash(archive), file_hash(dmg))
         subprocess.run(["/usr/bin/ditto", "-x", "-k", archive, directory/"extracted"], check=True)
         candidate = directory/"extracted/Ribbon Field.app"
         verify_installer_app(candidate, dmg, directory)
+        stable_origin = (candidate/"Contents/Resources/backend/agent_coord/runtime_edge.py").is_file()
+        status_context = context(run, version, source["build_number"], args.architecture,
+                                 file_hash(archive), file_hash(dmg), stable_origin=stable_origin)
         sys.path.insert(0, str(ROOT/"plugins/agent-coord/scripts"))
         from agent_coord.desktop_runtime import payload_digest
         digest = payload_digest(candidate/"Contents/Resources")
         command = [sys.executable, ROOT/"scripts/validate_signed_runtime_responsiveness.py",
                    "--previous", args.previous.resolve(strict=True), "--candidate", candidate,
                    "--snapshot", snapshot, "--report", report]
+        if stable_origin:
+            command.append("--stable-origin")
         if args.affected_report:
             command.extend(["--affected-report", args.affected_report.resolve(strict=True)])
         if args.playwright_module:
@@ -302,7 +317,7 @@ def run_operator_gate(args):
         subprocess.run(command, cwd=ROOT, check=True)
         verify_report(json.loads(report.read_text()), candidate=candidate, version=version,
                       build=source["build_number"], architecture=args.architecture, digest=digest,
-                      snapshot_bytes=database_bytes(snapshot))
+                      snapshot_bytes=database_bytes(snapshot), stable_origin=stable_origin)
         if release_run(args.run)["run_attempt"] != run["run_attempt"]:
             raise ValueError("Release was rerun during validation")
         result = github(f"repos/{REPO}/statuses/{head}", "-f", "state=success", "-f",

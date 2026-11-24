@@ -33,6 +33,43 @@ class ToolOutcomeTests(unittest.TestCase):
         self.assertTrue(validation.tool_outcomes(records)["healthy"])
 
 
+class SignedStableOriginTests(unittest.TestCase):
+    def test_browser_network_witness_detects_a_reload_at_the_same_origin(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            from validate_signed_runtime_responsiveness import SignedUpgrade
+        finally:
+            sys.path.pop(0)
+        with tempfile.TemporaryDirectory() as directory:
+            runner = SignedUpgrade.__new__(SignedUpgrade)
+            runner.root = Path(directory)
+            origin = "http://127.0.0.1:12345"
+            pages = ("opening", "composing", "receiving")
+            runner.edge_observations = [
+                {"before": 1, "after": 1.01, "serving": "old", "edge_instance": "edge"},
+                {"before": 1.15, "after": 1.16, "serving": "new", "edge_instance": "edge"},
+            ]
+            runner.report = {
+                "stable_origin": {"url": origin + "/", "listener_instance": "edge"},
+                "initial_runtime": {"instance": "old"}, "candidate_runtime": {"instance": "new"},
+                "samples": [{"phase": "upgrade", "kind": "send", "outcome": "accepted", "start": 1, "end": 1.10}],
+                "browser_observations": [{"phase": "baseline", "kind": "browser_attachment", "page": page, "origin": origin}
+                                         for page in pages] + [
+                    {"phase": "upgrade", "kind": "browser_open", "ok": True},
+                    {"phase": "upgrade", "kind": "browser_send", "ok": True, "requested": 100, "responded": 200}],
+                "violations": [],
+            }
+            network = runner.root / "browser-network.json"
+            counts = {f"baseline {page} {origin} GET document 200": 1 for page in pages}
+            network.write_text(json.dumps({"counts": counts}))
+            runner.verify_stable_origin()
+            self.assertTrue(runner.report["stable_origin"]["verified"])
+            counts[f"upgrade opening {origin} GET document 200"] = 1
+            network.write_text(json.dumps({"counts": counts}))
+            runner.verify_stable_origin()
+            self.assertEqual(runner.report["stable_origin"]["browser_reloads"], 1)
+            self.assertFalse(runner.report["stable_origin"]["verified"])
+
 class ReceiptTests(unittest.TestCase):
     def inputs(self, *texts):
         return [{"kind": "input", "message": {"method": "turn/steer", "params": {"input": [{"text": t}]}}} for t in texts]

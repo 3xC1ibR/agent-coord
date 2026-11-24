@@ -128,6 +128,7 @@ def release_files(directory: Path, version: str, commit: str, channel: str = "al
                 info = plistlib.loads(read_config("Info.plist"))
                 backend = json.loads(read_config("Resources/backend.json"))
                 python = json.loads(read_config("Resources/python-runtime.json"))
+                stable_origin = prefix + "Resources/backend/agent_coord/runtime_edge.py" in bundle.namelist()
             if (info.get("CFBundleIdentifier") != "com.agentcoord.desktop"
                     or info.get("CFBundleVersion") != str(release["build_number"])
                     or info.get("CFBundleShortVersionString") != version
@@ -160,6 +161,10 @@ def release_files(directory: Path, version: str, commit: str, channel: str = "al
                 raise ValueError(f"Update feed metadata mismatch: {feed.name}")
             files.extend((archive, feed, metadata))
             release["updates"][arch] = {**expected, "appcast": feed.name, "archive": archive.name}
+            if stable_origin:
+                release["updates"][arch]["qualification"] = release_workload_receipt.STABLE_ORIGIN_CONTRACT
+        if len({update.get("qualification") for update in release["updates"].values()}) != 1:
+            raise ValueError("Architectures require different signed workload contracts")
     return files, release
 
 
