@@ -491,13 +491,14 @@ class BrowserHTTPTests(unittest.TestCase):
                 self.assertEqual(get("/api/browser/config" + script[script.index("?"):])[1], "no-store")
 
     def test_every_workspace_script_and_stylesheet_can_be_reused_on_a_new_document(self):
+        from workspace_http_fixture import assert_workspace_bundles
+
         with urllib.request.urlopen(self.url + "/", timeout=3) as response:
-            paths = re.findall(rb'(?:src|href)="(/[^"?]+\.(?:js|css)(?:\?[^"]*)?)"', response.read())
-        self.assertTrue(paths)
-        for path in paths:
-            with self.subTest(path=path), urllib.request.urlopen(self.url + path.decode(), timeout=3) as response:
-                self.assertEqual(response.headers["Cache-Control"], "private, max-age=31536000, immutable")
-                self.assertTrue(path.endswith(b"?v=" + hashlib.sha256(response.read()).hexdigest().encode()))
+            document = response.read().decode()
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        expected = assert_workspace_bundles(self, self.url, document)
+        paths = re.findall(r'(?:src|href)="(/[^"?]+\.(?:js|css)(?:\?[^"]*)?)"', document)
+        self.assertCountEqual(paths, expected.values())
 
     def request(self, path, body=None, headers=None):
         request_headers = dict(headers or {})
@@ -769,23 +770,24 @@ class BrowserHTTPTests(unittest.TestCase):
                 self.assertIn("frame-ancestors " + ("'self'" if framed else "'none'"), response.headers["Content-Security-Policy"])
 
     def test_browser_create_chat_interrupt_archive_and_restore(self):
+        from workspace_http_fixture import assert_workspace_bundles
+
         status, shell = self.request("/")
         self.assertEqual(status, 200)
         self.assertIn("New session", shell)
+        assert_workspace_bundles(self, self.url, shell, script=(b"slash-commands", b"mobile-chat-actions", b"messageMarkdown"),
+                                 stylesheet=(b".mobile-chat", b".filter-menu"))
         self.assertEqual(self.request("/app.js")[0], 200)
         self.assertEqual(self.request("/slash-commands.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/slash-commands.js?v=', shell)
         self.assertIn('aria-controls="slash-commands"', shell)
         self.assertEqual(self.request("/styles.css")[0], 200)
         self.assertEqual(self.request("/mobile-chat.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/mobile-chat.js?v=', shell)
         self.assertEqual(self.request("/filter-menu.js")[0], 200)
         self.assertEqual(self.request("/filter-menu.css")[0], 200)
         self.assertIn('id="filter-menu"', shell)
         self.assertIn('id="repository"', shell)
         self.assertIn('id="project"', shell)
         self.assertEqual(self.request("/markdown.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/markdown.js?v=', shell)
         monitor = self.request("/monitor")[1]
         self.assertIn('src="/markdown.js"', monitor)
         self.assertIn("messageMarkdown.render(m.body)", monitor)

@@ -6,6 +6,7 @@ import threading
 import unittest
 import urllib.request
 from pathlib import Path
+from workspace_http_fixture import assert_workspace_bundles
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.store import CoordinationStore
@@ -32,8 +33,8 @@ class ThreadTabsTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="conversation-tabs"', page)
-                    self.assertIn(b'rel="preload" as="script" href="/thread-tabs.js?v=', page)
-                    self.assertIn(b'href="/thread-tabs.css?v=', page)
+                assert_workspace_bundles(self, base, page, script=(b"agent-coord.thread-tabs.", b"Workspace conversation tabs"),
+                                         stylesheet=(b".conversation-tab-strip",))
                 for path in ["/thread-tabs.js", "/thread-tabs.css"]:
                     with urllib.request.urlopen(base + path) as response:
                         self.assertEqual(response.status, 200)

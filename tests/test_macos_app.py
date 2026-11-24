@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 import urllib.request
+from workspace_http_fixture import workspace_bundle_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 MACOS = ROOT / "desktop/macos"
@@ -160,9 +161,26 @@ class DesktopPackagingTests(unittest.TestCase):
             for name in ("html-preview.js", "response-actions.js", "permission-menu.js"):
                 self.assertNotIn(f'src="/{name}"', index)
                 self.assertNotIn(f'href="/{name}"', index)
-                self.assertIn((build.SCRIPTS / "agent_coord/web" / name).read_text(), application)
             self.assertNotIn('href="/html-preview.css"', index)
-            self.assertIn((build.SCRIPTS / "agent_coord/web/html-preview.css").read_text(), (web / "styles.css").read_text())
+            distribution = web / "dist/index.html"
+            if distribution.is_file():
+                paths = workspace_bundle_paths(self, distribution.read_bytes())
+                for extension, alias, attribute in (("js", "app.js", "src"), ("css", "styles.css", "href")):
+                    path = paths[extension].lstrip("/")
+                    canonical = (web / path).read_bytes()
+                    self.assertEqual((web / alias).read_bytes(), canonical)
+                    digest = hashlib.sha256(canonical).hexdigest()
+                    self.assertEqual(path, f"dist/app-{digest[:20]}.{extension}")
+                    self.assertEqual(snapshot[f"agent_coord/web/{path}"], digest)
+                    self.assertIn(f'{attribute}="/{alias}"', index)
+                for behavior in ("ribbon-field-close-html-preview", "Discuss selected response text", "Current native mode"):
+                    self.assertIn(behavior, application)
+                self.assertIn(".html-preview-dialog", (web / "styles.css").read_text())
+            else:
+                source = build.SCRIPTS / "agent_coord/web"
+                for name in ("html-preview.js", "response-actions.js", "permission-menu.js"):
+                    self.assertIn((source / name).read_text(), application)
+                self.assertIn((source / "html-preview.css").read_text(), (web / "styles.css").read_text())
 
     def test_packaged_kimi_hook_runs_and_prompt_guidance_exists(self):
         for standalone in (False, True):

@@ -660,12 +660,13 @@ class AskBrowserTests(unittest.TestCase):
                 self.assertEqual((code, "already resolved" in error), (400, True))
 
     def test_config_advertises_ask_kinds_and_the_view_needs_no_new_urls(self):
+        from workspace_http_fixture import assert_workspace_bundles
+
         self.assertIs(self.get("/api/browser/config")["askKinds"], True)
         with urllib.request.urlopen(self.base + "/") as response:
             workspace = response.read().decode()
-        # An older backend serves the new web root from its existing asset list until its update is applied.
-        for script in ("/asks.js", "/asks.css"):
-            self.assertIn(script, workspace)
+        assert_workspace_bundles(self, self.base, workspace, script=(b"Nothing needs you",),
+                                 stylesheet=(b".asks-view", b".thread-asks"))
         for absent in ("asks-page", "asks-copy", "asks-frame"):
             self.assertNotIn(absent, workspace)
 
