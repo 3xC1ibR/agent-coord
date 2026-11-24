@@ -536,6 +536,65 @@ def seed_prepared_history_steps(store, prepared):
         yield from index_document_steps(store, available)
 
 
+def _cached_turns(store, keys):
+    identity = getattr(store, "_database_file_identity", lambda: None)()
+    with _TURN_CACHE_LOCK:
+        saved_identity, cache, _ = _TURN_CACHES.get(store, (None, {}, 0)) if store is not None else (None, {}, 0)
+        if identity is None or saved_identity != identity:
+            return identity, {}
+        retained = {key: cache[key][0] for key in keys if key in cache}
+        for key in retained:
+            cache.move_to_end(key)
+    return identity, retained
+
+
+def _retain_turns(store, identity, keys, turns, headers):
+    """Retain bounded immutable occurrences only after their headers are durable."""
+    retained, added = {}, {}
+    for key, turn in zip(keys, turns):
+        references = tuple(tuple(reference) for reference in turn.get("items", []))
+        documents = [_document_key(reference) for reference in references]
+        if any(document not in headers for document in documents):
+            continue
+        compact = tuple((*headers[document][:4], None, headers[document][5]) for document in documents)
+        metadata = {field: turn["metadata"][field] for field in ("id", "startedAt", "status")
+                    if field in turn["metadata"]}
+        value = metadata, compact, references
+        retained[key] = value
+        size = len(json.dumps((key, value)).encode("utf-8")) + 256 + 256 * len(compact)
+        if size <= _TURN_CACHE_BYTES:
+            added[key] = value, size
+    if identity is not None:
+        with _TURN_CACHE_LOCK:
+            previous_identity, cache, size = _TURN_CACHES.get(store, (None, OrderedDict(), 0))
+            if previous_identity != identity:
+                cache, size = OrderedDict(), 0
+            for key, entry in added.items():
+                previous = cache.pop(key, None)
+                size += entry[1] - (previous[1] if previous else 0)
+                cache[key] = entry
+            while size > _TURN_CACHE_BYTES or len(cache) > _TURN_CACHE_ENTRIES:
+                _, (_, removed) = cache.popitem(last=False)
+                size -= removed
+            if identity == store._database_file_identity():
+                _TURN_CACHES[store] = identity, cache, size
+    return retained
+
+
+def _read_turns(store, db, references, measurement=None):
+    from .history_persistence import _documents
+    keys = [tuple(reference) for reference in references]
+    identity, retained = _cached_turns(store, keys)
+    absent = list(dict.fromkeys(key for key in keys if key not in retained))
+    decoded = dict(zip(absent, _documents(db, [list(key) for key in absent])))
+    turns = [({"metadata": retained[key][0], "items": [list(reference) for reference in retained[key][2]]} if key in retained else decoded[key])
+             for key in keys]
+    if measurement is not None:
+        measurement["decoded_turns"] = measurement.get("decoded_turns", 0) + len(absent)
+        measurement["reused_turns"] = measurement.get("reused_turns", 0) + len(keys) - len(absent)
+    return identity, keys, turns
+
+
 def _prepare_document_messages(store, thread_id, revision, manifest):
     from .history_persistence import _documents
     _ensure_document_cache(store)
@@ -548,13 +607,7 @@ def _prepare_document_messages(store, thread_id, revision, manifest):
             if not isinstance(metadata, dict) or not isinstance(turn_references, list):
                 raise ValueError("Invalid conversation manifest")
             keys = [tuple(reference) for reference in turn_references]
-            with _TURN_CACHE_LOCK:
-                identity, cache, _ = _TURN_CACHES.get(store, (None, {}, 0))
-                if identity != file_identity:
-                    cache = {}
-                retained = {key: cache[key][0] for key in keys if key in cache}
-                for key in retained:
-                    cache.move_to_end(key)
+            file_identity, retained = _cached_turns(store, keys)
             absent = list(dict.fromkeys(key for key in keys if key not in retained))
             turns = _documents(db, [list(key) for key in absent])
             references = {}
@@ -580,33 +633,11 @@ def _prepare_document_messages(store, thread_id, revision, manifest):
         # occurrence metadata, after every referenced prose header is durable.
         # Positions, fallback IDs and routing are rebuilt from the current root;
         # no revision or publication decision is cached.
-        added = {}
-        for key, turn in zip(absent, turns):
-            headers = tuple(cached[_document_key(reference)] for reference in turn.get("items", []))
-            headers = tuple((*header[:4], None, header[5]) for header in headers)
-            value = ({field: turn["metadata"][field] for field in ("id", "startedAt")
-                      if field in turn["metadata"]}, headers)
-            size = len(json.dumps((key, value)).encode("utf-8")) + 256 + 256 * len(headers)
-            retained[key] = value
-            if size <= _TURN_CACHE_BYTES:
-                added[key] = (value, size)
-        with _TURN_CACHE_LOCK:
-            identity, cache, size = _TURN_CACHES.get(store, (None, OrderedDict(), 0))
-            if identity != file_identity:
-                cache, size = OrderedDict(), 0
-            for key, entry in added.items():
-                previous = cache.pop(key, None)
-                size += entry[1] - (previous[1] if previous else 0)
-                cache[key] = entry
-            while size > _TURN_CACHE_BYTES or len(cache) > _TURN_CACHE_ENTRIES:
-                _, (_, removed) = cache.popitem(last=False)
-                size -= removed
-            if file_identity == store._database_file_identity():
-                _TURN_CACHES[store] = (file_identity, cache, size)
+        retained.update(_retain_turns(store, file_identity, absent, turns, cached))
         measurement.update(decoded_turns=len(absent), reused_turns=len(keys) - len(absent))
     records, routing, count = {}, [], 0
     for turn_index, key in enumerate(keys):
-        turn_metadata, headers = retained[key]
+        turn_metadata, headers, _ = retained[key]
         turn_id = str(turn_metadata.get("id") or f"search-turn-{turn_index}")
         for item_index, header in enumerate(headers):
             document, item_id, role, timestamp, excerpt, text_length = header
@@ -967,22 +998,33 @@ def _refresh_messages(store, cwd, measurement, schedule_index):
                 raise
 
 
-def _pending_prose_history(db, manifest, measurement):
-    """Read current occurrence order with immutable prose, in the caller's snapshot."""
+def _pending_prose_history(db, manifest, measurement, *, store=None, indexed=None, user_only=False):
+    """Read exact occurrences, excluding prose only with same-snapshot proof."""
     from .history_persistence import _documents
 
     root = _documents(db, [manifest["root"]])[0]
     if not isinstance(root["metadata"], dict) or not isinstance(root["turns"], list):
         raise ValueError("Invalid conversation manifest")
-    turns = _documents(db, root["turns"])
+    file_identity, keys, turns = _read_turns(store, db, root["turns"], measurement)
     references = {}
     for turn in turns:
-        if not isinstance(turn["metadata"], dict) or not isinstance(turn.get("items", []), list):
+        if not isinstance(turn["metadata"], dict) or not isinstance(turn.get("items", []), (list, tuple)):
             raise ValueError("Invalid conversation turn manifest")
         for reference in turn.get("items", []):
             references[_document_key(reference)] = reference
     headers = _cached_documents(db, references)
+    _retain_turns(store, file_identity, keys, turns, headers)
     prose = {key for key, header in headers.items() if header[2] is not None}
+    excluded = {key for key in prose if user_only and headers[key][2] != "user"}
+    if indexed is not None and prose:
+        # Candidate selection and readiness must share this transaction. A
+        # newly ready source cannot exclude a match from an older FTS snapshot.
+        proven = db.execute("""SELECT json_group_array(p.value) FROM json_each(?) p
+            JOIN conversation_substring_ready r ON r.source='document:'||p.value AND r.usable=1
+            WHERE r.source NOT IN (SELECT value FROM json_each(?))""", (json.dumps(sorted(prose)), indexed)).fetchone()[0]
+        excluded.update(json.loads(proven))
+    measurement["excluded_documents"] = measurement.get("excluded_documents", 0) + len(excluded)
+    prose -= excluded
     text = _cached_document_excerpts(db, {key for key in prose if headers[key][5] <= 6000})
     large = sorted(key for key in prose if headers[key][5] > 6000)
     for offset in range(0, len(large), _STAGE_ROWS):
@@ -1003,26 +1045,25 @@ def _pending_prose_history(db, manifest, measurement):
                 text[key] = "".join(chunk[2] for chunk in chunks)
     measurement["decoded_documents"] = measurement.get("decoded_documents", 0) + len(missing)
     measurement["reused_documents"] = measurement.get("reused_documents", 0) + len(references) - len(missing)
-    decoded = []
-    for turn in turns:
-        items = []
-        for reference in turn.get("items", []):
+    records = []
+    for ti, turn in enumerate(turns):
+        metadata = turn["metadata"]
+        turn_id = str(metadata.get("id") or f"search-turn-{ti}")
+        for ii, reference in enumerate(turn.get("items", [])):
             key = _document_key(reference)
             _, identity, role, stamp, _, _ = headers[key]
-            # Keep placeholders: fallback item IDs use original positions.
-            item = {}
-            if role is not None:
-                item = {"id": identity, "timelineAt": stamp}
-                if role == "user":
-                    item.update(type="userMessage", content=[{"type": "text", "text": text[key]}])
-                else:
-                    item.update(type="agentMessage", text=text[key])
-            items.append(item)
-        decoded.append({**turn["metadata"], "items": items})
-    return {**root["metadata"], "turns": decoded}
+            if role is None:
+                continue
+            body = None if key in excluded else text[key]
+            # A proven nonmatch still occupies its original prose position and
+            # cancels an earlier duplicate ID. None never becomes provider text.
+            records.append((turn_id, str(identity or f"search-item-{ii}"), role,
+                            seconds(stamp) or seconds(metadata.get("startedAt")),
+                            body, None if body is None else body.casefold()))
+    return {**root["metadata"], "turns": [turn["metadata"] for turn in turns]}, records
 
 
-def pending_search_evidence(db, terms, thread_ids, *, user_only, published, measurement):
+def pending_search_evidence(db, terms, thread_ids, *, user_only, published, measurement, store=None, indexed=None):
     """Inspect current revisions in the same SQLite snapshot as the ranked query."""
     from .history_persistence import MARKER, decode_history, prepared_history_view
 
@@ -1039,12 +1080,14 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
             continue
         try:
             prepared = published.get(identity)
+            records = None
             history = prepared_history_view(prepared, serialized)
             missing_documents = measurement.get("decoded_documents", 0)
             if history is None:
                 manifest = json.loads(serialized)
                 if isinstance(manifest, dict) and manifest.get(MARKER) == 1 and manifest.get("layout") == "turns":
-                    history = _pending_prose_history(db, manifest, measurement)
+                    history, records = _pending_prose_history(db, manifest, measurement, store=store,
+                                                               indexed=indexed, user_only=user_only)
                 else:
                     history = decode_history(serialized, db=db)
                 measurement["database_reads"] = measurement.get("database_reads", 0) + 1
@@ -1054,10 +1097,10 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
             if not isinstance(history, dict) or not isinstance(history.get("turns", []), list):
                 raise ValueError("Invalid conversation history")
             found = {}
-            for position, record in enumerate(messages(history)):
+            for position, record in enumerate(messages(history) if records is None else records):
                 turn, item, role, stamp, text, folded = record
                 key = (turn, item)
-                if (not user_only or role == "user") and all(term in folded for term in terms):
+                if folded is not None and (not user_only or role == "user") and all(term in folded for term in terms):
                     # Keep the original precision through SQLite JSON functions.
                     timestamp = None if stamp is None else "binary64:" + stamp.hex()
                     found[key] = (identity, turn, item, role, timestamp, text, folded, position)
@@ -1089,7 +1132,7 @@ def _seed_settled_history_steps(store, serialized):
         with store.reading(), store._connection() as db:
             db.execute("BEGIN")
             root = _documents(db, [history["root"]])[0]
-            turns = _documents(db, root["turns"])
+            file_identity, turn_keys, turns = _read_turns(store, db, root["turns"])
             references = {_document_key(reference): reference for turn in turns
                           for reference in turn.get("items", [])}
             active = {_document_key(reference) for turn in turns
@@ -1098,7 +1141,7 @@ def _seed_settled_history_steps(store, serialized):
             active.difference_update(_document_key(reference) for turn in turns
                                      if turn["metadata"].get("status") != "inProgress"
                                      for reference in turn.get("items", []))
-            cached = _cached_documents(db, references, metadata=False)
+            cached = _cached_documents(db, references)
         yield
         missing = sorted(((key, reference) for key, reference in references.items() if key not in cached),
                          key=lambda entry: entry[0] in active)
@@ -1112,8 +1155,14 @@ def _seed_settled_history_steps(store, serialized):
             # Inspect a cache miss, but never stage its changing prose body.
             documents = [(key, item) for (key, _), item in zip(batch, items)
                          if key not in active or item.get("type") not in {"userMessage", "agentMessage"}]
-            yield from _stage_document_steps(store, (_document_rows(key, item) for key, item in documents))
+            def prepared_documents():
+                for key, item in documents:
+                    header, chunks = _document_rows(key, item)
+                    cached[key] = header
+                    yield header, chunks
+            yield from _stage_document_steps(store, prepared_documents())
             seeded.update(key for key, _ in documents)
+        _retain_turns(store, file_identity, turn_keys, turns, cached)
         identities = seeded
     else:
         # Legacy inline snapshots have no item references. Use the existing

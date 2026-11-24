@@ -352,7 +352,8 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
                 published = getattr(projection, "prepared_histories", {})
                 with _measure(store, "pending_history") as measurement:
                     dirty, hits, settled = pending_search_evidence(db, terms, thread_ids, user_only=my_messages,
-                                                                  published=published, measurement=measurement)
+                                                                  published=published, measurement=measurement,
+                                                                  store=store, indexed=indexed)
                 if dirty:
                     params["dirty_histories"] = json.dumps(dirty)
                     params["dirty_hits"] = json.dumps(hits)

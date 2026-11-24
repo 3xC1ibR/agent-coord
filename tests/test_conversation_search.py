@@ -887,6 +887,176 @@ class ConversationSearchTests(unittest.TestCase):
             self.assertLessEqual(len(entries), 2)
             self.assertLessEqual(size, 2000)
 
+    def test_pending_search_reuses_turn_metadata_seeded_by_background_progress(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        history = {"turns": [{"id": str(index), "status": "completed", "items": [
+            {"type": "agentMessage", "text": f"Settled evidence {index}"},
+            {"type": "commandExecution", "output": "excluded " * 600}]} for index in range(80)]}
+        history["turns"].append({"status": "inProgress", "items": [
+            {"type": "agentMessage", "text": "Current active evidence"}]})
+        prepared = self.save_chunked("thread", history)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        conversation_search.ensure_message_schema(self.store)
+        list(conversation_search.index_search_snapshot(self.store, ["thread"], lambda callback: None))
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            result = search_threads(self.store, "settled evidence 79", snapshot_dirty=True)
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        self.assertFalse(any(prepared.documents[(index,)].references in requested for index in range(80)),
+                         "Foreground pending search reread settled turn metadata")
+        self.assertEqual([item["thread_id"] for item in result["items"]], ["thread"])
+        self.assertEqual([item["thread_id"] for item in search_threads(
+            self.store, "current active", snapshot_dirty=True)["items"]], ["thread"])
+
+    def test_pending_search_excludes_ready_nonmatching_prose_before_reconstruction(self):
+        from agent_coord import conversation_substrings as substrings
+        self.create("thread")
+        prepared = self.save_chunked("thread", {"turns": [
+            {"status": "completed", "items": [
+                {"id": "large", "type": "agentMessage", "text": "Unrelated prose " * 40000},
+                {"id": "match", "type": "agentMessage", "text": "Required needle"}]},
+            {"status": "inProgress", "items": [{"type": "agentMessage", "text": "Current tail"}]}]}, seed=True)
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        conversation_search.ensure_message_schema(self.store)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        with patch.object(substrings, "candidates", return_value=None):
+            expected = search_threads(self.store, "required needle", snapshot_dirty=True)
+        reads = []
+        execute = _StoreCursor.execute
+        def observe(cursor, sql, parameters=()):
+            if "SELECT document,group_concat(text" in sql:
+                reads.extend(parameters)
+            return execute(cursor, sql, parameters)
+        with patch.object(_StoreCursor, "execute", observe):
+            actual = search_threads(self.store, "required needle", snapshot_dirty=True)
+        self.assertEqual(actual, expected)
+        self.assertNotIn(conversation_search._document_key(prepared.documents[(0, 0)].references), reads,
+                         "Pending search reconstructed an indexed nonmatching body")
+
+    def test_pending_filter_preserves_duplicate_cancellation_and_prose_positions(self):
+        from agent_coord import conversation_substrings as substrings
+        self.create("thread")
+        self.save_chunked("thread", {"turns": [{"id": "turn", "status": "completed", "items": [
+            {"type": "commandExecution", "output": "excluded " * 40000},
+            {"id": "duplicate", "type": "agentMessage", "text": "Needle earlier"},
+            {"id": "duplicate", "type": "agentMessage", "text": "Unrelated replacement " * 20000},
+            {"type": "agentMessage", "text": "Needle retained"}]}]}, seed=True)
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        with patch.object(substrings, "candidates", return_value=None):
+            expected = search_threads(self.store, "needle", snapshot_dirty=True)
+        captured = []
+        execute = _StoreCursor.execute
+        def observe(cursor, sql, parameters=()):
+            if sql.startswith("WITH scope AS MATERIALIZED"):
+                captured.extend(json.loads(parameters["dirty_hits"]))
+            return execute(cursor, sql, parameters)
+        with patch.object(_StoreCursor, "execute", observe):
+            actual = search_threads(self.store, "needle", snapshot_dirty=True)
+        self.assertEqual(actual, expected)
+        self.assertEqual([(row[2], row[-1]) for row in captured], [("search-item-3", 2)])
+        self.assertEqual(actual["items"][0]["message_count"], 1)
+
+    def test_pending_prose_keeps_exact_fallback_without_ready_index_evidence(self):
+        from agent_coord import conversation_substrings as substrings, history_persistence as storage
+        self.create("thread")
+        prepared = self.save_chunked("thread", {"turns": [{"status": "completed", "items": [
+            {"id": "large", "type": "agentMessage", "text": "needle " + "x" * 300000}]}]}, seed=True)
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        key = conversation_search._document_key(prepared.documents[(0, 0)].references)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        execute = _StoreCursor.execute
+        for state in ("ready", "unusable", "unready", "short", "unsupported", "missing_header"):
+            with self.subTest(state=state):
+                with self.store._connection() as db:
+                    db.execute("INSERT OR REPLACE INTO conversation_substring_ready VALUES (?,?)",
+                               ("document:" + key, int(state != "unusable")))
+                    if state == "unready":
+                        db.execute("DELETE FROM conversation_substring_ready WHERE source=?", ("document:" + key,))
+                    if state == "missing_header":
+                        db.execute("DELETE FROM conversation_search_documents WHERE document=?", (key,))
+                reads = []
+                def observe(cursor, sql, parameters=()):
+                    if "SELECT document,group_concat(text" in sql:
+                        reads.extend(parameters)
+                    return execute(cursor, sql, parameters)
+                query = "ne" if state == "short" else "absent"
+                candidate = (patch.object(substrings, "candidates", return_value=None) if state == "unsupported"
+                             else patch.object(substrings, "candidates", wraps=substrings.candidates))
+                with candidate, patch.object(_StoreCursor, "execute", observe), patch.object(
+                        storage, "_documents", wraps=storage._documents) as decoded:
+                    result = search_threads(self.store, query, snapshot_dirty=True)
+                self.assertEqual(bool(result["items"]), state == "short")
+                if state == "missing_header":
+                    requested = [ref for call in decoded.call_args_list for ref in call.args[1]]
+                    self.assertIn(prepared.documents[(0, 0)].references, requested)
+                else:
+                    self.assertEqual(key in reads, state != "ready")
+
+    def test_pending_candidates_and_ready_markers_share_the_read_snapshot(self):
+        from agent_coord import conversation_substrings as substrings
+        self.create("thread")
+        prepared = self.save_chunked("thread", {"turns": [{"status": "completed", "items": [
+            {"type": "agentMessage", "text": "publicationneedle " + "x" * 300000}]}]})
+        conversation_search.ensure_message_schema(self.store)
+        prepare_messages(self.store, "thread")
+        if not substrings.ensure_schema(self.store):
+            self.skipTest("SQLite trigram indexing is unavailable")
+        key = conversation_search._document_key(prepared.documents[(0, 0)].references)
+        original = substrings.candidates
+        def publish_after_candidates(db, terms, measurement):
+            candidates = original(db, terms, measurement)
+            self.assertEqual(json.loads(candidates), [])
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                workers.submit(lambda: list(substrings.index_document_steps(self.store, [key]))).result(timeout=5)
+            return candidates
+        with patch.object(substrings, "candidates", publish_after_candidates):
+            result = search_threads(self.store, "publicationneedle", snapshot_dirty=True)
+        self.assertEqual([item["thread_id"] for item in result["items"]], ["thread"])
+
+    def test_pending_turn_cache_preserves_reordering_eviction_and_database_replacement(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        history = {"turns": [{"startedAt": index + 1, "status": "completed", "items": [
+            {"type": "agentMessage", "text": "needle " + str(index)},
+            {"type": "commandExecution", "output": "excluded " * 15000}]} for index in range(3)]}
+        prepared = self.save_chunked("thread", history, seed=True)
+        expected = search_threads(self.store, "needle", snapshot_dirty=True)
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            self.assertEqual(search_threads(self.store, "needle", snapshot_dirty=True), expected)
+        requested = [ref for call in documents.call_args_list for ref in call.args[1]]
+        self.assertFalse(any(prepared.documents[(i,)].references in requested for i in range(3)))
+        history["turns"] = [history["turns"][2], history["turns"][0], history["turns"][1]]
+        self.save_chunked("thread", history, previous=storage.compact_history(prepared), seed=True)
+        reordered = search_threads(self.store, "needle", snapshot_dirty=True)
+        conversation_search._TURN_CACHES.pop(self.store, None)
+        self.assertEqual(search_threads(self.store, "needle", snapshot_dirty=True), reordered)
+        with patch.object(conversation_search, "_TURN_CACHE_ENTRIES", 1):
+            self.assertEqual(search_threads(self.store, "needle", snapshot_dirty=True), reordered)
+            self.assertEqual(search_threads(self.store, "needle", snapshot_dirty=True), reordered)
+            self.assertLessEqual(len(conversation_search._TURN_CACHES[self.store][1]), 1)
+        replacement = self.root / "replacement.sqlite3"
+        destination = sqlite3.connect(replacement)
+        try:
+            with self.store.reading(), self.store._connection() as db:
+                db.backup(destination)
+            destination.execute("DELETE FROM conversation_search_documents")
+            destination.execute("DELETE FROM conversation_search_document_text")
+            destination.commit()
+        finally:
+            destination.close()
+        for name in ("reader", "holder"):
+            holder = getattr(self.store._idle_connections, name, None)
+            if holder:
+                holder.discard()
+        replacement.replace(self.store.database_path)
+        self.assertEqual(search_threads(self.store, "needle", snapshot_dirty=True), reordered)
+
     def test_active_snapshot_defers_changing_prose_and_indexes_settled_turns(self):
         from agent_coord import history_persistence as storage
         self.create("active")
