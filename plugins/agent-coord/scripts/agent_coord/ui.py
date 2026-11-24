@@ -1447,6 +1447,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 
     stoic_integration = None
     notification_broadcast: NotificationBroadcast | None = None
+    search_publications = None
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
@@ -1504,7 +1505,11 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 if self.browser_sessions is not None:
                     self.browser_sessions.close()
             finally:
-                super().server_close()
+                try:
+                    if self.search_publications is not None:
+                        self.search_publications.close()
+                finally:
+                    super().server_close()
 
     def server_bind(self) -> None:
         # HTTPServer performs a reverse-DNS lookup only to populate a cosmetic
@@ -1572,7 +1577,10 @@ def make_ui_server(
     remote.restore(f"http://{target_host}:{bound_port}")
     try:
         sessions.start_database_checkpoint()
-        sessions.start_search_index()
+        from .search_publication import SearchPublicationWorker
+        server.search_publications = SearchPublicationWorker.start_if_active(store)
+        if server.search_publications is None:
+            sessions.start_search_index()
         push.start()
         native.start()
         server.thread_control.start()
