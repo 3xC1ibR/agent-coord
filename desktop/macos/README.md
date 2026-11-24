@@ -383,8 +383,9 @@ The build command signs local builds using the identity selection above.
   restores open normal and detached windows, their tabs, unsent drafts, reading
   positions and usable window geometry. Secondary windows closed individually
   stay closed; a closed final window is kept and restored with its tabs.
-  Window state is saved on a best-effort basis: Quit, logout and updates are
-  never refused, and an unsaved change falls back to the last saved snapshot.
+  The interface saves window state and composer edits while you work. This
+  keeps ordinary Quit independent of WebKit snapshot collection and pending
+  submissions.
 - Command-Q quits the interface and leaves agents, tools, approvals, and queued
   work running. Opening the app reconnects to the runtime for its database.
   **Ribbon Field → Stop Work and Quit…** explicitly stops that work and exits;
@@ -600,8 +601,10 @@ installing the Codex and Claude plugins.
 ```bash
 python3 -W error::ResourceWarning -m unittest discover -s tests -v
 node --test tests/test_desktop_bridge.js tests/test_desktop_palette.js
-python3 desktop/macos/build.py
+python3 desktop/macos/build.py --smoke-harness
 python3 desktop/macos/smoke_test.py
+# Verify both windows across an origin change, then measure Quit and restore drafts:
+python3 desktop/macos/smoke_test.py --origins-only
 # Verify native quit/reconnect preserves the same runtime, then clean it up:
 python3 desktop/macos/smoke_test.py --runtime-only
 # Focused native session-switching check:
@@ -614,7 +617,10 @@ python3 desktop/macos/smoke_test.py --notifications-only
 python3 desktop/macos/smoke_test.py --titlebar-only
 ```
 
-The native smoke mode uses a temporary database and preference domain, starts
+The native smoke build produces `build/macos/Ribbon Field Smoke.app` with a
+separate bundle identity. It cannot be installed or packaged by the builder.
+Use `--app` on the smoke scripts if you selected another output location.
+The smoke harness uses a temporary database and preference domain, starts
 no model turns, and loads the real UI in two WKWebViews. It checks native menu
 shortcuts, independent drafts/navigation/session storage, shared preferences,
 mixed file/image drops through a private pasteboard, directory folder drops into `/cd`, New session/⌘N parity,

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from smoke_test import require_smoke_bundle
 
 
 def main() -> int:
@@ -18,6 +19,7 @@ def main() -> int:
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
     app = args.app.resolve()
+    require_smoke_bundle(app)
     resources = app / "Contents/Resources"
     executable = app / "Contents/MacOS/Agent Coord"
     config = json.loads((resources / "backend.json").read_text())

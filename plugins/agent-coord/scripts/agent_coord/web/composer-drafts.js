@@ -6,7 +6,7 @@
   const sameImages = (left, right) => left.length === right.length &&
     left.every((image, index) => image.name === right[index].name && image.url === right[index].url);
   const sameMentions = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-  const has = (object, field) => Object.hasOwn(object, field);
+  const has = (object, field) => Object.prototype.hasOwnProperty.call(object, field);
 
   function create({scope, indexedDB = globalThis.indexedDB} = {}) {
     if (typeof scope !== "string" || !scope) throw new TypeError("A composer storage scope is required.");
@@ -39,9 +39,9 @@
     async function transact(stores, mode, operation) {
       const db = await open();
       return new Promise((resolve, reject) => {
-        const transaction = mode === "readwrite"
-          ? db.transaction(stores, mode, {durability: "strict"})
-          : db.transaction(stores, mode);
+        const supportsDurability = "durability" in (globalThis.IDBTransaction?.prototype || {});
+        const transaction = mode === "readwrite" && supportsDurability
+          ? db.transaction(stores, mode, {durability: "strict"}) : db.transaction(stores, mode);
         let result;
         transaction.oncomplete = () => resolve(result);
         transaction.onabort = () => reject(transaction.error || new Error("Composer storage was interrupted."));

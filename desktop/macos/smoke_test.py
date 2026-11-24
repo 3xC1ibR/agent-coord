@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import plistlib
 import signal
 import socket
 import subprocess
@@ -36,13 +36,13 @@ def read_window_origins(address: Path, expected_pid: int) -> list:
     return json.loads(data)["windows"]
 
 
-def observe_window_moves(app, address):
+def observe_window_moves(app, address, deadline):
     observations = set()
     last = None
-    while app.poll() is None:
+    while app.poll() is None and time.monotonic() < deadline:
         try:
             windows = read_window_origins(address, app.pid)
-        except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError):
+        except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError, TimeoutError):
             time.sleep(.025)
             continue
         if len(windows) == 2 and all(row["ready"] for row in windows):
@@ -57,6 +57,12 @@ def observe_window_moves(app, address):
                         (address.parent / ("observed-" + host)).touch()
         time.sleep(.025)
     return observations
+
+
+def require_smoke_bundle(app: Path) -> None:
+    info = app / "Contents/Info.plist"
+    if info.is_file() and plistlib.loads(info.read_bytes())["CFBundleIdentifier"] != "com.agentcoord.desktop.smoke":
+        raise RuntimeError("Build a test app with desktop/macos/build.py --smoke-harness before running native smoke.")
 
 
 def prepare_window_conversation(app, directory):
@@ -165,7 +171,7 @@ def stop_smoke_runtime(directory):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", type=Path, default=ROOT / "build/macos/Ribbon Field.app")
+    parser.add_argument("--app", type=Path, default=ROOT / "build/macos/Ribbon Field Smoke.app")
     parser.add_argument("--report", type=Path, default=ROOT / "build/macos/smoke.json")
     parser.add_argument("--timeout", type=float, default=110, help="Seconds allowed for each native smoke run.")
     parser.add_argument("--files-only", action="store_true", help="Run focused native file-browser checks.")
@@ -178,7 +184,9 @@ def main() -> int:
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
     parser.add_argument("--origins-only", action="store_true", help="Observe the origins of two native windows across a backend change.")
     args = parser.parse_args()
-    executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
+    bundle = args.app.expanduser().resolve()
+    require_smoke_bundle(bundle)
+    executable = bundle / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)
@@ -204,26 +212,30 @@ def main() -> int:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
     address = smoke_directory / "origins"
     if args.origins_only:
-        saved = prepare_window_conversation(args.app.expanduser().resolve(), smoke_directory)
+        saved = prepare_window_conversation(bundle, smoke_directory)
         command += ["--smoke-origin-change-only", "--smoke-observe-origins", saved,
                     "--observe-window-origins", str(address), "--smoke-preserve-runtime"]
     first = None
     try:
         for attempt in range(2 if args.runtime_only else 1):
-            with ThreadPoolExecutor(max_workers=1) as executor, subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            with tempfile.TemporaryFile() as diagnostics, subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=diagnostics
             ) as app:
-                observation = executor.submit(observe_window_moves, app, address) if args.origins_only else None
+                deadline = time.monotonic() + args.timeout
                 try:
-                    _, errors = app.communicate(timeout=args.timeout)
-                except subprocess.TimeoutExpired:
-                    app.kill()
-                    _, errors = app.communicate(timeout=5)
-                    raise RuntimeError("Native smoke test timed out: " + errors[-4000:])
-                if observation is not None:
-                    observed = observation.result()
+                    if args.origins_only:
+                        observed = observe_window_moves(app, address, deadline)
+                    app.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired as error:
+                    diagnostics.seek(max(0, diagnostics.seek(0, os.SEEK_END) - 4000))
+                    raise RuntimeError("Native smoke test timed out: " + diagnostics.read().decode(errors="replace")) from error
+                finally:
+                    if app.poll() is None:
+                        app.kill()
+                        app.wait(timeout=5)
                 if app.returncode != 0 or not report.exists():
-                    raise RuntimeError(f"Native app failed (exit {app.returncode}): {errors[-4000:]}")
+                    diagnostics.seek(max(0, diagnostics.seek(0, os.SEEK_END) - 4000))
+                    raise RuntimeError(f"Native app failed (exit {app.returncode}): " + diagnostics.read().decode(errors="replace"))
             if args.runtime_only:
                 current = json.loads(report.read_text())
                 if current.get("error") or not current.get("runtime_attached"):
@@ -235,6 +247,33 @@ def main() -> int:
                     command.remove("--smoke-preserve-runtime")
                 elif current["backend_pid"] != first["backend_pid"] or current["url"] != first["url"]:
                     raise RuntimeError("Native relaunch did not reconnect to the same runtime")
+        if args.origins_only:
+            result = json.loads(report.read_text())
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+            quit_time = result.get("quit_milliseconds", float("inf"))
+            if quit_time >= 100:
+                raise RuntimeError(f"Ordinary Quit took {quit_time:.1f} ms (limit 100 ms)")
+            if stopped(result["backend_pid"]):
+                raise RuntimeError("Ordinary Quit stopped the private runtime")
+            window_set = json.loads((smoke_directory / "windows/state.json").read_text())
+            if (sorted(row["id"] for row in window_set["windows"]) != sorted(result["draft_window_ids"])
+                    or Path(window_set["database"]).resolve() != (smoke_directory / "state.sqlite3").resolve()):
+                raise RuntimeError("Ordinary Quit did not preserve the two private window identities")
+            restored_report = report.with_suffix(".restored.json")
+            restored_report.unlink(missing_ok=True)
+            restore = [str(executable), "--smoke-test", str(restored_report), "--smoke-directory", str(smoke_directory),
+                       "--smoke-verify-quit", saved, "--smoke-window-restoration", "--smoke-preserve-runtime"]
+            # A detached runtime can inherit file descriptors. Never wait for
+            # EOF from a pipe once the native child has already exited.
+            with tempfile.TemporaryFile() as diagnostics:
+                restored = subprocess.run(restore, stdout=subprocess.DEVNULL, stderr=diagnostics, timeout=args.timeout)
+                if restored.returncode or not restored_report.exists():
+                    diagnostics.seek(max(0, diagnostics.seek(0, os.SEEK_END) - 4000))
+                    raise RuntimeError("Native draft relaunch failed: " + diagnostics.read().decode(errors="replace"))
+            recovery = json.loads(restored_report.read_text())
+            if recovery.get("error") or sorted(result["draft_window_ids"]) != recovery.get("quit_restored_window_ids"):
+                raise RuntimeError(recovery.get("error") or "Native relaunch did not restore the original draft windows")
     finally:
         # Quit keeps detached runtimes alive, including on a native timeout.
         stop_smoke_runtime(smoke_directory)
@@ -255,6 +294,8 @@ def main() -> int:
             raise RuntimeError("The same two native windows were not observed on both loopback origins")
         subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", args.app], check=True)
         result["observed_both_native_window_origins"] = True
+        result["ordinary_quit_preserved_both_window_drafts"] = True
+        result["runtime_survived_native_quit"] = True
         report.write_text(json.dumps(result, indent=2) + "\n")
         return 0
     if args.runtime_only:
