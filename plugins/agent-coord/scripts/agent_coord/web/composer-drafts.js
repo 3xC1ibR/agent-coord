@@ -78,6 +78,28 @@
     function pendingRecord({requestId, text, images, mentions, body, path, bodyUsesImages}) {
       return {requestId, text, images, mentions, body: bodyUsesImages ? {...body, images} : body, path};
     }
+    function submissionRecord(id, requestId, {text, images, mentions, body, path}) {
+      const bodyUsesImages = Array.isArray(body?.images) && sameImages(body.images, images);
+      return {scope, id, requestId, text, images, mentions,
+        body: bodyUsesImages ? Object.fromEntries(Object.entries(body).filter(([name]) => name !== "images")) : body,
+        bodyUsesImages, path};
+    }
+    function moveDraft(store, source, destination, replacement, sourceComposer, sourceImages, destinationComposer, destinationImages) {
+      const composers = store("composers"), attachments = store("attachments");
+      const previous = destinationComposer ?? sourceComposer;
+      if (has(replacement, "text") || has(replacement, "mentions")) {
+        composers.put({
+          text: has(replacement, "text") ? replacement.text : previous?.text ?? "",
+          mentions: has(replacement, "mentions") ? replacement.mentions : previous?.mentions ?? [],
+        }, destination);
+      } else if (sourceComposer !== undefined && destinationComposer === undefined) {
+        composers.put(sourceComposer, destination);
+      }
+      if (has(replacement, "images")) setImages(store, destination, replacement.images);
+      else if (sourceImages !== undefined && destinationImages === undefined) setImages(store, destination, sourceImages);
+      composers.delete(source);
+      attachments.delete(source);
+    }
 
     return {
       read(id) {
@@ -108,22 +130,7 @@
         if (sourceId === destinationId) return Promise.resolve();
         return transact(composerStores, "readwrite", (store, read) => {
           read([...requestsFor(store, source), ...requestsFor(store, destination)],
-            (sourceComposer, sourceImages, destinationComposer, destinationImages) => {
-              const composers = store("composers"), attachments = store("attachments");
-              const previous = destinationComposer ?? sourceComposer;
-              if (has(replacement, "text") || has(replacement, "mentions")) {
-                composers.put({
-                  text: has(replacement, "text") ? replacement.text : previous?.text ?? "",
-                  mentions: has(replacement, "mentions") ? replacement.mentions : previous?.mentions ?? [],
-                }, destination);
-              } else if (sourceComposer !== undefined && destinationComposer === undefined) {
-                composers.put(sourceComposer, destination);
-              }
-              if (has(replacement, "images")) setImages(store, destination, replacement.images);
-              else if (sourceImages !== undefined && destinationImages === undefined) setImages(store, destination, sourceImages);
-              composers.delete(source);
-              attachments.delete(source);
-            });
+            (...records) => moveDraft(store, source, destination, replacement, ...records));
         });
       },
       remove(id) {
@@ -154,10 +161,7 @@
           read([...requestsFor(store, key), journal.index("request").get(identifier)],
             (composer, savedImages, existing) => {
               if (existing) { end(pendingRecord(existing)); return; }
-              const bodyUsesImages = Array.isArray(body?.images) && sameImages(body.images, images);
-              const submission = {scope, id, requestId, text, images, mentions,
-                body: bodyUsesImages ? Object.fromEntries(Object.entries(body).filter(([name]) => name !== "images")) : body,
-                bodyUsesImages, path};
+              const submission = submissionRecord(id, requestId, {text, images, mentions, body, path});
               journal.add(submission);
               if (!composer || composer.text === text && sameMentions(composer.mentions, mentions)) {
                 store("composers").put({text: "", mentions: []}, key);
@@ -174,10 +178,45 @@
             });
         });
       },
+      promoteCreation(projectId, creationId, threadId, {requestId, body, path}, replacement = {}) {
+        const source = keyFor(projectId), destination = keyFor(threadId);
+        const creating = requestKey(projectId, creationId), sending = requestKey(threadId, requestId);
+        if (projectId === threadId) throw new TypeError("Creation and message composers must be distinct.");
+        return transact(journalStores, "readwrite", (store, read, end) => {
+          const journal = store("submissions"), index = journal.index("request");
+          read([index.get(creating), index.getKey(creating), index.get(sending),
+            ...requestsFor(store, source), ...requestsFor(store, destination)],
+          (creation, primary, existing, ...drafts) => {
+            if (!creation) { end(existing ? pendingRecord(existing) : null); return; }
+            if (creation.path !== "sessions" || creation.body?.creationIntent?.firstMessageId !== requestId)
+              throw new Error("The creation intent does not match its first submission.");
+            const {text, images, mentions} = creation;
+            const submission = existing || submissionRecord(threadId, requestId, {text, images, mentions, body, path});
+            if (!existing) journal.add(submission);
+            moveDraft(store, source, destination, replacement, ...drafts);
+            journal.delete(primary);
+            end(pendingRecord(submission));
+          });
+        });
+      },
       pending(id) {
         const key = keyFor(id);
         return transact(["submissions"], "readonly", (store, read, end) =>
           read([store("submissions").index("composer").getAll(key)], rows => end(rows.map(pendingRecord))));
+      },
+      pendingThreadIds() {
+        return transact(["submissions"], "readonly", (store, _, end) => {
+          const ids = [];
+          // Composer IDs are strings, which sort before array keys.
+          const range = IDBKeyRange.bound([scope], [scope, []], true, true);
+          const request = store("submissions").index("composer").openKeyCursor(range, "nextunique");
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) { end(ids); return; }
+            ids.push(cursor.key[1]);
+            cursor.continue();
+          };
+        });
       },
       acknowledge(id, requestId) {
         const identifier = requestKey(id, requestId);

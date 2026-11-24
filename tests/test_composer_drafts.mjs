@@ -87,6 +87,30 @@ for (const engine of process.env.RIBBON_BROWSER ? [process.env.RIBBON_BROWSER] :
       });
       assert.deepEqual(moved, {draft:{text:"newer input", mentions:[], images:[]}, source:null, retired:null,
         pending:["in-flight"], independent:"independent window"});
+      const promoted = await page.evaluate(async () => {
+        const store = ComposerDrafts.create({scope:"window creation"});
+        const project = "new-session:/project";
+        const attachment = {name:"submitted.png", url:"data:image/png;base64,YQ=="};
+        await store.write(project, {text:"first prompt", images:[attachment]});
+        await store.stage(project, "creation", {text:"first prompt", images:[attachment],
+          body:{creationIntent:{firstMessageId:"first-message"}}, path:"sessions"});
+        await store.write(project, {text:"subsequent edit", images:[]});
+        const wire = {requestId:"first-message", body:{message:"first prompt", images:[attachment]}, path:"sessions/created/messages"};
+        const first = await store.promoteCreation(project, "creation", "created", wire);
+        await store.write("created", {text:"edit after promotion"});
+        const repeated = await store.promoteCreation(project, "creation", "created", wire, {text:"stale replacement"});
+        return {first, repeated, creation:await store.pending(project), result:await store.pending("created"),
+          composerIds:await store.pendingThreadIds(),
+          draft:await store.read("created"), previous:await store.read(project)};
+      });
+      assert.equal(promoted.first.text, "first prompt");
+      assert.equal(promoted.first.images[0].name, "submitted.png");
+      assert.deepEqual(promoted.repeated, promoted.first);
+      assert.deepEqual(promoted.result, [promoted.first]);
+      assert.deepEqual(promoted.creation, []);
+      assert.deepEqual(promoted.composerIds, ["created"]);
+      assert.equal(promoted.previous, null);
+      assert.deepEqual(promoted.draft, {text:"edit after promotion", mentions:[], images:[]});
     } finally {
       await browser?.close();
       await new Promise(resolve => server.close(resolve));
