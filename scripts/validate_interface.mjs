@@ -945,9 +945,14 @@ async function postBrowserAPI(fixture, route, body) {
 async function metadataUpdates(page, fixture) {
   const thread = fixture.threads.metadata;
   const route = `conversations/${thread.id}/open`;
-  const responseStatuses = [];
+  const observations = [];
   page.on("response", response => {
-    if (new URL(response.url()).pathname === `/api/browser/${route}`) responseStatuses.push(response.status());
+    if (new URL(response.url()).pathname !== `/api/browser/${route}`) return;
+    const observation = {status: response.status()};
+    observations.push(observation);
+    response.json().then(body => Object.assign(observation, {
+      metadataRevision: body.metadata_revision, title: body.work_thread?.title,
+    }), () => {});
   });
   await page.addInitScript(() => {
     const NativeEventSource = window.EventSource;
@@ -984,10 +989,11 @@ async function metadataUpdates(page, fixture) {
   try {
     await expectContains(page.locator("#title-heading"), title);
   } catch (error) {
-    const after = await getBrowserAPI(fixture, route);
-    const batches = await page.evaluate(() => window.interfaceCatalogBatches);
-    throw new Error(`${error.message}\nBrowser catalog invalidations: ${JSON.stringify(batches)}\n` +
-      `Browser composite response statuses: ${JSON.stringify(responseStatuses)}\n` +
+    const [after, browser] = await Promise.all([getBrowserAPI(fixture, route), page.evaluate(() => ({
+      batches: window.interfaceCatalogBatches, hidden: document.hidden, focused: document.hasFocus(),
+    }))]);
+    throw new Error(`${error.message}\nBrowser invalidation observations: ${JSON.stringify(browser)}\n` +
+      `Browser composite responses: ${JSON.stringify(observations)}\n` +
       `Authoritative composite: ${JSON.stringify({status: after.status, title: after.body.work_thread?.title,
         before: before.body.metadata_revision, after: after.body.metadata_revision})}`, {cause: error});
   }
