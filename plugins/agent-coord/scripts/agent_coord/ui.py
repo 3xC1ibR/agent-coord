@@ -32,6 +32,7 @@ from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
+from .submission_receipts import SubmissionOutcomeUnknownError
 from .thread_control import ThreadControlWorker
 from .app_control import AppControlWorker
 from .message_timeline import message_timeline
@@ -40,7 +41,7 @@ from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
 from .native_push import NativePush
-from .workspaces import matches_workspace, require_thread_workspaces, resolve_workspace
+from .workspaces import WorkspaceAccessError, matches_workspace, require_thread_workspaces, resolve_workspace
 from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
@@ -581,6 +582,8 @@ def _handler(
                         self._browser_get(parsed)
                 except OpeningAdmissionError as exc:
                     self._admission_unavailable(str(exc))
+                except WorkspaceAccessError as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": exc.code})
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 except sqlite3.OperationalError as exc:
@@ -1510,6 +1513,10 @@ def _handler(
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 self._json(HTTPStatus.OK, result)
+            except SubmissionOutcomeUnknownError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": exc.code})
+            except WorkspaceAccessError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc), "code": exc.code})
             except BrowserBusyError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except sqlite3.OperationalError as exc:

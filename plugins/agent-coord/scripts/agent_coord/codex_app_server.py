@@ -52,7 +52,7 @@ from .organization import OrganizationStore, app_agent_creators, describe_creato
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
-from .workspaces import matches_workspace, workspace_choices
+from .workspaces import WorkspaceAccessError, matches_workspace, workspace_choices
 from .activity_api import activity_context, record_accepted
 
 
@@ -1680,7 +1680,7 @@ class BrowserSessions:
         thread = (self.store.threads.get(thread_id, history=history, connection=_db) if _inventory is None
                   else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
-            raise CoordinationError("Work thread not found in this workspace.")
+            raise WorkspaceAccessError()
         creators = self._app_agent_creators(db=_db, shared=True) if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
@@ -1920,7 +1920,7 @@ class BrowserSessions:
         with self._thread_lock(thread_id):
             before = self.store.threads.get(thread_id)
             if not matches_workspace(before["cwd"], self.cwd):
-                raise CoordinationError("Work thread not found in this workspace.")
+                raise WorkspaceAccessError()
             minimal_receipt = (prefer_minimal and body.get("seen") is True
                                and body.keys() == {"seen", "seen_checkpoint_id", "seen_completion_id"})
             result = self._update_work_thread(thread_id, body, minimal_receipt=minimal_receipt)
@@ -2951,7 +2951,7 @@ class BrowserSessions:
                                   preserve_text=preserve_text, literal=literal, submission=submission, recovery=recovery,
                                   completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery,
                                   accepted_input=accepted_input)
-            except BrowserBusyError:
+            except (BrowserBusyError, BrowserNotSubmittedError):
                 raise
             except Exception as exc:
                 if coordination_delivery:
@@ -2967,11 +2967,15 @@ class BrowserSessions:
                         if self.active.get(thread_id) is None:
                             self.active.pop(thread_id, None)
                     raise BrowserNotSubmittedError(str(exc)) from exc
+                if accepted_input is not None and not submission["started"] and isinstance(exc, (CoordinationError, ValueError)):
+                    raise BrowserNotSubmittedError(str(exc)) from exc
                 raise
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
               preserve_text: bool, submission: dict, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
               coordination_delivery=None, accepted_input=None) -> dict:
+        from .provider_transport import ProviderLaunchRejected
+
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -3073,7 +3077,12 @@ class BrowserSessions:
                 try:
                     with self.navigation.sending(thread_id, source_window):
                         with self.store._writer.measure_request("send.provider_steer"):
-                            result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                            rpc = self._rpc(thread_id)
+                            submission["started"] = True
+                            result = rpc.request("turn/steer", {**params, "expectedTurnId": turn_id})
+                except ProviderLaunchRejected:
+                    submission["started"] = False
+                    raise
                 except CoordinationError as error:
                     # These provider responses explicitly mean no input was
                     # submitted. Disconnects, timeouts and ambiguous native
@@ -3121,12 +3130,11 @@ class BrowserSessions:
                         with self.lock:
                             self.delivery_inflight[thread_id] = {'token': token, 'batch': batch, 'turn_id': None}
                     submission["started"] = True
-                    from .provider_transport import ProviderLaunchRejected
                     try:
                         with self.store._writer.measure_request("send.provider_start"):
                             result = rpc.request("turn/start", params)
                     except ProviderLaunchRejected:
-                        if automatic and record["client"] == "claude":
+                        if accepted_input is not None or (automatic and record["client"] == "claude"):
                             submission["started"] = False
                         raise
                     if coordination_delivery:

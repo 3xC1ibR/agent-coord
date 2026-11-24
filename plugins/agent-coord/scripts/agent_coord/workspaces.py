@@ -8,6 +8,13 @@ from .organization import repository_root
 from .store import CoordinationError
 
 
+class WorkspaceAccessError(CoordinationError):
+    code = "workspace_access_denied"
+
+    def __init__(self):
+        super().__init__("Work thread not found in this workspace.")
+
+
 def resolve_workspace(path: str, *, workspace: str | None = None) -> str:
     """Validate an explicitly chosen working folder without starting an agent."""
     if not isinstance(path, str) or not path.strip() or len(path) > 4000 or "\0" in path:
@@ -55,7 +62,7 @@ def require_thread_workspaces(store, thread_ids, workspace, *, exclude_managed=F
             WHERE t.thread_id IN ({slots}) {managed}""", tuple(identities)).fetchall()
     directories = {directory for row in rows for directory in row if directory is not None}
     if len(rows) != len(identities) or not all(matches_workspace(directory, workspace) for directory in directories):
-        raise CoordinationError("Work thread not found in this workspace.")
+        raise WorkspaceAccessError()
 
 
 def directory_roots(directories):

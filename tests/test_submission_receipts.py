@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.store import CoordinationError, CoordinationStore
-from agent_coord.submission_receipts import SubmissionReceipts
+from agent_coord.submission_receipts import SubmissionOutcomeUnknownError, SubmissionReceipts
 from agent_coord.codex_app_server import BrowserNotSubmittedError
 
 
@@ -82,9 +82,11 @@ class SubmissionReceiptTests(unittest.TestCase):
         self.assertEqual(self.run_request(lambda: {"turnId": "retry"}), {"turnId": "retry"})
 
     def test_unknown_provider_error_remains_uncertain(self):
-        with self.assertRaisesRegex(RuntimeError, "connection lost"):
-            self.run_request(lambda: (_ for _ in ()).throw(RuntimeError("connection lost")))
-        with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
+        provider_error = RuntimeError("connection lost")
+        with self.assertRaisesRegex(SubmissionOutcomeUnknownError, "unconfirmed outcome") as captured:
+            self.run_request(lambda: (_ for _ in ()).throw(provider_error))
+        self.assertIs(captured.exception.__cause__, provider_error)
+        with self.assertRaisesRegex(SubmissionOutcomeUnknownError, "unconfirmed outcome"):
             self.run_request(lambda: self.fail("Uncertain effect was replayed"))
 
     def test_request_key_cannot_change_input_or_queue_mode(self):

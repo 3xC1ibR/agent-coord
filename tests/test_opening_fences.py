@@ -79,7 +79,7 @@ class OpeningFenceTests(TestCase):
 
         status, fenced, body = self.read(f"/api/browser/sessions/{identity}?limit=4", {})
         self.assertEqual((status, fenced), (400, None))
-        self.assertEqual(set(body), {"error"})
+        self.assertEqual(body, {"code": "workspace_access_denied", "error": "Work thread not found in this workspace."})
         for name, path, headers in self.opening_routes(identity):
             with self.subTest(opening=name):
                 self.assertEqual(self.read(path, headers), (status, fenced, body))
