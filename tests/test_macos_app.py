@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import selectors
-import shlex
 import signal
 import subprocess
 import sys
@@ -186,14 +185,26 @@ class DesktopPackagingTests(unittest.TestCase):
                 self.assertEqual(setup.stderr, "")
                 config = (root / "kimi home/config.toml").read_text()
                 command = json.loads(next(line[10:] for line in config.splitlines() if line.startswith('command = "if ')))
-                result = subprocess.run(command, shell=True, env=env, cwd=root, text=True, capture_output=True,
-                    input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native-kimi",
-                                      "cwd": str(root), "prompt": "Hello"}), check=True)
-                self.assertEqual(result.stderr, "")
-                packaged_cli = shlex.quote(str((resources / "backend/agent-coord").resolve()))
-                payload = json.loads(result.stdout)
-                self.assertIn("message", payload)
-                self.assertIn(packaged_cli + " checkpoint --json", payload["message"])
+                with mock.patch.object(sys, "path", [str(build.SCRIPTS), *sys.path]):
+                    from agent_coord.store import CoordinationStore
+                store = CoordinationStore(root / "state.sqlite3")
+                store.register(session_id="packaged-kimi", client="kimi", cwd=str(root))
+                store.register(session_id="sender", client="codex", cwd=str(root))
+                with store._connection() as db:
+                    db.execute("CREATE TABLE kimi_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT, cwd TEXT)")
+                    db.execute("INSERT INTO kimi_sessions VALUES (?, ?, ?)", ("packaged-kimi", "native-kimi", str(root)))
+
+                def submit(turn_id):
+                    result = subprocess.run(command, shell=True, env=env, cwd=root, text=True, capture_output=True,
+                        input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "native-kimi",
+                                          "cwd": str(root), "prompt": "Hello", "turn_id": turn_id}), check=True)
+                    self.assertEqual(result.stderr, "")
+                    return json.loads(result.stdout)
+
+                self.assertEqual(submit("first"), {})
+                store.send_message(sender_session_id="sender", recipient_session_id="packaged-kimi",
+                                   body="Packaged hook delivery")
+                self.assertIn("Packaged hook delivery", submit("second")["message"])
                 for name in ("agent-coordination", "dispatch", "orchestrate", "manage-threads"):
                     self.assertTrue((resources / "skills" / name / "SKILL.md").is_file())
 
