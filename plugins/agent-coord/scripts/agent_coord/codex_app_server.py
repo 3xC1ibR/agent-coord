@@ -452,6 +452,8 @@ class BrowserSessions:
             from .coordinator_projection import CoordinatorProjection
             self.projection = store.provider_projection = CoordinatorProjection(self, store.provider_transport)
             self.projection.load()
+        from .snapshot_cache import prepare_snapshot_cache
+        prepare_snapshot_cache(store)
 
     @contextmanager
     def _persistence_context(self):
@@ -1850,7 +1852,8 @@ class BrowserSessions:
         return thread
 
     def _work_thread_usage(self, thread_id, thread):
-        usage = self.store.usage.summary(thread_id)
+        from .snapshot_cache import read_usage
+        usage = read_usage(self.store, thread_id)
         # Detail-only, bounded, no-model recovery. Durable notes prevent
         # repeated failed scans after restart; overview never reads logs.
         if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
@@ -2621,7 +2624,8 @@ class BrowserSessions:
         public = self.reviews.public_history(thread_id, {"id": thread_id, "turns": [turn]})
         return public["turns"][0]
 
-    def _read_external_snapshot(self, work_thread: dict, *, recent: bool, saved_history_reader=None) -> dict:
+    def _read_external_snapshot(self, work_thread: dict, *, recent: bool, saved_history_reader=None,
+                                coordination_reader=None) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
         self._authorize_history(thread_id)
@@ -2650,11 +2654,11 @@ class BrowserSessions:
         thread["historyPagination"] = indexed
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": (coordination_reader or message_timeline)(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
     def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False,
-                       saved_history_reader=None) -> dict:
+                       saved_history_reader=None, coordination_reader=None) -> dict:
         """Open from saved history and received events, without provider admission.
 
         Full reads and sends reconcile native execution. Opening a window must
@@ -2709,7 +2713,7 @@ class BrowserSessions:
             # A commit or rollback overtook the database read. Recheck live
             # ownership and input once before returning the new history.
             return self._read_snapshot(thread_id, recent=recent, synchronized=True,
-                                       saved_history_reader=saved_history_reader)
+                                       saved_history_reader=saved_history_reader, coordination_reader=coordination_reader)
         if not saved_window:
             if omitted_turns and needs_outcome and not any(
                     turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]):
@@ -2729,7 +2733,7 @@ class BrowserSessions:
                 "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": (coordination_reader or message_timeline)(self.store, thread_id, self.cwd),
                 "dispatchRequests": self.dispatch.receipts(thread_id),
                 "dispatchSettings": self.dispatch.settings(thread_id),
                 "reviews": self.reviews.list(thread_id), "queuedMessages": self.queue.list(thread_id)}

@@ -20,6 +20,14 @@ def _read_snapshot_json(sessions, thread_id, *, recent, controls):
     caused snapshot projection to choose a different history.
     """
     prepared = None
+    prepared_timeline = None
+
+    def coordination_reader(store, identity, cwd):
+        nonlocal prepared_timeline
+        from .snapshot_cache import read_timeline_json
+        marker = []
+        prepared_timeline = marker, read_timeline_json(store, identity, cwd)
+        return marker
 
     def saved_history_reader(identity):
         nonlocal prepared
@@ -37,12 +45,14 @@ def _read_snapshot_json(sessions, thread_id, *, recent, controls):
         if not recent:
             result = sessions.read(thread_id, recent=False, snapshot=True)
         elif sessions.store.threads.is_browser_session(thread_id):
-            result = sessions._read_snapshot(thread_id, recent=True, saved_history_reader=saved_history_reader)
+            result = sessions._read_snapshot(thread_id, recent=True, saved_history_reader=saved_history_reader,
+                                              coordination_reader=coordination_reader)
         else:
             # External snapshots have their own normal public fields and scope
             # checks. Do not substitute the browser-session projection.
             result = sessions._read_external_snapshot(sessions.work_thread(thread_id), recent=True,
-                                                       saved_history_reader=saved_history_reader)
+                                                       saved_history_reader=saved_history_reader,
+                                                       coordination_reader=coordination_reader)
         if prepared is not None:
             projection, turns = prepared
             if result["thread"] is not projection or result.get("reviews"):
@@ -54,9 +64,13 @@ def _read_snapshot_json(sessions, thread_id, *, recent, controls):
             from .thread_control import ThreadControl
             work = result["work_thread"]
             work["close_when_done"] = ThreadControl(sessions.store).status(work["thread_id"])
-    if prepared is None:
+    raw = {}
+    if prepared_timeline is not None and result["coordinationMessages"] is prepared_timeline[0]:
+        raw["coordinationMessages"] = prepared_timeline[1]
+    if prepared is not None:
+        metadata = encode({key: value for key, value in projection.items() if key != "turns"})[:-1]
+        raw["thread"] = metadata + (b"," if metadata != b"{" else b"") + b'"turns":' + turns + b"}"
+    if not raw:
         return encode(result)
-    metadata = encode({key: value for key, value in projection.items() if key != "turns"})[:-1]
-    body = metadata + (b"," if metadata != b"{" else b"") + b'"turns":' + turns + b"}"
-    header = encode({key: value for key, value in result.items() if key != "thread"})[:-1]
-    return header + b',"thread":' + body + b"}"
+    header = encode({key: value for key, value in result.items() if key not in raw})[:-1]
+    return header + b"," + b",".join(encode(key) + b":" + value for key, value in raw.items()) + b"}"
