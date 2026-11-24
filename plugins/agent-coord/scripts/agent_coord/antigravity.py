@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import acp_state
 from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
 from .antigravity_skills import prepare_skills
@@ -314,7 +315,11 @@ class AntigravityRPC:
                 else:
                     raise CoordinationError("This Antigravity runtime cannot resume saved sessions. Update it before continuing.")
                 params["sessionId"] = row[0]
+            if method == "session/load":
+                acp_state.begin_replay(self, thread_id)
             session = connection.request(method, params)
+            if method == "session/load":
+                acp_state.finish_replay(self, thread_id)
             native_id = row[0] if row else session["sessionId"]
             # Save identity before settings requests; a failed selection must
             # never silently create a replacement native conversation.
@@ -457,13 +462,20 @@ class AntigravityRPC:
                     self.update_stopping.add(thread_id)
             # A backend update stops the turn itself; it is not the user's Stop.
             origin, reason = ("runtime", "backend_update") if params.get("runtimeUpdate") else ("user", "turn_interrupt")
-            self._finish(thread_id, "interrupted",
-                         termination={"origin": origin, "reason": reason, "execution": "unknown"})
-            connection = self.connections.pop(thread_id, None)
+            state = self.delivery_turns.get(thread_id)
+            if state:
+                state["user_cancel_requested"] = not params.get("runtimeUpdate")
+            connection = self.connections.get(thread_id)
             if connection:
                 try:
-                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
+                    if hasattr(connection, "cancel"):
+                        connection.cancel(self.native[thread_id], timeout=2.0)
+                    else:
+                        connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
                 finally:
+                    self.connections.pop(thread_id, None)
+                    self._finish(thread_id, "interrupted",
+                        termination={"origin": origin, "reason": reason, "execution": "unknown"})
                     connection.close()
             return {}
         raise CoordinationError(f"Antigravity does not support {method}.")
@@ -607,6 +619,8 @@ class AntigravityRPC:
             return
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+        if thread_id not in self.turns and acp_state.replay_update(self, thread_id, update):
+            return
         if kind == "usage_update":
             self._context_usage(thread_id, update)
             return

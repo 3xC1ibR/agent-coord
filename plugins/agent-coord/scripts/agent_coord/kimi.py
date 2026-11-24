@@ -16,6 +16,7 @@ from pathlib import Path
 import threading
 import uuid
 
+from . import acp_state
 from .acp import ACPConnection
 from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
@@ -220,7 +221,11 @@ class KimiRPC:
                 else:
                     raise CoordinationError("This Kimi runtime cannot resume saved sessions. Update Kimi Code CLI.")
                 params["sessionId"] = row["native_id"]
+            if method == "session/load":
+                acp_state.begin_replay(self, thread_id)
             session = connection.request(method, params)
+            if method == "session/load":
+                acp_state.finish_replay(self, thread_id)
             native_id = row["native_id"] if row else session.get("sessionId")
             if not isinstance(native_id, str) or not native_id:
                 raise CoordinationError("Kimi did not return a native session identity.")
@@ -441,6 +446,8 @@ class KimiRPC:
             return
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+        if thread_id not in self.turns and acp_state.replay_update(self, thread_id, update):
+            return
         if kind == "usage_update":
             # Kimi sends this after settling session/prompt, outside display
             # turns. The generation and native-session checks still apply.

@@ -25,7 +25,7 @@ class FakeConnection:
     def poll(self):
         return 0 if self.closed else None
 
-    def control(self, subtype):
+    def control(self, subtype, *, timeout=30):
         return {"models": [{"value": "default", "supportedEffortLevels": ["low", "high"]},
                             {"value": "sonnet", "supportedEffortLevels": ["low", "high"]}]}
 

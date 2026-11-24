@@ -114,3 +114,124 @@ class ACPProjectionTests(unittest.TestCase):
         self.assertTrue(self.projection.owns_provider(self.identity, "kimi"))
         connection.process = copy.copy(connection.process)
         self.assertFalse(self.projection.owns_provider(self.identity, "kimi"))
+
+    def test_native_replay_merges_missing_turns_without_duplicate_live_completion(self):
+        adapter, connection = self.bind()
+        adapter.turns.clear()
+        self.sessions.active.clear()
+        self.sessions.histories[self.identity] = {"id": self.identity, "turns": []}
+        for _ in range(2):
+            acp_state.begin_replay(adapter, self.identity)
+            for kind, text in (("user_message_chunk", "terminal question"), ("agent_message_chunk", "terminal answer")):
+                acp_state.replay_update(adapter, self.identity, {"sessionUpdate": kind,
+                    "content": {"type": "text", "text": text}})
+            acp_state.finish_replay(adapter, self.identity)
+        turns = self.sessions.histories[self.identity]["turns"]
+        self.assertEqual(len(turns), 1)
+        self.assertEqual([item["type"] for item in turns[0]["items"]], ["userMessage", "agentMessage"])
+        self.assertNotIn(self.identity, self.sessions.active)
+
+    def test_muse_gap_recovers_missing_completed_items_and_background_workflow(self):
+        adapter, connection = self.bind("muse")
+        adapter.ready.add(self.identity)
+        adapter.items[self.identity] = {}
+        adapter.seen[self.identity] = set()
+        gap = {"method": "view/gap", "params": {"sessionId": "native-session", "viewCursor": "gap-1"}}
+        self.projection.project(self.event(1, gap, channel="muse"))
+        request_id = next(iter(connection.bindings))
+        self.assertEqual(connection.bindings[request_id]["method"], "session/read")
+        response = {"session": {"sessionId": "native-session", "turns": [{"turnId": self.turn_id,
+            "terminal": "completed", "items": [
+                {"itemId": "answer", "turnId": self.turn_id, "kind": "agentMessage", "text": "recovered", "revision": 1, "status": "completed"},
+                {"itemId": "workflow", "turnId": self.turn_id, "kind": "workflow", "revision": 1, "status": "inProgress", "workflowRunId": "work-1"}]}]}}
+        self.projection.project(self.event(2, {"id": request_id, "result": response}, channel="muse"))
+        self.assertNotIn(self.identity, adapter.turns)
+        self.assertTrue(adapter.background_active(self.identity))
+        self.assertEqual(adapter.completed[self.identity]["items"][0]["text"], "recovered")
+        self.projection.project(self.event(2, {"id": request_id, "result": response}, channel="muse"))
+        self.assertEqual(len(adapter.completed[self.identity]["items"]), 2)
+
+    def test_recorded_approval_answer_is_not_reissued_after_restore(self):
+        adapter, connection = self.bind()
+        adapter.requests["kimi:pending"] = {"thread": self.identity, "id": 77}
+        self.sessions.requests["browser:pending"] = {"id": "kimi:pending", "params": {"threadId": self.identity}}
+        connection.write({"id": 77, "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}})
+        restored = CoordinatorProjection(self.sessions, self.fixture.client)
+        self.store.provider_projection = self.sessions.projection = restored
+        restored.load()
+        self.assertNotIn("kimi:pending", adapter.requests)
+        self.assertNotIn("browser:pending", self.sessions.requests)
+        writes_before = len(self.fixture.client.commands)
+        with self.assertRaisesRegex(Exception, "recorded answer"):
+            adapter.connections[self.identity].write({"id": 77, "result": {"outcome": {"outcome": "selected", "optionId": "allow"}}})
+        self.assertEqual(len(self.fixture.client.commands), writes_before)
+
+    def test_muse_decision_receipt_settles_restored_request_without_waiter(self):
+        adapter, connection = self.bind("muse")
+        key = "muse:pending"
+        adapter.requests[key] = {"thread": self.identity, "native_id": "approval-1"}
+        self.sessions.requests[key] = {"id": key, "params": {"threadId": self.identity}}
+        connection.submit("approval/decide", {"commandId": "decision-1", "approvalId": "approval-1",
+            "sessionId": "native-session", "requirementId": {"sourceIndex": 1}, "choiceId": "allow"})
+        request_id = next(iter(connection.bindings))
+        restored = CoordinatorProjection(self.sessions, self.fixture.client)
+        self.store.provider_projection = self.sessions.projection = restored
+        restored.load()
+        restored.project(self.event(1, {"id": request_id, "result": {"terminal": True}}, channel="muse"))
+        self.assertNotIn(key, adapter.requests)
+        self.assertNotIn(key, self.sessions.requests)
+        self.assertIn((self.identity, "approval-1"), adapter.settled)
+
+    def test_muse_answer_does_not_wait_under_browser_lock(self):
+        adapter, connection = self.bind("muse")
+        key = "muse:pending"
+        adapter.requests[key] = {"thread": self.identity, "native_id": "approval-1", "question": False,
+            "choices": {"accept": "allow"}, "request": {"currentRequirementId": {"sourceIndex": 1}}}
+        with self.sessions.lock:
+            adapter.write({"id": key, "result": {"decision": "accept"}})
+        request_id = next(iter(connection.bindings))
+        self.assertEqual(connection.bindings[request_id]["method"], "approval/decide")
+        self.projection.project(self.event(1, {"id": request_id, "result": {"terminal": True}}, channel="muse"))
+        self.assertNotIn(key, adapter.requests)
+
+    def test_muse_steering_commits_display_before_waking_waiter(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        adapter, connection = self.bind("muse")
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            future = worker.submit(adapter.request, "turn/steer", {"threadId": self.identity,
+                "expectedTurnId": self.turn_id, "input": [{"type": "text", "text": "steered input"}]})
+            deadline = time.monotonic() + 2
+            while not connection.bindings and time.monotonic() < deadline:
+                time.sleep(.005)
+            request_id = next(iter(connection.bindings))
+            binding = connection.bindings[request_id]
+            self.projection.project(self.event(1, {"id": request_id, "result": {
+                "commandId": binding["command_id"], "turnId": self.turn_id, "status": "accepted"}}, channel="muse"))
+            self.assertEqual(future.result(timeout=2), {"turnId": self.turn_id})
+        self.assertEqual(adapter.turns[self.identity]["items"][-1]["content"][0]["text"], "steered input")
+
+
+class ACPCancellationTests(unittest.TestCase):
+    def test_cancel_waits_for_native_terminal_reply_before_close(self):
+        import os
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            program = '''import json, sys
+pending = None
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "session/prompt":
+        pending = message["id"]
+    elif message.get("method") == "session/cancel":
+        print(json.dumps({"id": pending, "result": {"stopReason": "cancelled"}}), flush=True)
+'''
+            connection = ACPConnection(lambda _: None, command=[sys.executable, "-u", "-c", program], cwd=directory, env=dict(os.environ))
+            try:
+                future = connection.submit("session/prompt", {"sessionId": "native"})
+                connection.cancel("native")
+                self.assertEqual(future.result(timeout=.1), {"stopReason": "cancelled"})
+                self.assertIsNone(connection.process.poll())
+            finally:
+                connection.close()

@@ -28,6 +28,8 @@ class ACPConnection:
         self.store, self.provider, self.thread_id = store, provider, thread_id
         self.channel = None
         self.bindings = {}
+        self.answered_requests = {}
+        self.native_decisions = {}
         self.callback = callback
         self.lock = threading.RLock()
         self.pending = {}
@@ -56,7 +58,19 @@ class ACPConnection:
         if self.channel:
             if self.closed or self.process.poll() is not None:
                 raise CoordinationError(f"{self.label} disconnected. Send again to resume.")
-            self.store.provider_projection.write(self.channel, {"jsonrpc": "2.0", **message})
+            projection = self.store.provider_projection
+            def register():
+                if "id" in message and "method" not in message:
+                    key = json.dumps(message["id"])
+                    encoded = json.dumps(message, sort_keys=True)
+                    previous = self.answered_requests.get(key)
+                    if previous is not None:
+                        if previous != encoded:
+                            raise CoordinationError("This native request already has a different recorded answer.")
+                        raise CoordinationError("This native request already has a recorded answer; delivery is being reconciled.")
+                    self.answered_requests[key] = encoded
+                return {"jsonrpc": "2.0", **message}
+            projection.write_registered(self.channel, register)
             return
         with self.lock:
             if self.closed or self.process.poll() is not None:
@@ -67,13 +81,24 @@ class ACPConnection:
             except (OSError, ValueError) as exc:
                 raise CoordinationError(f"Connection to {self.label} was lost.") from exc
 
-    def submit(self, method, params):
+    def submit(self, method, params, *, context=None):
         request_id, future = str(uuid.uuid4()), Future()
         with self.lock:
+            decision = None
+            if self.channel and method in {"approval/decide", "userInput/answer", "userInput/cancel"}:
+                decision = json.dumps([params.get("approvalId") or params.get("userInputId"), params.get("requirementId")], sort_keys=True)
+                if decision in self.native_decisions:
+                    raise CoordinationError("This native decision already has a recorded command; its receipt is being reconciled.")
+                self.native_decisions[decision] = request_id
             self.pending[request_id] = future
             # The descriptor is checkpointed with the command before delivery.
             # Futures and callback closures never cross a coordinator boundary.
             self.bindings[request_id] = {"method": method, "command_id": params.get("commandId")}
+            if context is not None:
+                self.bindings[request_id]["context"] = context
+            if decision is not None:
+                self.bindings[request_id]["decision"] = {"native_id": params.get("approvalId") or params.get("userInputId"),
+                    "requirement": params.get("requirementId"), "question": method.startswith("userInput/")}
             if self.channel:
                 adapter = getattr(self.store.provider_projection.sessions, self.provider)
                 self.bindings[request_id]["turn_id"] = adapter.turns.get(self.thread_id, {}).get("id")
@@ -96,6 +121,18 @@ class ACPConnection:
         finally:
             with self.lock:
                 self.pending = {k: v for k, v in self.pending.items() if v is not future}
+
+    def cancel(self, native_id, *, timeout=2.0):
+        """Let the provider publish its terminal prompt reply before closing."""
+        with self.lock:
+            futures = [self.pending[key] for key, binding in self.bindings.items()
+                       if binding.get("method") == "session/prompt" and key in self.pending]
+        self.write({"method": "session/cancel", "params": {"sessionId": native_id}})
+        if futures:
+            try:
+                futures[0].result(timeout=timeout)
+            except (TimeoutError, CoordinationError):
+                pass
 
     def _fail(self, error):
         with self.lock:
@@ -123,6 +160,8 @@ class ACPConnection:
         connection.lock, connection.pending = threading.RLock(), {}
         connection.errors, connection.readers, connection.closed = deque(maxlen=12), [], False
         connection.bindings = (state or {}).get("bindings", {})
+        connection.answered_requests = (state or {}).get("answered_requests", {})
+        connection.native_decisions = (state or {}).get("native_decisions", {})
         connection.options, connection.auth_urls = {}, set()
         connection.temporary = connection.configuration = None
         connection.notifications, connection.dispatcher = None, None
@@ -135,6 +174,13 @@ class ACPConnection:
     def _message(self, message):
         if "method" in message:
             self.callback(message)
+            if message["method"] == "disconnected":
+                self.bindings.clear()
+                error = CoordinationError(message.get("params", {}).get("error", "Provider disconnected."))
+                if self.channel:
+                    self.store.provider_projection.after_commit(lambda: self._fail(error))
+                else:
+                    self._fail(error)
             return
         if "id" not in message:
             return
@@ -166,6 +212,31 @@ class ACPConnection:
                 adapter.initial_prompt.confirm(self.thread_id)
             except Exception as error:
                 adapter._finish(self.thread_id, "failed", str(error))
+        if projection is not None and binding.get("method") == "turn/steer" and result.exception() is None:
+            response = result.result()
+            if (response.get("commandId") != binding.get("command_id")
+                    or response.get("turnId") != binding.get("turn_id") or response.get("status") != "accepted"):
+                result = Future()
+                result.set_exception(CoordinationError("Muse did not confirm steering the expected turn."))
+            else:
+                adapter = projection.sessions.muse
+                turn = adapter.turns.get(self.thread_id) or adapter.completed.get(self.thread_id)
+                user = binding.get("context", {}).get("user")
+                if turn and turn["id"] == binding.get("turn_id") and user:
+                    if not any(item["id"] == user["id"] for item in turn["items"]):
+                        turn["items"].append(user)
+                        adapter._emit("item/completed", self.thread_id, turnId=turn["id"], item=user)
+        if projection is not None and binding.get("decision") and result.exception() is None:
+            from .acp_state import settle_muse_decision
+            settle_muse_decision(projection, self.thread_id, binding["decision"], result.result())
+        if projection is not None and binding.get("method") in {"session/load", "session/read", "session/resume"}:
+            from . import acp_state
+            adapter = getattr(projection.sessions, self.provider)
+            if result.exception() is None:
+                if self.provider == "muse":
+                    acp_state.reconcile_muse(adapter, self.thread_id, result.result())
+                elif binding["method"] == "session/load":
+                    acp_state.finish_replay(adapter, self.thread_id)
         with self.lock:
             future = self.pending.get(request_id)
         if future is not None:
