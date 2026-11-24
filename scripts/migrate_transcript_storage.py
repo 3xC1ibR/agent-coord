@@ -27,9 +27,11 @@ def owned_copy(source, destination):
         return
     if receipt_path.exists():
         raise ValueError("Migration receipt exists without its destination")
-    if sys.platform == "darwin" and not Path(str(source) + "-wal").exists():
+    wal = Path(str(source) + "-wal")
+    if sys.platform == "darwin" and (not wal.exists() or wal.stat().st_size == 0):
         subprocess.run(["cp", "-c", str(source), str(destination)], check=True)
     else:
+        os.close(os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as original:
             with closing(sqlite3.connect(destination)) as copy:
                 original.backup(copy)
@@ -76,6 +78,7 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--activate", action="store_true", help="Activate verified roots on the offline copy only")
+    parser.add_argument("--verify", action="store_true", help="Repeat content verification instead of reusing durable verification receipts")
     parser.add_argument("--rollback", action="store_true", help="Select equivalent retained legacy roots")
     parser.add_argument("--compact", action="store_true", help="Write a separate compact candidate after verified activation")
     args = parser.parse_args()
@@ -90,7 +93,7 @@ def main():
         transcripts.deactivate()
         print(json.dumps({"destination": str(destination), "activated": False}))
         return
-    reports = transcripts.migrate(activate=args.activate, on_progress=lambda report: print(json.dumps(report), file=sys.stderr, flush=True))
+    reports = transcripts.migrate(activate=args.activate, force_verify=args.verify, on_progress=lambda report: print(json.dumps(report), file=sys.stderr, flush=True))
     print(json.dumps({"destination": str(destination), "activated": args.activate, "threads": len(reports),
                       "turns": sum(r["turns"] for r in reports), "items": sum(r["items"] for r in reports)}))
 

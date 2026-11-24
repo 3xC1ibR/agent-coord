@@ -35,6 +35,9 @@ def ensure_schema(db):
         full_offset INTEGER NOT NULL, full_length INTEGER NOT NULL, digest TEXT NOT NULL, item_count INTEGER NOT NULL,
         PRIMARY KEY(thread_id, turn_seq)) WITHOUT ROWID""")
     db.execute("CREATE INDEX IF NOT EXISTS thread_turn_identity ON thread_turns(thread_id, turn_id)")
+    db.execute("""CREATE TABLE IF NOT EXISTS transcript_migration_verification (
+        thread_id TEXT PRIMARY KEY, generation TEXT NOT NULL, source_revision TEXT NOT NULL,
+        turn_count INTEGER NOT NULL, item_count INTEGER NOT NULL) WITHOUT ROWID""")
     db.execute("""CREATE TABLE IF NOT EXISTS transcript_legacy_revisions (
         thread_id TEXT PRIMARY KEY, revision INTEGER NOT NULL) WITHOUT ROWID""")
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone():
@@ -318,7 +321,7 @@ class TranscriptStore:
                     raise ValueError("Rollback requires an equivalent retained legacy history")
             db.execute("UPDATE transcript_generations SET active=0")
 
-    def migrate(self, *, activate=False, on_progress=None):
+    def migrate(self, *, activate=False, on_progress=None, force_verify=False):
         """Copy, verify exact content, then optionally activate each stable root."""
         from .history_persistence import decode_history
         with self.store.reading(), self.store._connection() as db:
@@ -329,19 +332,30 @@ class TranscriptStore:
         for identity in identities:
             with self.store.reading(), self.store._connection() as db:
                 db.execute("BEGIN")
-                source = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0]
                 revision = legacy_revision(db, identity)
-                history = decode_history(source, db=db)
-            self.save(identity, history, source_root=source)
-            if self.read_full(identity, require_active=False) != history:
-                raise ValueError("Transcript migration content mismatch: " + identity)
+                verified = None if force_verify else db.execute("""SELECT v.turn_count,v.item_count
+                    FROM transcript_migration_verification v JOIN transcript_generations g USING(thread_id)
+                    WHERE v.thread_id=? AND v.generation=g.generation AND v.source_revision=? AND g.source_root=?""",
+                    (identity, revision, revision)).fetchone()
+                if verified is None:
+                    source = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0]
+                    history = decode_history(source, db=db)
+            if verified is None:
+                generation = self.save(identity, history, source_root=source)
+                if self.read_full(identity, require_active=False) != history:
+                    raise ValueError("Transcript migration content mismatch: " + identity)
+                verified = (len(history.get("turns") or []), sum(len(t.get("items") or []) for t in history.get("turns") or []))
+                with self.store._connection() as db:
+                    db.execute("""INSERT INTO transcript_migration_verification VALUES (?,?,?,?,?)
+                        ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation,
+                        source_revision=excluded.source_revision, turn_count=excluded.turn_count,item_count=excluded.item_count""",
+                        (identity, generation, revision, *verified))
             if activate:
                 with self.store._connection() as db:
                     if legacy_revision(db, identity) != revision:
                         raise ValueError("Legacy history changed before activation")
                     db.execute("UPDATE transcript_generations SET active=1 WHERE thread_id=? AND source_root=?", (identity, revision))
-            reports.append({"thread_id": identity, "turns": len(history.get("turns") or []),
-                            "items": sum(len(t.get("items") or []) for t in history.get("turns") or [])})
+            reports.append({"thread_id": identity, "turns": verified[0], "items": verified[1]})
             if on_progress is not None:
                 on_progress(reports[-1])
         return reports
