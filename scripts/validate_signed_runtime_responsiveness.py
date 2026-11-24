@@ -317,6 +317,8 @@ def fetch(url, token, route, body=None, timeout=20):
 
 class SignedUpgrade(Validation):
     def __init__(self, args, previous, candidate):
+        if getattr(args, "private_apfs_fixture", False) and args.candidate_only:
+            raise ValueError("Private APFS fixtures require guarded upgrade qualification")
         super().__init__(args.report, 1, "signed-responsiveness")
         self.old, self.new = previous, candidate
         self.profile_sample = args.profile_sample
@@ -326,6 +328,7 @@ class SignedUpgrade(Validation):
         self.source_baseline_report = getattr(args, "source_baseline_report", None)
         self.candidate_only = args.candidate_only
         self.stable_origin = getattr(args, "stable_origin", False)
+        self.private_apfs_fixture = getattr(args, "private_apfs_fixture", False)
         self.browser_module = args.playwright_module
         self.browser = None
         self.browser_err = None
@@ -583,10 +586,17 @@ class SignedUpgrade(Validation):
                 and r.get("continuity") is True and r.get("status") == 200} == {"opening", "composing", "receiving"}
 
     def start(self):
+        if getattr(self, "private_apfs_fixture", False):
+            from private_upgrade_fixture import prepare_private_clone
+            self.report["workload"]["fixture_preparation"] = prepare_private_clone(
+                self.snapshot, self.database, self.root)
         seed_inventory(self.database, self.root, self.sources)
         self.saved = copy_saved_histories(self.snapshot, self.database, self.root, manifest_thread=self.manifest_thread)
         if not self.candidate_only:
             self.report["workload"].update(match_snapshot_size(self.snapshot, self.database))
+        if getattr(self, "private_apfs_fixture", False):
+            from private_upgrade_fixture import extent_evidence
+            self.report["workload"]["fixture_preparation"]["seeded_fixture"] = extent_evidence(self.database)
         self.report["saved_histories"] = self.saved
         self.open_targets = [r["fixture_id"] for r in self.saved]
         profile = {"raw_bytes": LARGE_OUTPUT_BYTES * 3 // 4, "interval_seconds": 1}
@@ -1765,6 +1775,17 @@ class SignedUpgrade(Validation):
 
 
 def run_and_clean_up(runner):
+    if getattr(runner, "private_apfs_fixture", False):
+        from private_upgrade_fixture import cleanup_on_exit
+        # Residual source free pages and every rollback copy are local-only.
+        # Preserve all existing teardown/receipt failures, then remove the root
+        # even when an unsuccessful gate would normally retain diagnostics.
+        with cleanup_on_exit(runner.root):
+            return _run_and_clean_up(runner)
+    return _run_and_clean_up(runner)
+
+
+def _run_and_clean_up(runner):
     try:
         try:
             runner.execute()
@@ -1798,6 +1819,8 @@ def main():
     for name in ("previous", "candidate", "snapshot", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--saved-manifest-thread", help="Select a specific reported long conversation from the private snapshot")
+    parser.add_argument("--private-apfs-fixture", action="store_true",
+                        help="Opt in to a local-only APFS clone, logically isolated before anonymized seeding")
     parser.add_argument(
         "--profile-sample",
         type=Path,
