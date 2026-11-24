@@ -15,9 +15,10 @@ PROBE = r'''
 import json, os, shlex, subprocess, sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 resources, directory = map(Path, sys.argv[1:])
 sys.path.insert(0, str(resources / 'backend'))
-from agent_coord import antigravity, desktop_runtime, jobs, kimi_setup, managed_pty, muse_setup
+from agent_coord import antigravity, coordination_metrics, desktop_runtime, jobs, kimi_setup, managed_pty, muse_setup, zellij_wake
 from agent_coord.store import CoordinationStore
 home = directory / 'home'
 home.mkdir()
@@ -71,6 +72,45 @@ command = jobs.build_supervisor_command(store, 'unused', 'private-token')
 module = command.index('-m')
 run('job-supervisor-entry', command[:module + 2] + ['--help'], env=dict(environment, PYTHONPATH=str(resources / 'backend')))
 results[-1]['explicit_bytecode_flag'] = '-B' in command[:module]
+# Capture real watcher/worker commands while substituting process creation.
+# Only their harmless entry points execute; no watcher, metric scan or native
+# provider is started by this resource-integrity check.
+captured = {}
+def watcher(command, **options):
+    captured['watcher'] = command
+    return SimpleNamespace(pid=2147483647)
+store.register(session_id='signed-resource-watcher', client='codex', cwd=str(workspace))
+with patch.object(zellij_wake.shutil, 'which', return_value='/private/probe/zellij'):
+    zellij_wake.enable_zellij_wake(store, 'signed-resource-watcher',
+        zellij_session='private-probe', pane_id='1', popen=watcher)
+command = captured['watcher']
+script = next(i for i, value in enumerate(command[1:], 1) if not value.startswith('-'))
+run('zellij-supervisor-entry', command[:script + 1] + ['--help'])
+results[-1]['explicit_bytecode_flag'] = '-B' in command[:script]
+def worker(command, **options):
+    captured['worker'] = command
+    return SimpleNamespace(returncode=0, poll=lambda: 0)
+service = coordination_metrics.CoordinationMetrics(directory / 'metrics.sqlite3',
+    python=sys.executable, codex_home=home / 'codex', popen=worker)
+service._run()
+service.close()
+command = captured['worker']
+command = command[command.index(sys.executable):]  # Preserve the interpreter prefix below taskpolicy.
+module = command.index('-m')
+run('metrics-worker-entry', command[:module + 2] + ['--help'], env=dict(environment, PYTHONPATH=str(resources / 'backend')))
+results[-1]['explicit_bytecode_flag'] = '-B' in command[:module]
+def browser(connection, callback, **options):
+    captured['browser'] = options['env']['BROWSER']
+    connection.channel = None
+with patch.object(antigravity, 'resolve_runtime', return_value=(directory / 'native', directory / 'harness')), \
+        patch.object(antigravity.ACPConnection, '__init__', browser):
+    connection = antigravity.AntigravityConnection(store, lambda event: None, {'cwd': str(workspace)})
+try:
+    command = shlex.split(captured['browser'])
+    run('antigravity-browser-helper', command[:-1] + ['https://accounts.google.com/private-probe'])
+    results[-1]['explicit_bytecode_flag'] = '-B' in command
+finally:
+    connection.temporary.cleanup()
 # A backend helper is observed through its actual interpreter prefix, replacing
 # its body with an import probe so no runtime or provider process is started.
 command = desktop_runtime.payload_command(resources)
@@ -128,7 +168,8 @@ def validate(app: Path, *, report: Path | None = None) -> dict:
     result['resources_changed'] = sorted(key for key in before.keys() & after.keys() if before[key] != after[key])
     result['signature_after'] = signature(app)
     expected = {'muse-generated-hook', 'kimi-generated-hook', 'antigravity-generated-hook',
-        'managed-supervisor-entry', 'job-supervisor-entry', 'backend-child-interpreter'}
+        'managed-supervisor-entry', 'job-supervisor-entry', 'zellij-supervisor-entry',
+        'metrics-worker-entry', 'antigravity-browser-helper', 'backend-child-interpreter'}
     result['passed'] = (driver.returncode == 0 and result['signature_after']['valid']
         and {case['name'] for case in result.get('cases', [])} == expected
         and not any(result[name] for name in ('resources_added', 'resources_removed', 'resources_changed'))

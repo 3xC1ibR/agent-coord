@@ -73,11 +73,11 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
                         "test_coordinator_projection.ProjectionTests."
                         "test_signed_legacy_watchdog_restores_approval_and_processes_next_event",
                         "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_explicit_update_pauses_and_continues_each_provider_once",
+                        "test_explicit_update_transfers_each_retained_provider_without_interrupting",
                         "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_pending_approval_waits_with_admission_open_and_is_never_withdrawn",
+                        "test_unbrokered_approvals_are_never_withdrawn_and_remain_answerable",
                         "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_muse_background_workflow_waits_with_a_named_reason"],
+                        "test_unbrokered_muse_workflows_wait_and_retained_workflows_transfer"],
                        cwd=fixtures, env=environment, check=True, timeout=60)
         result["codex_provider_relaunch"] = True
         result["legacy_watchdog_approval_recovery"] = True
