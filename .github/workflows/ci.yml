@@ -114,6 +114,10 @@ jobs:
           python3 scripts/check_design_tokens.py
       - name: Verify durable composer drafts
         run: RIBBON_BROWSER=chromium node --test tests/test_composer_drafts.mjs
+      - name: Verify retained conversation architecture
+        env:
+          RIBBON_FRONTEND_EVIDENCE: ${{ runner.temp }}/interface-acceptance/architecture
+        run: node tests/test_conversation_architecture.mjs
       - name: Verify interface states and interaction latency
         run: |
           node scripts/validate_interface.mjs --source "$PWD" \

@@ -73,6 +73,12 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and verify the release interface
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
       - name: Test release source
         run: |
           sudo apt-get update
@@ -116,6 +122,17 @@ jobs:
         with:
           version: '0.13.1'
           enable-cache: false
+      - name: Set up Node.js for frontend packaging
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and verify the packaged interface
+        run: |
+          python3 scripts/build_web.py
+          python3 scripts/check_design_tokens.py
       - name: Qualify coordinator replacement and rollback on macOS
         timeout-minutes: 3
         env:
