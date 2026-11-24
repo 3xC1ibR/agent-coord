@@ -271,6 +271,27 @@ class MacOSReleaseTests(unittest.TestCase):
         self.assertEqual(events[-2:], [("put", "releases/1.2.3/release.json"),
                                       ("verify", "releases/1.2.3/release.json")])
 
+    def test_separate_promotion_requires_verified_versioned_manifest(self):
+        files, manifest = self.files()
+        r2 = mock.Mock()
+        with mock.patch.object(release, "verify_download", side_effect=ValueError("manifest differs")):
+            with self.assertRaisesRegex(ValueError, "manifest differs"):
+                release.promote_published(files, manifest, r2)
+        r2.promote_feed.assert_not_called()
+        r2.promote.assert_not_called()
+
+    def test_separate_promotion_cannot_skip_the_workload_gate(self):
+        files, manifest = self.files()
+        r2 = mock.Mock()
+        with (mock.patch.object(release.release_workload_receipt, "require_release_receipts",
+                                side_effect=ValueError("missing signed workload")),
+              mock.patch.object(release, "verify_download") as verify):
+            with self.assertRaisesRegex(ValueError, "missing signed workload"):
+                release.promote_published(files, manifest, r2)
+        verify.assert_not_called()
+        r2.promote_feed.assert_not_called()
+        r2.promote.assert_not_called()
+
     def test_conflicting_release_uploads_nothing(self):
         files, manifest = self.files()
         r2 = mock.Mock()

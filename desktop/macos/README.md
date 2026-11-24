@@ -181,12 +181,15 @@ are not included in release artifacts. Ordinary PR CI has no release secrets.
    Intel hardware when available; an Intel runner does not cover every
    supported macOS version.
 3. Run the private workload on the operator Mac for each architecture using
-   the procedure below. Approve `macos-release`. The publisher requires both
+   the procedure below. Submit both receipts before approving `macos-release`.
+   The publisher requires both
    authenticated results for this attempt, validates both complete artifact sets,
    checks their recorded source commit, and uploads versioned files. It then
    downloads them through the public HTTPS host and verifies every checksum.
    Only after all checks pass does it upload `releases/X.Y.Z/release.json`.
-4. CI atomically advances `https://downloads.ribbonfield.com/releases/current.json`.
+4. A separate CI step rechecks both receipts and the published version manifest,
+   then advances the signed Sparkle feeds and
+   `https://downloads.ribbonfield.com/releases/current.json`.
    The website reads its version, channel and both installer URLs through
    `https://api.ribbonfield.com/v1/release`; no website release edit is needed.
    Both manifests include the source commit, CI build number and workflow run URL.
@@ -254,8 +257,9 @@ and a context derived from the signed asset identities are transmitted. The
 publisher verifies the authenticated creator and latest status for each
 architecture against the commit, build, run, attempt and hashes of the signed
 update ZIP and DMG. After a rerun, rerun both private gates for the new attempt.
-The publication step waits up to 150 minutes for the two receipts. If either
-gate fails, retain its private report for diagnosis.
+The publication job starts after environment approval and fails immediately
+when either receipt is missing. If either gate fails, retain its private
+report for diagnosis.
 
 ## Build and install locally
 
