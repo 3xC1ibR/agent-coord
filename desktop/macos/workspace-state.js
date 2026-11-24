@@ -11,6 +11,7 @@
   };
   const entries = value => Array.isArray(value) ? value.filter(pair => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === "string") : [];
   const pairs = value => value?.entries ? [...value.entries()] : [];
+  const paneInput = record => record?.api?.input || record?.frame?.contentDocument?.getElementById("message");
   const pick = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, copy(value[key])]));
   const tab = value => pick(value, ["thread_id", "title", "conversation_id", "tree_root", "tree_open", "project_cwd", "cwd", "client", "browser_session", "attention"]);
   const usefulStorageKey = key => typeof key === "string" && ["agent-coord.folder.", "agent-coord.thread-tabs.",
@@ -153,7 +154,10 @@
         const s = currentState();
         if (event.type === "input" || event.type === "change") {
           const composer = document !== doc || ["message", "model-picker", "effort-picker"].includes(event.target?.id);
-          const id = !composer ? null : document === doc ? currentDraftId(s) : view.agentCoordPanes?.from(document.defaultView)?.thread?.thread_id;
+          const pane = event.target?.closest?.("[data-pane-composer]")?.closest?.("[data-thread-id]");
+          const id = pane ? view.agentCoordPanes?.from(pane)?.thread?.thread_id
+            : !composer ? null
+            : document === doc ? currentDraftId(s) : view.agentCoordPanes?.from(document.defaultView)?.thread?.thread_id;
           if (id) { touched.add(id); if (s?.selected === "new-session") touched.add("new-session"); }
           if (id && event.target?.id === "message") {
             const text = event.target.value;
@@ -181,6 +185,14 @@
         changed();
       }, true);
     }
+    function restorePaneSelection(record) {
+      const id = record?.thread?.thread_id, input = paneInput(record), saved = record?.workspaceSelection;
+      if (input && saved && !touched.has(id)) input.setSelectionRange(saved.start, saved.end);
+      if (record?.api) {
+        delete record.workspaceSelection;
+        paneWaiters.get(id)?.(); paneWaiters.delete(id);
+      }
+    }
     function installHooks() {
       const s = currentState();
       if (!s) return;
@@ -206,13 +218,8 @@
       if (panes && !hooked.has(panes)) {
         hooked.add(panes);
         for (const name of ["focus", "show", "hide", "tile", "moveThread", "maximize", "close", "draft"]) watch(panes, name);
-        watch(panes, "attach", source => {
-          const record = panes.from(source), id = record?.thread?.thread_id;
-          const input = record?.frame?.contentDocument?.getElementById("message"), saved = record?.workspaceSelection;
-          if (input && saved && !touched.has(id)) input.setSelectionRange(saved.start, saved.end);
-          if (record) delete record.workspaceSelection;
-          paneWaiters.get(id)?.(); paneWaiters.delete(id); changed();
-        });
+        watch(panes, "attach", source => { restorePaneSelection(panes.from(source)); changed(); });
+        watch(panes, "ensureFrame", record => restorePaneSelection(record));
       }
     }
     function preload(snapshot) {
@@ -281,7 +288,7 @@
           texts.set(id, saved.text); imageDrafts.set(id, saved.images);
           mentions.set(id, {text: saved.text, refs: saved.mentions || []});
         }
-        const input = record.frame?.contentDocument?.getElementById("message");
+        const input = paneInput(record);
         if (input) Object.assign(saved, {selectionStart: input.selectionStart, selectionEnd: input.selectionEnd});
         return [id, {thread: tab(record.thread), draft: saved}];
       });
@@ -425,8 +432,12 @@
             const record = panes.record({...tab(value.thread), thread_id: id});
             const saved = draft(value.draft || {});
             record.initialDraft = saved;
-            if (record.api) attempt(() => { record.api.restoreDraft(saved); record.initialDraft = null; });
             if (Number.isFinite(saved.selectionStart)) record.workspaceSelection = {start: saved.selectionStart, end: saved.selectionEnd};
+            if (record.api) attempt(() => {
+              record.api.restoreDraft(saved);
+              record.initialDraft = null;
+              restorePaneSelection(record);
+            });
           }
           for (const value of panes.layouts.values()) for (const id of value.groups.flat()) if (!panes.records.has(id)) panes.record({thread_id: id, title: "Conversation"});
         }
@@ -466,10 +477,10 @@
           else doc.body.classList.toggle("chat-expanded", snapshot.chatExpanded);
         }
         attempt(() => render?.()); attempt(() => s.resizeComposer?.()); attempt(() => currentNavigation()?.remember?.());
-        // Visible pane documents boot independently. The shell's attach signal
-        // confirms restoreDraft ran; stacked, unopened tabs retain initialDraft.
+        // Older retained interfaces have independently loaded pane documents.
+        // In-process panes apply the draft synchronously during mounting.
         const awaiting = [];
-        if (!interacted && snapshot.panes?.active && panes?.active) for (const id of panes.layout.tabs) {
+        if (!interacted && snapshot.panes?.active && panes?.active && typeof panes.attach === "function") for (const id of panes.layout.tabs) {
           const record = panes.records.get(id);
           if (!record?.frame || record.api) continue;
           awaiting.push(new Promise((resolve, reject) => {

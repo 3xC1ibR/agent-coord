@@ -211,27 +211,53 @@ test("Send work composers retain per-project text and creation settings without 
   assert.ok(!JSON.stringify(snapshot.sendWorkDrafts).includes("sending"));
 });
 
-test("split panes retain nested geometry, hidden tabs, focus and deferred drafts through real pane attachment", async () => {
+test("split panes retain nested geometry, hidden tabs, focus, selection and deferred drafts", async t => {
   const first = fixture({panes: true}), s = first.boot(), shell = first.window.agentCoordPanes;
   s.drafts.set("a", "draft a"); s.drafts.set("b", "draft b");
+  s.drafts.set("hidden", "deferred draft");
   shell.record({thread_id: "a", title: "A"}); shell.record({thread_id: "b", title: "B"});
-  shell.layouts.set("/work:all", {presentation: "tabs", columns: [1, 1], groups: [["a"], ["b"]], tabs: ["a", "b"],
-    selected: "b", order: ["a", "b"], maximized: null, tree: {axis: "horizontal", sizes: [3, 2], children: [{slot: 0}, {slot: 1}]}});
+  shell.record({thread_id: "hidden", title: "Hidden"});
+  shell.layouts.set("/work:all", {presentation: "tabs", columns: [1, 1], groups: [["a", "hidden"], ["b"]], tabs: ["a", "b"],
+    selected: "b", order: ["a", "hidden", "b"], maximized: null, tree: {axis: "horizontal", sizes: [3, 2], children: [{slot: 0}, {slot: 1}]}});
   shell.active = true; shell.viewId = "/work:all";
-  shell.records.get("b").api = {exportDraft: () => ({text: "pane edit", images: [], mentions: [], scroll: 75, following: false})};
+  const input = new Element();
+  input.setSelectionRange(2, 6);
+  const source = shell.records.get("b");
+  const exportDraft = () => ({text: "pane edit", images: [], mentions: [], scroll: 75, following: false});
+  source.api = {exportDraft, input};
   first.helper.ready(); const snapshot = first.helper.capture();
   const f = fixture({snapshot, panes: true}); f.boot(); f.helper.ready();
-  const target = f.window.agentCoordPanes, frame = {contentWindow: {}, contentDocument: f.document};
-  target.record({thread_id: "b", title: "B"}).frame = frame;
-  let settled = false;
-  const restoring = f.helper.restore(snapshot).then(() => { settled = true; });
-  await Promise.resolve(); assert.equal(settled, false, "visible pane drafts are awaited");
-  let recovered;
-  target.attach(frame.contentWindow, {restoreDraft: value => { recovered = value; }, setActive() {}});
-  await restoring;
+  const target = f.window.agentCoordPanes, record = target.record({thread_id: "b", title: "B"});
+  let recovered, targetInput = new Element();
+  if (typeof target.attach === "function") {
+    const frame = {contentWindow: {}, contentDocument: {getElementById: () => targetInput}};
+    record.frame = frame;
+    let settled = false;
+    const restoring = f.helper.restore(snapshot).then(() => { settled = true; });
+    await Promise.resolve(); assert.equal(settled, false, "retained pane documents finish attaching");
+    target.attach(frame.contentWindow, {restoreDraft: value => { recovered = value; }, setActive() {}});
+    await restoring;
+  } else {
+    const previous = globalThis.ConversationPane;
+    t.after(() => {
+      if (previous === undefined) delete globalThis.ConversationPane;
+      else globalThis.ConversationPane = previous;
+    });
+    globalThis.ConversationPane = class {
+      constructor(_, __, pane) {
+        const selected = pane.thread.thread_id === "b";
+        this.input = selected ? targetInput : new Element();
+        if (selected) recovered = pane.initialDraft;
+      }
+    };
+    target.render = () => target.layout.tabs.forEach(id => target.ensureFrame(target.records.get(id)));
+    await f.helper.restore(snapshot);
+    assert.equal(target.records.get("b").initialDraft, null, "mount consumes the deferred draft");
+  }
   assert.equal(target.selected, "b"); assert.deepEqual(target.layout.tree.sizes, [3, 2]);
-  assert.equal(target.records.get("a").initialDraft.text, "draft a");
+  assert.equal(target.records.get("hidden").initialDraft.text, "deferred draft");
   assert.equal(recovered.text, "pane edit"); assert.equal(recovered.scroll, 75);
+  assert.deepEqual([targetInput.selectionStart, targetInput.selectionEnd], [2, 6]);
   assert.ok(f.document.body.classList.contains("conversation-split"));
   assert.deepEqual(f.calls, []);
 });
@@ -295,22 +321,25 @@ test("a failed initial route retains its draft when leaving the broken conversat
   f.runTimers(); assert.equal(f.saves.length, 1);
 });
 
-test("a pane attach timeout retains its deferred draft and does not freeze subsequent saves", async () => {
+test("an unloaded pane retains its deferred draft and leaves subsequent saves available", async () => {
   const snapshot = populated().helper.capture();
   snapshot.panes = {active: true, viewId: "/work:all", layouts: [["/work:all", {columns: [1], groups: [["a"]], tabs: ["a"], order: ["a"], selected: "a"}]],
     records: [["a", {thread: {thread_id: "a"}, draft: {text: "pane draft", images: []}}]]};
   const f = fixture({snapshot, panes: true}); f.boot(); f.helper.ready();
-  f.window.agentCoordPanes.record({thread_id: "a"}).frame = {contentWindow: {}};
+  const panes = f.window.agentCoordPanes;
+  const retainedFrame = typeof panes.attach === "function";
+  if (retainedFrame) panes.record({thread_id: "a"}).frame = {contentWindow: {}};
   const restoring = f.helper.restore();
   for (const [id, timer] of [...f.timers]) if (timer.delay === 15000) { f.timers.delete(id); timer.fn(); }
   assert.equal(await restoring, true);
   assert.equal(f.window.agentCoordPanes.records.get("a").initialDraft.text, "pane draft");
   f.state.drafts.set("other", "new work"); f.runTimers();
   assert.equal(new Map(f.saves.at(-1).drafts).get("other"), "new work");
-  assert.match(f.failures[0].message, /still loading/);
+  if (retainedFrame) assert.match(f.failures[0].message, /still loading/);
+  else assert.deepEqual(f.failures, []);
 });
 
-test("native quit can wait for local sends and unfinished image reads", () => {
+test("origin transfer waits for local sends and unfinished image reads", () => {
   const f = fixture(), s = f.boot(); f.helper.ready();
   assert.equal(f.helper.busy(), false);
   s.detail = {running: true, requests: [{method: "approval"}]};
