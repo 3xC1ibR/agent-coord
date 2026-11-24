@@ -13,7 +13,7 @@ class TranscriptWorkloadTests(unittest.TestCase):
         return {'error_count': 0, 'open': {'count': 5, 'p95_ms': 1},
                 'send_accept': {'count': 5, 'p95_ms': 1}, 'writer_hold': {'p95_ms': 1},
                 'admission_timeouts': 0, 'durable_receipts': 5, 'finalized_writes': 2,
-                'workload': {'seconds': 1}, 'search': {'indexed': 2, 'database_isolated': True}, 'streaming': {'turns': 10, 'projected_deltas': 100,
+                'seeded': {'threads': 2, 'turns': 6}, 'workload': {'seconds': 1, 'threads': 2, 'turns_per_thread': 3}, 'search': {'indexed': 2, 'database_isolated': True}, 'streaming': {'turns': 10, 'projected_deltas': 100,
                 'state_commits': 0, 'transport_changes': 0}}
 
     def test_each_required_outcome_is_gated(self):
@@ -23,7 +23,7 @@ class TranscriptWorkloadTests(unittest.TestCase):
                 ('writer_hold', 'p95_ms', 2), ('streaming', 'state_commits', 1),
                 ('streaming', 'transport_changes', 1), ('streaming', 'turns', 9),
                 ('streaming', 'projected_deltas', 0), ('search', 'indexed', 0),
-                ('open', 'count', 0)]:
+                ('open', 'count', 0), ('seeded', 'turns', 5)]:
             with self.subTest(section=section, field=field):
                 report = copy.deepcopy(baseline)
                 report[section][field] = value

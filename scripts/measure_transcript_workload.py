@@ -2,6 +2,7 @@
 """Generated Stage 3 workload; no production database or provider process is used."""
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from contextlib import closing, ExitStack
 import inspect
 import json
@@ -64,6 +65,9 @@ def turn(sequence):
 def gates(report):
     failures = []
     if report['error_count']: failures.append('workload errors')
+    expected = report['workload']
+    if report['seeded'] != {'threads': expected['threads'], 'turns': expected['threads'] * expected['turns_per_thread']}:
+        failures.append('seeded transcript inventory mismatch')
     for name in ('open', 'send_accept'):
         if report[name]['count'] < 1: failures.append(name + ' made no progress')
         if report[name]['p95_ms'] >= 15: failures.append(name + ' p95 must be <15 ms')
@@ -84,6 +88,7 @@ def gates(report):
 
 
 def measure(seconds=15, threads=2000, turns=350, rounds=10):
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
     setup_start = time.monotonic()
     errors = []
     with tempfile.TemporaryDirectory(prefix='transcript_workload_') as directory, ExitStack() as cleanup:
@@ -110,6 +115,7 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
         except ImportError:
             search = None
         histories = [turn(n) for n in range(turns)]
+        pending_search = deque()
         for n in range(threads):
             thread = f'fixture-{n:05d}'
             store.register(session_id=thread, client='codex', cwd=directory)
@@ -117,7 +123,9 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             history = {'id': thread, 'cwd': directory, 'turns': histories}
             transcripts.save(thread, history, activate=True)
             if search:
-                search.enqueue_history(thread, history, revision=1, metadata={'title': 'Generated workload'})
+                pending_search.append(search.enqueue_history(thread, history, revision=1, metadata={'title': 'Generated workload'}))
+                if len(pending_search) >= 16:
+                    pending_search.popleft().result(timeout=120)
         if search: search.flush()
         with store.reading(), store._connection() as db:
             seeded = {'threads': db.execute('SELECT count(*) FROM transcript_generations').fetchone()[0],
@@ -269,9 +277,9 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                 'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'durable_coverage': search.coverage() if search else None},
                 'streaming': stream_result, 'error_count': len(errors), 'errors': errors[:20],
                 'throughput_per_second': {kind: round(len(values) / elapsed, 2) for kind, values in samples.items()},
-                'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()},
+                'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': revision},
                 'coverage': {'http_recent_open': True, 'durable_composer_receipt': True, 'retained_transport_journal': True, 'live_provider_process': False,
-                             'search_unavailable': search is None, 'streaming_interval': 'delta-only interval precedes mixed HTTP/finalization interval'}}
+                             'search_unavailable': search is None, 'search_http_query': False, 'search_async_finalized_indexing': search is not None, 'streaming_interval': 'delta-only interval precedes mixed HTTP/finalization interval'}}
             report['budget_failures'] = gates(report)
             return report
         finally:
