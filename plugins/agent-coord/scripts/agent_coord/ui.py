@@ -844,11 +844,12 @@ def _handler(
                         raise ValueError
                 except ValueError as exc:
                     raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
-                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
-                if thread is None:
+                thread_json = browser_sessions.read_history_window_json(
+                    unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
+                if thread_json is None:
                     self._json(HTTPStatus.NOT_FOUND, {"error": "Saved turn was not found."})
                 else:
-                    self._json(HTTPStatus.OK, {"thread": thread})
+                    self._send(HTTPStatus.OK, "application/json; charset=utf-8", b'{"thread":' + thread_json + b'}')
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
