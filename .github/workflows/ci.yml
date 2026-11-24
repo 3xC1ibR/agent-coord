@@ -53,6 +53,12 @@ jobs:
         run: brew install ripgrep
       - name: Validate plugin packaging
         run: python3 scripts/plugin_tools.py validate
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build content-addressed frontend assets
+        run: python3 scripts/build_web.py
+      - name: Verify canonical interface tokens
+        run: python3 scripts/check_design_tokens.py
       - name: Install the native Codex hook regression client
         run: |
           npm install --prefix "$RUNNER_TEMP/codex-hook-client" --no-audit --no-fund @openai/codex@0.171.0
@@ -97,6 +103,17 @@ jobs:
         with:
           version: '0.13.1'
           enable-cache: false
+      - name: Set up Node.js for frontend packaging
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install frontend build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build content-addressed frontend assets
+        run: python3 scripts/build_web.py
+      - name: Verify canonical interface tokens
+        run: python3 scripts/check_design_tokens.py
       # Ad hoc signing exercises packaging without release credentials or notarization.
       - name: Build standalone test disk image
         run: |
@@ -110,15 +127,14 @@ jobs:
           python3 desktop/macos/verify_distribution.py \
             --dmg build/ci/Ribbon-Field-arm64-test.dmg \
             --report build/ci/distribution-validation.json
+      - name: Build the separate native smoke harness
+        run: |
+          python3 desktop/macos/build.py --standalone --arch arm64 --smoke-harness \
+            --output 'build/ci-smoke/Ribbon Field.app'
       - name: Verify native window origins across a backend change
         run: |
           python3 desktop/macos/smoke_test.py --origins-only \
-            --app 'build/ci/Ribbon Field.app' --report build/ci/native-window-origins.json
-      - name: Set up Node.js for browser measurements
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '22'
-          package-manager-cache: false
+            --app 'build/ci-smoke/Ribbon Field.app' --report build/ci/native-window-origins.json
       - name: Install the workload browser
         run: |
           npm ci --prefix demo --ignore-scripts --omit=dev
