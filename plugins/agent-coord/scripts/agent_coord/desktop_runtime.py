@@ -390,6 +390,13 @@ def readiness(sessions):
         return ["runtime readiness unavailable"]
 
 
+def retained_provider(sessions, identity, provider):
+    """A name alone never proves ownership of a surviving native process."""
+    projection = getattr(sessions, "projection", None)
+    check = getattr(projection, "owns_provider", None)
+    return bool(check and check(identity, provider))
+
+
 def uninterrupted_readiness(sessions):
     """Provider work is transferable only when every active adapter supports it."""
     if not hasattr(sessions, "projection"):
@@ -400,10 +407,11 @@ def uninterrupted_readiness(sessions):
     with sessions.lock:
         for identity in sessions.active:
             client = sessions.loaded_clients.get(identity, "codex")
-            if client not in {"codex", "claude"}:
+            if client not in {"codex", "claude"} and not retained_provider(sessions, identity, client):
                 reasons.append("active unsupported provider: " + client)
     background = getattr(sessions.muse, "background_active", None)
-    if background and background():
+    if background and any(background(identity) and not retained_provider(sessions, identity, "muse")
+                          for identity in getattr(sessions.muse, "background_turns", {})):
         reasons.append("Muse background workflows")
     if sessions.projection.error:
         reasons.append("provider projection requires recovery")
@@ -430,7 +438,7 @@ def unsupported_work(sessions):
                      for value in getattr(sessions, "requests", {}).values()}
         for identity, turn_id in sessions.active.items():
             client = sessions.loaded_clients.get(identity, "codex")
-            if client in {"codex", "claude"}:
+            if client in {"codex", "claude"} or retained_provider(sessions, identity, client):
                 continue
             if identity in requested:
                 waiting.append({"thread_id": identity, "client": client, "turn_id": turn_id, "reason": "approval"})
@@ -440,7 +448,7 @@ def unsupported_work(sessions):
     background = getattr(muse, "background_active", None)
     if background:
         for identity in list(getattr(muse, "background_turns", {})):
-            if background(identity):
+            if background(identity) and not retained_provider(sessions, identity, "muse"):
                 waiting.append({"thread_id": identity, "client": "muse", "turn_id": None, "reason": "background"})
     # A workflow still running inside a foreground Muse turn dies with its
     # process as well; read it outside sessions.lock, under the adapter lock.
@@ -845,68 +853,17 @@ class Runtime:
         return True
 
     def prepare_interruption(self, sessions):
-        """Bound an explicit update behind Kimi, Antigravity or Muse work.
+        """Keep legacy coordinator-owned processes alive until their work ends.
 
-        The caller holds the runtime mutex. Candidate validation and provider
-        I/O run on the interruption worker, never under this mutex. Passive
-        updates never reach this path and never interrupt work.
+        Build 98 launched ACP pipes inside the coordinator. They cannot be
+        claimed merely by attaching a PID. Retained channels bypass this path;
+        unbrokered work keeps the source serving, including approval answers.
         """
-        from . import runtime_update
-        if self.interruption is not None:
-            return self.finish_interruption(sessions)
-        if self.recovery_running:
-            return False  # Saved continuation decisions own admission until they finish.
-        if self.update_requested.get("interrupted_unsupported"):
-            # Work started after this update already paused conversations. Never
-            # leave those waiting or run a second, unrecorded round of stops.
-            self.fail_update(sessions, "New Kimi, Muse or Antigravity work started after the update paused "
-                             "conversations; the current backend remains active and paused conversations continue now.",
-                             blocked=uninterrupted_readiness(sessions))
-            return False
         turns, waiting = unsupported_work(sessions)
-        now = time.monotonic()
-        if self.update_grace_started is None:
-            self.update_grace_started = now
-        remaining = UPDATE_UNSUPPORTED_GRACE_SECONDS - (now - self.update_grace_started)
-        if waiting or remaining > 0:
-            # Leave admission open: the user can answer, and turns can finish.
-            self.reopen_drain(sessions)
-            approvals = [entry for entry in waiting if entry["reason"] == "approval"]
-            if approvals:
-                notice = ("The update is waiting for you to answer the request in "
-                          + conversation_labels(sessions, approvals) + ".")
-            elif waiting:
-                notice = ("The update is waiting for the Muse background workflow in "
-                          + conversation_labels(sessions, waiting) + " to finish. Stop that conversation to update now.")
-            else:
-                notice = ("Waiting for " + conversation_labels(sessions, turns) + " to finish. Turns still running after "
-                          f"{UPDATE_UNSUPPORTED_GRACE_SECONDS:g} seconds pause for the update and then continue automatically.")
-            self.note_update(phase="accepted", notice=notice, unsupported=turns + waiting)
-            return False
-        if not turns:
-            return False  # An admitted request is still starting provider work.
-        sessions.admission.pause()
-        if self.update_drain_started is None:
-            self.update_drain_started = now
-            self.update_requested = runtime_update.write(self.directory, self.update_requested,
-                phase="draining", admission_drain_started_at=time.time())
-        if sessions.admission.inflight:
-            if now - self.update_drain_started >= UPDATE_ADMISSION_SECONDS:
-                self.fail_update(sessions, "Accepted operations did not drain; the current backend remains active.",
-                                 blocked=uninterrupted_readiness(sessions))
-            return False
-        # Admission is closed and drained; reclassify before any interruption.
-        turns, waiting = unsupported_work(sessions)
-        if waiting or not turns:
-            return False
-        notice = ("Pausing " + conversation_labels(sessions, turns)
-                  + " for the update. They continue automatically afterward.")
-        self.update_requested = runtime_update.write(self.directory, self.update_requested, phase="interrupting",
-            interrupted_unsupported=True, notice=notice, unsupported=turns)
-        state = {"done": threading.Event(), "failure": None, "validated": False, "results": {}, "signalled": set()}
-        self.interruption = state
-        threading.Thread(target=self.interrupt_unsupported, name="runtime-update-interruption", daemon=True,
-                         args=(self.update_requested["id"], self.pending, turns, state)).start()
+        self.reopen_drain(sessions)
+        self.note_update(phase="accepted", unsupported=turns + waiting,
+            notice="Waiting for existing provider work to finish before its first retained-transport update: "
+                   + conversation_labels(sessions, turns + waiting) + ". Running work remains available.")
         return False
 
     def finish_interruption(self, sessions):
