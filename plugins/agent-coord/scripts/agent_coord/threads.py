@@ -369,7 +369,9 @@ class ThreadStore:
                  FROM work_threads t JOIN work_projects p ON p.id = t.project_id
                  JOIN sessions s ON s.session_id = t.thread_id"""
 
-    def get(self, thread_id: str, *, history=False) -> dict:
+    def get(self, thread_id: str, *, history=False, connection=None) -> dict:
+        if connection is not None:
+            return self.read_thread(connection, thread_id, history=history)
         with self.store.reading(), self.store._connection() as db:
             return self.read_thread(db, thread_id, history=history)
 

@@ -17,7 +17,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1647,18 +1647,34 @@ class BrowserSessions:
             return waiting, thread_id in self.active, thread_id in self.loaded, health
 
     def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None, _runtime=None) -> dict:
-        thread = (self.store.threads.get(thread_id, history=history) if _inventory is None
+        if _inventory is None:
+            # One query-only observation covers the complete public metadata.
+            # Keep detail-only usage recovery outside this read transaction.
+            with self.store.reading(), self.store._connection() as db:
+                if not db.in_transaction:
+                    db.execute("BEGIN")
+                thread = self._project_work_thread(thread_id, history=history, _creators=_creators,
+                                                   _runtime=_runtime, _db=db)
+        else:
+            thread = self._project_work_thread(thread_id, history=history, _creators=_creators,
+                                               _inventory=_inventory, _runtime=_runtime)
+        if history:
+            self._work_thread_usage(thread_id, thread)
+        return thread
+
+    def _project_work_thread(self, thread_id, *, history, _creators=None, _inventory=None, _runtime=None, _db=None):
+        thread = (self.store.threads.get(thread_id, history=history, connection=_db) if _inventory is None
                   else _inventory.projected[thread_id])
         if not matches_workspace(thread["cwd"], self.cwd):
             raise CoordinationError("Work thread not found in this workspace.")
-        creators = self._app_agent_creators(shared=True) if _creators is None else _creators
+        creators = self._app_agent_creators(db=_db, shared=True) if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
         thread["created_by_thread_id"] = thread["created_by"]["thread_id"] if thread["created_by"] else None
         thread["creation_mode"] = thread["created_by"]["mode"] if thread["created_by"] else None
         thread["orchestration_workspaces"] = thread["created_by"]["workspaces"] if thread["created_by"] else []
         if _inventory is None:
             from .supervision import relations
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 related = relations(db)
         else:
             related = _inventory.supervision
@@ -1666,7 +1682,7 @@ class BrowserSessions:
         thread.update(display_fields(thread_id, thread["created_by"], related))
         if _inventory is None:
             from .asks import AskStore
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 thread["browser_session"] = db.execute("SELECT thread_id FROM browser_sessions WHERE thread_id = ?", (thread_id,)).fetchone() is not None
                 context = thread.get("notification_context") or {}
                 owners = notification_policy.available_owners(db, self.store, thread_ids=(
@@ -1674,8 +1690,10 @@ class BrowserSessions:
                 open_ask = AskStore.open_blocking(db, [thread_id]).get(thread_id)
                 wake_pause = (db.execute(WAKE_PAUSES + " AND w.thread_id = ?", (thread_id,)).fetchone()
                               if has_table(db, "browser_inbox_wake") else None)
-            thread["dispatcher"] = self.dispatch.settings(thread_id)["enabled"] if hasattr(self, "dispatch") else False
-            session = self.store.get_session(thread_id)
+            dispatcher = (_db.execute("SELECT enabled FROM dispatch_settings WHERE thread_id=?", (thread_id,)).fetchone()
+                          if hasattr(self, "dispatch") else None)
+            thread["dispatcher"] = bool(dispatcher and dispatcher[0])
+            session = self.store._row_to_session(_db.execute("SELECT * FROM sessions WHERE session_id=?", (thread_id,)).fetchone())
         else:
             owners = _inventory.notification_owners
             thread["browser_session"] = thread_id in _inventory.browser
@@ -1812,36 +1830,38 @@ class BrowserSessions:
         thread["forked_from"] = None
         if thread["forked_from_thread_id"]:
             source_id = thread["forked_from_thread_id"]
-            source_title = (self.store.threads.get(source_id)["title"] if _inventory is None
+            source_title = (_db.execute("SELECT title FROM work_threads WHERE thread_id=?", (source_id,)).fetchone()[0] if _inventory is None
                             else _inventory.titles[source_id])
             thread["forked_from"] = {"thread_id": source_id, "title": source_title}
         if _inventory is None:
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 thread["forked_sessions"] = [dict(row) for row in db.execute(
                     """SELECT thread_id, title, created_at, forked_from_turn_id FROM work_threads
                        WHERE forked_from_thread_id = ? ORDER BY created_at, thread_id""", (thread_id,))]
         else:
             thread["forked_sessions"] = _inventory.forks[thread_id]
         if history:
-            usage = self.store.usage.summary(thread_id)
-            # Detail-only, bounded, no-model recovery. Durable notes prevent
-            # repeated failed scans after restart; overview never reads logs.
-            if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
-                self.usage_recovery_attempts.add(thread_id)
-                try:
-                    usage = self.store.usage.backfill(thread_id)
-                except Exception:
-                    # An adapter can be unavailable while plugin versions are
-                    # changing; usage must never prevent opening a conversation.
-                    pass
-            thread["usage"] = usage
-            with self.store.reading(), self.store._connection() as db:
+            with nullcontext(_db) as db:
                 children = db.execute("SELECT DISTINCT d.child_session_id FROM delegations d JOIN work_threads t ON t.thread_id = d.child_session_id WHERE d.parent_session_id = ?", (thread_id,)).fetchall()
-            thread["children"] = [self.store.threads.get(row["child_session_id"]) for row in children]
+            thread["children"] = [self.store.threads.get(row["child_session_id"], connection=_db) for row in children]
         if hasattr(self, "reviews"):
             self.reviews.project(thread, waiting=bool(waiting) or blocked_on_ask,
-                                 inventory=_inventory.reviews if _inventory is not None else None)
+                                 inventory=_inventory.reviews if _inventory is not None else self.reviews.inventory(_db, thread_id))
         return thread
+
+    def _work_thread_usage(self, thread_id, thread):
+        usage = self.store.usage.summary(thread_id)
+        # Detail-only, bounded, no-model recovery. Durable notes prevent
+        # repeated failed scans after restart; overview never reads logs.
+        if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
+            self.usage_recovery_attempts.add(thread_id)
+            try:
+                usage = self.store.usage.backfill(thread_id)
+            except Exception:
+                # An adapter can be unavailable while plugin versions are
+                # changing; usage must never prevent opening a conversation.
+                pass
+        thread["usage"] = usage
 
     def list_work_threads(self, *, archived=False, cards_only=False) -> list[dict]:
         from .thread_inventory import ThreadInventory
