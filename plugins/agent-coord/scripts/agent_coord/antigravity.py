@@ -25,6 +25,7 @@ from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
 from .antigravity_skills import prepare_skills
 from .context import client_environment, cli_path, coordination_bootstrap
+from .conversation_sync import ConversationSync
 from .message_delivery import MessageDelivery
 from .store import CoordinationError
 from .permission_modes import acp_modes, acp_current_mode, legacy_mode, validate_mode
@@ -166,6 +167,7 @@ class AntigravityRPC:
         self.lock = threading.RLock()
         self.catalog_lock = threading.Lock()
         self.delivery = MessageDelivery(store)
+        self.conversation_sync = ConversationSync()
         self.delivery_turns = {}
         self.last_activity = {}
         self.prompt_locks = {}
@@ -411,6 +413,11 @@ class AntigravityRPC:
                     prompt.append({"type": "image", "mimeType": header[5:].split(";")[0], "data": data})
             turn = {"id": str(uuid.uuid4()), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
+            notice = self.conversation_sync.begin(thread_id, turn["id"],
+                "\n".join(part["text"] for part in params["input"] if part["type"] == "text"),
+                allow_consent=not params.get("_coordination_delivery", False))
+            if notice:
+                prompt[0]["text"] += "\n\n" + notice
             self.turns[thread_id] = turn
             self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
@@ -553,6 +560,7 @@ class AntigravityRPC:
             connection = self.connections.pop(thread_id, None) if status == "failed" else None
         if connection:
             connection.close()
+        self.conversation_sync.finish(thread_id, turn)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
     def _message(self, thread_id, message):

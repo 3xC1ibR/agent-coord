@@ -19,6 +19,7 @@ from agent_coord.antigravity import AntigravityConnection, AntigravityRPC, AUTH_
 from agent_coord.antigravity_setup import install_runtime, provider_directory, resolve_runtime
 from agent_coord.antigravity_skills import prepare_skills
 from agent_coord.acp import ACPError
+from agent_coord.conversation_sync import ConversationSync
 
 
 CONFIG = [{"id": "model", "category": "model", "type": "select", "currentValue": "gemini-test",
@@ -111,6 +112,34 @@ class AntigravityTests(unittest.TestCase):
         self.assertFalse(self.sessions.rpc.calls)
         with self.assertRaises(CoordinationError):
             self.create(model="gemini-test", effort="high")
+
+    def test_stoic_sync_observes_raw_prompt_and_completed_reply(self):
+        from test_conversation_sync import token
+        thread = self.create()
+        provider = self.sessions.antigravity
+        provider.conversation_sync = ConversationSync(self.root / "sync")
+        with patch.dict(os.environ, {"STOIC_API_TOKEN": token()}), \
+                patch.object(provider.conversation_sync, "flush") as flush:
+            self.sessions.send(thread, {"message": "$stoic keep this conversation"})
+            connection = provider.connections[thread]
+            self.assertIn("Stoic conversation sync is on", connection.calls[-1][1]["prompt"][0]["text"])
+            turn = provider.turns[thread]["id"]
+            self.complete(thread)
+            state = provider.conversation_sync._read(provider.conversation_sync._directory(thread))
+        data = state["pending"][turn]
+        self.assertEqual(data["session_id"], thread)
+        self.assertEqual(data["prompt"], "$stoic keep this conversation")
+        self.assertEqual(data["reply"], "Finished")
+        self.assertNotIn("AGENTS.md", data["prompt"])
+
+    def test_stoic_coordination_prompt_does_not_enable_sync(self):
+        thread = self.create()
+        provider = self.sessions.antigravity
+        provider.conversation_sync = ConversationSync(self.root / "sync")
+        provider.request("turn/start", {"threadId": thread, "cwd": str(self.root),
+            "input": [{"type": "text", "text": "/stoic on"}], "_coordination_delivery": True})
+        self.complete(thread)
+        self.assertFalse(provider.conversation_sync.root.exists())
 
     def test_app_cli_supports_antigravity_without_advertising_terminal_delegation(self):
         from agent_coord.cli import _parser
