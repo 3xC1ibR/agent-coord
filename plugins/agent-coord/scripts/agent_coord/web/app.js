@@ -2994,7 +2994,8 @@ function connect() {
   let previousApprovals = new Map();
   events.onmessage = message => {
     const batch = JSON.parse(message.data);
-    resumeCursor = {eventCursor: batch.seq, completionCursor: batch.completionSeq};
+    const stableCursor = /^([0-9a-f]{32}\/\d+):\d+$/.exec(message.lastEventId || "");
+    resumeCursor = {eventCursor: stableCursor ? stableCursor[1] : batch.seq, completionCursor: batch.completionSeq};
     // Approvals are a snapshot of unclaimed requests. Batches between polls
     // omit the field, and each poll can repeat the same unanswered requests.
     const changedThreads = new Set();
@@ -3040,7 +3041,7 @@ function connect() {
   };
   window.addEventListener("pagehide", event => {
     events.close();
-    if (event.persisted && state.updateSubmissions) {
+    if (event.persisted) {
       // The page cache restores the same document with its old stream closed.
       window.addEventListener("pageshow", restored => {
         if (restored.persisted) {
