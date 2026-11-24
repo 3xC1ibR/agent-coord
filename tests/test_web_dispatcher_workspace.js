@@ -379,6 +379,37 @@ test("reading or editing freezes the whole layout as other work finishes or arri
   assert.deepEqual(model.visible, ["new"], "Deferred layout changes apply once reading or editing ends");
 });
 
+test("dispatcher activity keeps a same-document pane while focus or an open dialog is inside it", () => {
+  const {workspace, panes, callbacks} = workspaceLifecycle();
+  const source = {work_thread: {thread_id: "dispatcher"}, dispatchRequests: [
+    {id: 1, dispatcher_id: "dispatcher", target_id: "reading", state: "accepted", created_at: 100},
+    {id: 2, dispatcher_id: "dispatcher", target_id: "dialog", state: "accepted", created_at: 200},
+  ]};
+  workspace.show("dispatcher", "/work");
+  workspace.update([thread("reading"), thread("dialog")], source);
+  assert.deepEqual(workspace.model.visible, ["reading", "dialog"]);
+  const focused = {}, modal = {};
+  let dialogOpen = true;
+  panes.records.get("reading").frame = {contains: element => element === focused, querySelector: () => null};
+  panes.records.get("dialog").frame = {contains: () => false, querySelector: selector =>
+    dialogOpen && selector === "dialog[open]" ? modal : null};
+  const updates = [];
+  panes.changed = (sender, item) => updates.push([sender, item.thread_id]);
+  workspace.document.activeElement = focused;
+  callbacks.focusin();
+  assert.deepEqual(workspace.protectedIds(), ["reading", "dialog"]);
+  workspace.update([completed("reading"), completed("dialog")], source);
+  assert.deepEqual(workspace.model.visible, ["reading", "dialog"]);
+  assert.deepEqual(updates.slice(-2), [[undefined, "reading"], [undefined, "dialog"]]);
+  workspace.document.activeElement = {};
+  callbacks.focusin();
+  assert.deepEqual(workspace.protectedIds(), ["dialog"]);
+  assert.deepEqual(workspace.model.visible, ["reading", "dialog"]);
+  dialogOpen = false;
+  callbacks.focusin();
+  assert.deepEqual(workspace.model.visible, []);
+});
+
 test("opening a result keeps it readable across future inventory updates", () => {
   const model = new Model(), receipt = handoff(1, "a"), result = completed("a");
   model.update([result], [receipt]);

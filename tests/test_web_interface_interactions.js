@@ -113,6 +113,24 @@ test("Attention compares severity before pins and time, and keeps actionable blo
   assert.equal(grouping.actionFor(afterReading[6]), null);
 });
 
+test("dismissing a saved stall clears Attention while a new stall or approval can still surface", () => {
+  const stall = thread("agent", {status: "stalled", response_state: "action", needs_attention: true,
+    can_handle_response: true, attention_key: "stall:11", stall_incident: {id: 11}});
+  const acknowledged = {...stall, needs_attention: false, can_handle_response: false, attention_key: null,
+    stall_incident: {id: 11, dismissed: true}};
+  const parent = thread("parent");
+  assert.equal(grouping.actionFor(stall), "dismiss");
+  assert.equal(grouping.actionFor(acknowledged), null);
+  assert.deepEqual(ids(WorkingSet.listSections([parent, {...stall, supervisor_thread_id: "parent"}]).sections.attention), ["agent"]);
+  assert.deepEqual(WorkingSet.listSections([parent, {...acknowledged, supervisor_thread_id: "parent"}]).sections.attention, []);
+  assert.deepEqual(WorkingSet.listSections([acknowledged]).sections.attention, []);
+  const nextStall = {...stall, attention_key: "stall:12", stall_incident: {id: 12}};
+  const approval = {...acknowledged, status: "needs input", needs_attention: true};
+  assert.deepEqual(ids(WorkingSet.listSections([nextStall]).sections.attention), ["agent"]);
+  assert.deepEqual(ids(WorkingSet.listSections([approval]).sections.attention), ["agent"]);
+  assert.equal(grouping.actionFor(approval), null);
+});
+
 test("workspace group membership can span repositories without retargeting session launch", () => {
   const workspace = {cwd: "/features/reporting", name: "Reporting"};
   const group = {id: "reporting", cwd: workspace.cwd};

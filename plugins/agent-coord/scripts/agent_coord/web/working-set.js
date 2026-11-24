@@ -341,7 +341,7 @@ const WorkingSet = (() => {
   const DAY = 86400, IDLE_CAP = 50;
   // Pinned leads the inbox and is shown only when it holds threads; Attention keeps meaning "needs you now".
   const SECTIONS = [["pinned", "Pinned"], ["attention", "Attention"], ["working", "Working"], ["quiet", "Quiet"], ["idle", "Idle"]];
-  const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", "needs-you": "Needs you"};
+  const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", stalled: "Stalled", "needs-you": "Needs you"};
   const PROVIDERS = {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code", muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"};
   // Until the payload carries the user's last message, the latest turn start stands in for it.
   const engagedAt = t => t.last_user_message_at || t.turn_started_at || t.created_at || 0;
@@ -360,18 +360,19 @@ const WorkingSet = (() => {
     if (t.status === "needs input") return "approval";
     if (t.open_ask && t.open_ask.blocking !== false) return "question";
     if (t.response_state === "failed" && !running(t)) return "failed";
+    if (grouping.activeStall(t)) return "stalled";
     if (t.snooze_due) return "reminder";
     const checkpoint = t.checkpoint;
     if (!t.checkpoint_stale && checkpoint?.next_actor === "user" && checkpoint.next_action && (checkpoint.id || 0) > (t.handled_checkpoint_id || 0)) return "needs-you";
     if (grouping.actionFor(t) === "dismiss") return "needs-you";
     return null;
   }
-  const interrupts = request => ["approval", "question", "reminder", "failed"].includes(request);
+  const interrupts = request => ["approval", "question", "reminder", "failed", "stalled"].includes(request);
   // What surfaces from a thread whose ordinary results stay out of Attention:
   // failure, a stall, or a provider permission approval. A supervised agent's
   // questions and checkpoint requests go to its supervisor; only a thread with
   // no supervisor (including a quiet one) raises those to the user itself.
-  const escalates = t => t.status === "stalled" || ["approval", "failed"].includes(requestOf(t));
+  const escalates = t => grouping.activeStall(t) || ["approval", "failed"].includes(requestOf(t));
   function unreadNow(t, request, now) {
     // Unread replies and agent requests leave Attention once read, or after a day.
     const unread = request === "needs-you" ? t.unread || t.unread_result : !request && t.unread_result;
@@ -385,7 +386,7 @@ const WorkingSet = (() => {
     if (request === "approval" || request === "question") return "attention";
     if (request === "reminder") return "attention";
     if (t.attention === "later" || t.snoozed) return "later";
-    if (request === "failed" || t.status === "stalled") return "attention";
+    if (request === "failed" || request === "stalled") return "attention";
     if (running(t)) return "working";
     if (request === "needs-you" && grouping.actionFor(t) === "dismiss") return "attention";
     if (t.quiet) {
@@ -465,7 +466,7 @@ const WorkingSet = (() => {
     sections.attention.sort(grouping.attentionOrder);
     // Pinned: what needs you, then what is working, then the rest by recency.
     const origins = new Map(rows.map(row => [row.thread.thread_id, row.origin]));
-    const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
+    const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed", "stalled"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
     sections.pinned.sort((a, b) => pinOrder(a) - pinOrder(b) ||
       (pinOrder(a) === 0 ? grouping.attentionOrder(a, b) : engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id)));
     for (const key of ["working", "quiet", "idle", "empty"])

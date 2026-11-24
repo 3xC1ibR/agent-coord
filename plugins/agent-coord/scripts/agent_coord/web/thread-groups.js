@@ -19,8 +19,12 @@ const threadGrouping = (() => {
     return value === "discussion" ? "investigation" : phases.some(([key]) => key === value) ? value : "new";
   }
   function phaseLabel(thread) { return phases.find(([key]) => key === phase(thread))[1]; }
+  function activeStall(thread) {
+    return !thread.stall_incident?.dismissed &&
+      (thread.status === "stalled" || thread.attention_key?.startsWith("stall:") === true);
+  }
   function reason(thread) {
-    if (thread.status === "stalled") return {key: "blocked", rank: 0, label: "Stalled"};
+    if (activeStall(thread)) return {key: "blocked", rank: 0, label: "Stalled"};
     if (thread.response_state === "failed") return {key: "blocked", rank: 0, label: "Failed"};
     if (thread.open_ask && thread.open_ask.blocking !== false) return {key: "blocked", ...reasons.blocked};
     if (thread.status === "needs input" || thread.attention_key?.startsWith("requests:"))
@@ -47,8 +51,9 @@ const threadGrouping = (() => {
       !["running", "needs input"].includes(thread.status);
   }
   function actionFor(thread) {
-    if (thread.can_handle_response === false || thread.attention === "archived" || thread.snoozed ||
-        ["running", "needs input"].includes(thread.status) ||
+    if (thread.can_handle_response === false || thread.attention === "archived" || thread.snoozed) return null;
+    if (thread.can_handle_response === true && activeStall(thread)) return "dismiss";
+    if (["running", "needs input"].includes(thread.status) ||
         thread.open_ask && thread.open_ask.blocking !== false || acknowledgedRequest(thread)) return null;
     const items = thread.attention_items;
     const own = Array.isArray(items) ? items.find(item => item.thread_id === thread.thread_id) : null;
@@ -104,7 +109,7 @@ const threadGrouping = (() => {
       closed: threads.filter(thread => thread.attention === "archived").sort(stable),
     };
   }
-  return {awaitsUser, acknowledgedRequest, actionFor, groupThreads, status, phase, phaseLabel, reason, attentionOrder, activityAt, cardAge};
+  return {awaitsUser, acknowledgedRequest, activeStall, actionFor, groupThreads, status, phase, phaseLabel, reason, attentionOrder, activityAt, cardAge};
 })();
 
 if (typeof module !== "undefined") module.exports = threadGrouping;
