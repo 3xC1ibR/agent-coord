@@ -574,16 +574,82 @@ def discover(database, *, timeout=25):
     # A stale discovery payload is never authority to load client code. Use
     # the payload authenticated by this instance, without another status scan.
     return {**record, "payload": status.get("payload"),
-            "client_requests": status.get("client_requests")}
+            "client_requests": status.get("client_requests"), "stable_origin": status.get("stable_origin")}
 
 
-def bootstrap(database, resources, *, start_paused=False, require_confirmation=False, interaction_continuity=False):
+def attach_desktop(database, record, payload, require_confirmation, interaction_continuity, stable_origin):
+    from . import runtime_edge, runtime_gateway_lifecycle as gateway
+    if stable_origin:
+        directory = runtime_directory(database)
+        previous = gateway.status(database, {})
+        if previous.get("interaction_url") and not previous.get("interaction_settled"):
+            return gateway.attach(database, record, payload, require_confirmation)
+        if record.get("stable_origin") == 1:
+            runtime_edge.ensure(database, payload)
+            status = control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
+            return runtime_edge.status_for_desktop(directory, status)
+        # A signed build-98 preflight used the predecessor's automatic
+        # explicit-update authorization. Consume it before attach so that the
+        # predecessor cannot forcibly interrupt its locally owned ACP work.
+        authorization_path = directory / "update-authorization.json"
+        authorization = read_json(authorization_path) if authorization_path.exists() else {}
+        if (str(payload) != record["payload"] and authorization.get("source_instance") == record["instance"]
+                and authorization.get("runtime_version") == read_json(payload / "backend.json")["runtime_version"]):
+            return adopt_predecessor(record, authorization["id"], str(payload))
+        return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
+    if interaction_continuity:
+        return gateway.attach(database, record, payload, require_confirmation)
+    return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
+
+
+def adopt_predecessor(record, request_id, payload):
+    """Authorize the retained build's passive handover with admissions open."""
+    directory = runtime_directory(record["database"])
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", request_id):
+        raise RuntimeError("Invalid predecessor adoption request identity.")
+    status = control(record, "status")
+    if status.get("pending") != payload:
+        # Signed installation is allowed to select a target before it is staged.
+        authorization_path = directory / "update-authorization.json"
+        authorization = read_json(authorization_path) if authorization_path.exists() else {}
+        if (authorization.get("id") != request_id or authorization.get("source_instance") != record["instance"]
+                or authorization.get("runtime_version") != read_json(Path(payload) / "backend.json")["runtime_version"]):
+            raise RuntimeError("The staged predecessor adoption changed.")
+    if (status.get("update") or {}).get("phase") in {"draining", "interrupting", "stopping", "prepared", "trial"}:
+        raise RuntimeError("The preceding runtime update has already begun.")
+    control(record, "cancel-update-authorization")
+    # Reattaching the same pending target cannot clear a confirmation. Select
+    # the authenticated current payload, then stage the newly authorized one.
+    control(record, "attach", payload=record["payload"])
+    intent = {"id": request_id, "phase": "accepted", "source_instance": record["instance"],
+              "target": payload, "previous": record["payload"],
+              "notice": "Waiting for existing provider work to finish before adopting the retained runtime."}
+    atomic_json(directory / "edge-adoption.json", intent)
+    status = control(record, "attach", payload=payload, require_confirmation=False)
+    if status.get("pending") != payload:
+        raise RuntimeError("The retained predecessor did not stage the requested backend.")
+    return {**status, "update": intent}
+
+
+def bootstrap(database, resources, *, start_paused=False, require_confirmation=False,
+              interaction_continuity=False, stable_origin=False):
     database = str(Path(database).expanduser().resolve())
     directory = runtime_directory(database)
     launcher = lock_file(directory / "launch.lock", blocking=True)
     try:
         payload = stage_payload(Path(resources), directory)
         selected_payload = payload
+        if stable_origin:
+            from . import runtime_edge, runtime_update
+            update = runtime_update.read(directory)
+            edge = runtime_edge.read_address(directory)
+            if edge and update and update["phase"] not in runtime_update.TERMINAL:
+                try:
+                    observed = runtime_edge.probe(edge)
+                except (OSError, ValueError):
+                    observed = None
+                if observed and observed.get("status") == "updating":
+                    return runtime_edge.status_for_desktop(directory, observed)
         if interaction_continuity:
             from . import runtime_gateway_lifecycle as gateway, runtime_update
             # A reopening desktop can attach to its stable origin even while
@@ -608,9 +674,8 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
             if record:
                 if start_paused and not control(record, "status")["paused"]:
                     raise RuntimeError("A runtime is already admitting work. Pause it explicitly before maintenance.")
-                if interaction_continuity:
-                    return gateway.attach(database, record, payload, require_confirmation)
-                return control(record, "attach", payload=str(payload), require_confirmation=require_confirmation)
+                return attach_desktop(database, record, payload, require_confirmation,
+                                      interaction_continuity, stable_origin)
             try:
                 owner_fd = lock_file(directory / "owner.lock")
                 break
@@ -646,9 +711,8 @@ def bootstrap(database, resources, *, start_paused=False, require_confirmation=F
                 record = None
             if record:
                 threading.Thread(target=child.wait, daemon=True).start()
-                if interaction_continuity:
-                    return gateway.attach(database, record, selected_payload, require_confirmation)
-                return control(record, "attach", payload=str(selected_payload))
+                return attach_desktop(database, record, selected_payload, require_confirmation,
+                                      interaction_continuity, stable_origin)
             time.sleep(.1)
         raise RuntimeError("Runtime startup timed out; ownership remains reserved until it exits.")
     finally:
@@ -686,6 +750,7 @@ class Runtime:
         self.recovery_running = False
         self.supervised = os.environ.pop("RIBBON_RUNTIME_SUPERVISED", "") == "1"
         self.supervisor_exit_fd = None
+        self.edge_browser_token = secrets.token_urlsafe(32)
 
     def ensure_supervisor(self):
         """Adopt a legacy direct launch only after its durable commit.
@@ -733,7 +798,27 @@ class Runtime:
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
                 "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
                 "runtime_update_prompts": 1, "uninterrupted_updates": 1,
-                "interrupted_provider_continuation": 1, "transfer_admission_probe": 1}
+                "interrupted_provider_continuation": 1, "transfer_admission_probe": 1, "stable_origin": 1}
+
+    def edge_route(self, *, ready=True):
+        from . import runtime_edge
+        if not (self.directory / "edge.json").exists():
+            return
+        runtime_edge.publish(self.directory, {**self.identity(), "status": "serving",
+            "url": f"http://127.0.0.1:{self.server.server_port}/",
+            "pending": str(self.pending) if self.pending else None,
+            "pending_confirmation": bool(self.pending and self.pending_confirmation),
+            "paused": self.server.browser_sessions.admission.paused, "upgrade_error": self.error,
+        }, self.edge_browser_token, ready=ready)
+
+    def fence_edge(self):
+        if (self.directory / "edge.json").exists():
+            self.server.edge_fenced_generation = self.instance
+            self.edge_route(ready=False)
+
+    def reopen_edge(self):
+        self.server.edge_fenced_generation = None
+        self.edge_route()
 
     def update_status(self):
         """Read-only update transaction, blockers and per-conversation recovery."""
@@ -822,9 +907,11 @@ class Runtime:
                     phase="accepted", admission_drain_seconds=time.monotonic() - self.update_drain_started)
                 self.update_drain_started = None
                 sessions.admission.resume()
+                self.reopen_edge()
                 sessions.queue.wake()
                 sessions.dispatch.wake()
             return False
+        self.fence_edge()
         sessions.admission.pause()
         if self.update_requested and self.update_drain_started is None:
             self.update_drain_started = time.monotonic()
@@ -847,6 +934,7 @@ class Runtime:
         if blocked:
             if not self.update_requested:
                 sessions.admission.resume()
+                self.reopen_edge()
                 sessions.queue.wake()
                 sessions.dispatch.wake()
             return False
@@ -1028,7 +1116,7 @@ class Runtime:
     def validate_candidate(self, candidate, *, capacity):
         from . import runtime_update
         try:
-            if capacity:
+            if capacity and sys.platform != "darwin":
                 runtime_update.check_capacity(self.database, self.directory)
             probe = subprocess.run(payload_command(candidate) + ["--runtime-probe"],
                                    env=payload_environment(candidate), capture_output=True, timeout=30)
@@ -1070,6 +1158,7 @@ class Runtime:
                     admission_drain_seconds=time.monotonic() - self.update_drain_started)
             self.update_drain_started = None
             sessions.admission.resume()
+            self.reopen_edge()
             sessions.queue.wake()
             sessions.dispatch.wake()
 
@@ -1092,6 +1181,7 @@ class Runtime:
             return
         if not self.start_recovery():
             sessions.admission.resume()
+            self.reopen_edge()
             sessions.queue.wake()
             sessions.dispatch.wake()
 
@@ -1131,6 +1221,7 @@ class Runtime:
                     self.recovery_running = False
                     if not self.stopping.is_set() and not self.maintenance:
                         sessions.admission.resume()
+                        self.reopen_edge()
                         sessions.queue.wake()
                         sessions.dispatch.wake()
         threading.Thread(target=recover_work, daemon=True, name="runtime-recovery").start()
@@ -1302,8 +1393,10 @@ class Runtime:
                 self.explicit_stop = True
                 sessions.admission.pause()
                 self.stopping.set()
-            elif action != "status":
+            elif action not in {"status", "edge-observe"}:
                 raise RuntimeError("Unknown runtime control action.")
+            if action in {"attach", "pause", "resume", "edge-observe"} and not self.trial and not self.upgrading:
+                self.edge_route()
             return self.status()
 
     def serve(self):
@@ -1314,7 +1407,8 @@ class Runtime:
         from .provider_transport import Client
         store.provider_transport = Client.connect(self.directory / "provider-transport", self.instance)
         # Finish ownership adoption before any automatic worker can claim work.
-        self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True)
+        self.server = make_ui_server(store, host="127.0.0.1", port=0, admission_paused=True,
+                                     csrf_token=self.edge_browser_token)
         # Only the authenticated local update service may hand an already
         # accepted ordinary message to this particular coordinator/database.
         self.server.transfer_receiver = (self.instance, str(self.payload), self.token)
@@ -1361,8 +1455,8 @@ class Runtime:
         atomic_json(self.directory / "discovery.json", record)
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: self.stopping.set())
-        control_thread = threading.Thread(target=controller.serve_forever, daemon=True)
-        ui_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        control_thread = threading.Thread(target=controller.serve_forever, args=(.02,), daemon=True)
+        ui_thread = threading.Thread(target=self.server.serve_forever, args=(.02,), daemon=True)
         control_thread.start()
         ui_thread.start()
         if self.commit_fd is not None:
@@ -1411,6 +1505,7 @@ class Runtime:
                 if update and update["phase"] in runtime_update.TERMINAL and update.get("requires_review"):
                     # A restart preserves the review hold and its explanation.
                     self.hold_for_review()
+            self.edge_route()
         if self.ready_fd is not None:
             os.write(self.ready_fd, b"ready\n")
             os.close(self.ready_fd)
@@ -1462,6 +1557,7 @@ class Runtime:
                                              blocked=uninterrupted_readiness(sessions))
                         elif not self.maintenance:
                             sessions.admission.resume()
+                            self.reopen_edge()
                         continue
                 with self.mutex:
                     if self.stopping.is_set():
@@ -1489,9 +1585,11 @@ class Runtime:
                             candidate = None
                             if not sessions.projection.stopped.is_set():
                                 sessions.admission.resume()
+                                self.reopen_edge()
                             elif sessions.projection.worker is None or not sessions.projection.worker.is_alive():
                                 sessions.projection.start()
                                 sessions.admission.resume()
+                                self.reopen_edge()
                             else:
                                 self.maintenance = True
                             if not self.maintenance:
@@ -1514,9 +1612,11 @@ class Runtime:
                             self.pending = None
                             candidate = None
                             sessions.admission.resume()
+                            self.reopen_edge()
                             continue
                 break
         finally:
+            self.fence_edge()
             controller.shutdown()
             self.server.shutdown()
             control_thread.join()
@@ -1995,6 +2095,7 @@ def main(argv=None):
     parser.add_argument("--runtime-bootstrap", action="store_true")
     parser.add_argument("--runtime-interaction-gateway", action="store_true")
     parser.add_argument("--runtime-interaction-continuity", action="store_true")
+    parser.add_argument("--runtime-stable-origin", action="store_true")
     parser.add_argument("--runtime-serve", action="store_true")
     parser.add_argument("--runtime-supervise", action="store_true")
     parser.add_argument("--runtime-probe", action="store_true")
@@ -2025,7 +2126,8 @@ def main(argv=None):
     if args.runtime_bootstrap:
         print(json.dumps(bootstrap(args.db, args.resources, start_paused=args.runtime_start_paused,
                                    require_confirmation=args.runtime_confirm_updates,
-                                   interaction_continuity=args.runtime_interaction_continuity)), flush=True)
+                                   interaction_continuity=args.runtime_interaction_continuity,
+                                   stable_origin=args.runtime_stable_origin)), flush=True)
         return 0
     if args.runtime_command:
         from . import runtime_update
@@ -2082,7 +2184,8 @@ def main(argv=None):
                     and not (directory / "stop-proof.json").exists() and owner_available(directory)):
                 selected = args.resources or update["target"]
                 print(json.dumps(bootstrap(args.db, selected, start_paused=bool(update.get("requires_review")),
-                                           interaction_continuity=args.runtime_interaction_continuity)), flush=True)
+                                           interaction_continuity=args.runtime_interaction_continuity,
+                                           stable_origin=args.runtime_stable_origin)), flush=True)
                 return 0
             proof_path = directory / "stop-proof.json"
             proof = read_json(proof_path) if proof_path.exists() else {}
@@ -2108,12 +2211,37 @@ def main(argv=None):
                 print(json.dumps({"status": "stopped", "compatible": True}))
                 return 0
             raise RuntimeError("No authenticated runtime is available.")
-        if args.runtime_command == "activate-update" and args.runtime_interaction_continuity:
+        if (args.runtime_command == "status" and args.runtime_stable_origin and record.get("stable_origin") == 1
+                and args.resources):
+            result = control(record, "status")
+            previous = gateway.status(args.db, {}) if args.runtime_interaction_continuity else {}
+            if not previous.get("interaction_url") or previous.get("interaction_settled"):
+                from . import runtime_edge
+                runtime_edge.ensure(args.db, Path(result["payload"]))
+                result = control(record, "edge-observe")
+                result = runtime_edge.status_for_desktop(directory, result)
+            else:
+                result.update(previous)
+            print(json.dumps(result), flush=True)
+            return 0
+        if (args.runtime_command == "activate-update" and args.runtime_stable_origin
+                and record.get("stable_origin") != 1
+                and not (gateway.status(args.db, {}) if args.runtime_interaction_continuity else {}).get("interaction_url")):
+            launcher = lock_file(directory / "launch.lock", blocking=True)
+            try:
+                result = adopt_predecessor(record, **values)
+            finally:
+                os.close(launcher)
+        elif args.runtime_command == "activate-update" and args.runtime_interaction_continuity and not (
+                args.runtime_stable_origin and record.get("stable_origin") == 1):
             result = gateway.activate(record, **values)
         else:
             result = control(record, args.runtime_command, **values)
         if args.runtime_command == "status" and args.runtime_interaction_continuity:
             result = gateway.status(args.db, result)
+        if args.runtime_command == "status" and args.runtime_stable_origin:
+            from . import runtime_edge
+            result = runtime_edge.adoption_status(directory, result)
         if args.runtime_command == "stop":
             for _ in range(300):
                 if confirm_stopped(directory, args.db, record["instance"]):

@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import time
 
 TERMINAL = {"committed", "rolled-back", "failed"}
@@ -42,21 +43,46 @@ def check_capacity(database, directory):
         raise RuntimeError("Insufficient free space for the update rollback snapshot.")
 
 
+def clone_file(source, destination):
+    """Clone on a supported filesystem. Leave capacity checks to the fallback."""
+    if sys.platform != "darwin":
+        return False
+    import ctypes
+    import errno
+    function = ctypes.CDLL(None, use_errno=True).clonefile
+    function.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
+    function.restype = ctypes.c_int
+    if function(os.fsencode(source), os.fsencode(destination), 0) == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in {errno.ENOTSUP, errno.EXDEV, errno.ENOSYS, errno.EINVAL}:
+        return False
+    raise OSError(error, os.strerror(error), destination)
+
+
 def snapshot(database, directory, update):
     from .desktop_runtime import atomic_json, read_json
     backup = directory / "update-backup.sqlite3"
-    check_capacity(database, directory)
     temporary = backup.with_suffix(".temporary")
     temporary.unlink(missing_ok=True)
-    with closing(sqlite3.connect(database)) as source, closing(sqlite3.connect(temporary)) as target:
-        source.backup(target)
+    # Snapshot only after the predecessor exits, while the supervisor holds
+    # the owner lock and the candidate is barred from opening the database.
+    # A busy checkpoint cannot prove that the main file contains the WAL.
+    with closing(sqlite3.connect(database, timeout=.05)) as source:
+        busy, frames, copied = source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        cloned = not busy and frames == copied and clone_file(database, temporary)
+        if not cloned:
+            check_capacity(database, directory)
+            with closing(sqlite3.connect(temporary)) as target:
+                source.backup(target)
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     os.replace(temporary, backup)
     schema = directory / "schema.json"
     atomic_json(directory / "update-backup.json", {
         "id": update["id"], "schema": read_json(schema) if schema.exists() else None})
-    return write(directory, update, phase="prepared", backup=True)
+    return write(directory, update, phase="prepared", backup=True,
+                 backup_method="clonefile" if cloned else "sqlite-backup")
 
 
 def restore(database, directory, update):
@@ -68,7 +94,10 @@ def restore(database, directory, update):
     # The owner lock is held and every trial process has exited. Repeating this
     # replacement after a crash is safe; the original backup remains immutable.
     temporary = Path(database + ".restore")
-    shutil.copyfile(directory / "update-backup.sqlite3", temporary)
+    temporary.unlink(missing_ok=True)
+    backup = directory / "update-backup.sqlite3"
+    if not clone_file(backup, temporary):
+        shutil.copyfile(backup, temporary)
     with temporary.open("rb") as stream:
         os.fsync(stream.fileno())
     for suffix in ("-wal", "-shm"):

@@ -37,6 +37,13 @@ struct RuntimeProcess {
     var isRunning: Bool { kill(processIdentifier, 0) == 0 }
 }
 
+private final class RuntimeHealthDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 final class Backend {
     var process: RuntimeProcess?
     var ready: ((URL) -> Void)?
@@ -61,7 +68,18 @@ final class Backend {
     private var helperResources: URL?
     private var interactionResources: URL?
     private var interactionRequestID: String?
-    private(set) var interactionURL: URL?
+    private var legacyInteractionURL: URL?
+    private var edgeURL: URL?
+    private var edgeObserver: String?
+    var interactionURL: URL? { edgeURL ?? legacyInteractionURL }
+    private let healthSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 1
+        configuration.timeoutIntervalForResource = 2
+        configuration.connectionProxyDictionary = [:]
+        return URLSession(configuration: configuration, delegate: RuntimeHealthDelegate(), delegateQueue: nil)
+    }()
     private var lastWebURL: URL?
     private var timer: Timer?
     private var polling = false
@@ -99,8 +117,9 @@ final class Backend {
         }
         // The serving predecessor may predate interaction continuity. Its
         // control helper must never authorize an upgrade around the gateway.
-        let continuity = arguments.contains("--runtime-interaction-continuity")
-        let gatewayHelper = arguments.contains("--runtime-bootstrap") ? self.resources : (interactionResources ?? self.resources)
+        let continuity = arguments.contains("--runtime-interaction-continuity") || arguments.contains("--runtime-stable-origin")
+        let gatewayHelper = arguments.contains("--runtime-stable-origin") || arguments.contains("--runtime-bootstrap")
+            ? self.resources : (interactionResources ?? self.resources)
         let resources = continuity ? (gatewayHelper ?? retained) : retained
         let python = continuity ? try JSONDecoder().decode(BackendConfiguration.self,
             from: Data(contentsOf: resources.appendingPathComponent("backend.json"))).pythonURL(resources: resources) : defaultPython
@@ -172,7 +191,7 @@ final class Backend {
         stoppedInstance = nil
         worker.async {
             do {
-                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path, "--runtime-confirm-updates", "--runtime-interaction-continuity"])
+                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path, "--runtime-confirm-updates", "--runtime-interaction-continuity", "--runtime-stable-origin"])
                 DispatchQueue.main.async {
                     self.starting = false
                     do { try self.accept(status) }
@@ -192,9 +211,26 @@ final class Backend {
     }
 
     private func accept(_ status: [String: Any]) throws {
-        let wasBound = interactionURL != nil
-        var gatewaySettled = false
-        if status["interaction_url"] != nil {
+        let wasBound = legacyInteractionURL != nil
+        var gatewaySettled = edgeURL != nil
+        if status["edge_url"] != nil {
+            let url = try loopbackURL(status["edge_url"])
+            guard edgeURL == nil || edgeURL == url else {
+                throw Self.failure("The stable local runtime address changed.")
+            }
+            if edgeURL == nil {
+                guard let observer = status["edge_observer"] as? String,
+                      observer.range(of: "^[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil else {
+                    throw Self.failure("Invalid local runtime observer.")
+                }
+                edgeURL = url
+                edgeObserver = observer
+                legacyInteractionURL = nil
+                interactionResources = nil
+                interactionRequestID = nil
+            }
+            gatewaySettled = true
+        } else if status["interaction_url"] != nil {
             let url = try loopbackURL(status["interaction_url"])
             guard let settled = status["interaction_settled"] as? Bool, let path = status["interaction_payload"] as? String,
                   let db = database.map({ URL(fileURLWithPath: $0).resolvingSymlinksInPath() }) else {
@@ -204,12 +240,12 @@ final class Backend {
             let payloads = db.deletingLastPathComponent().appendingPathComponent("." + db.lastPathComponent + ".runtime/payloads")
             guard helper.deletingLastPathComponent().resolvingSymlinksInPath().path == payloads.resolvingSymlinksInPath().path,
                   helper.lastPathComponent.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
-                  interactionURL == nil || interactionURL == url else {
+                  legacyInteractionURL == nil || legacyInteractionURL == url else {
                 throw Self.failure("Interaction gateway identity changed before the previous intake settled.")
             }
             interactionResources = helper
             interactionRequestID = settled ? nil : status["interaction_request_id"] as? String
-            interactionURL = url
+            legacyInteractionURL = url
             gatewaySettled = settled
         } else if wasBound {
             throw Self.failure("The interaction gateway has not confirmed delivery of pending messages.")
@@ -265,10 +301,11 @@ final class Backend {
               let payload = status["payload"] as? String else { throw Self.failure("Invalid runtime handshake.") }
         // A failed connection can hide every web view while the same runtime
         // keeps working. Its next valid handshake must restore those views.
-        let direct = interactionURL == nil || (gatewaySettled && status["status"] as? String == "serving")
-        let destination = direct ? url : interactionURL!
+        let direct = edgeURL == nil
+            && (legacyInteractionURL == nil || (gatewaySettled && status["status"] as? String == "serving"))
+        let destination = edgeURL ?? (direct ? url : legacyInteractionURL!)
         let changed = lastWebURL != destination || (direct && (process == nil || self.instance != instance || completedUpdate))
-        if direct { interactionURL = nil }
+        if direct { legacyInteractionURL = nil }
         // Use retained code even if Sparkle has already replaced the bundle.
         let retained = URL(fileURLWithPath: payload)
         let config = try JSONDecoder().decode(BackendConfiguration.self, from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
@@ -308,9 +345,37 @@ final class Backend {
     private func poll() {
         guard !polling, !stopping else { return }
         polling = true
+        if let edgeURL = edgeURL, let observer = edgeObserver {
+            var request = URLRequest(url: edgeURL.appendingPathComponent("_runtime/health"))
+            request.setValue(observer, forHTTPHeaderField: "X-Ribbon-Runtime-Observer")
+            healthSession.dataTask(with: request) { [weak self] data, response, error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.polling = false
+                    guard !self.stopping else { return }
+                    do {
+                        if let error = error { throw error }
+                        guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                              let data = data, let status = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              status["status"] as? String != "unavailable" else {
+                            throw Self.failure("The local coordinator is unavailable.")
+                        }
+                        if status["status"] as? String == "updating" {
+                            self.failures = 0
+                        } else {
+                            try self.accept(status)
+                        }
+                    } catch {
+                        self.failures += 1
+                        if self.failures == 15 { self.updateStatus?(error.localizedDescription, true) }
+                    }
+                }
+            }.resume()
+            return
+        }
         worker.async {
             do {
-                let status = try self.command(["--runtime-command", "status", "--resources", self.resources!.path, "--runtime-interaction-continuity"])
+                let status = try self.command(["--runtime-command", "status", "--resources", self.resources!.path, "--runtime-interaction-continuity", "--runtime-stable-origin"])
                 DispatchQueue.main.async {
                     self.polling = false
                     do { try self.accept(status) }
@@ -353,7 +418,7 @@ final class Backend {
         expectedUpdate = (request, payload)
         worker.async {
             do {
-                let result = try self.command(["--runtime-command", "activate-update", "--runtime-interaction-continuity"],
+                let result = try self.command(["--runtime-command", "activate-update", "--runtime-interaction-continuity", "--runtime-stable-origin"],
                     input: ["request_id": request, "payload": payload])
                 guard let update = result["update"] as? [String: Any], update["id"] as? String == request else {
                     throw Self.failure("The runtime did not confirm the update request.")

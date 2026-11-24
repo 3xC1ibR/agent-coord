@@ -370,7 +370,8 @@ def _handler(
             self._send(HTTPStatus.OK, content_type + "; charset=utf-8", body, cache_control=policy)
 
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
-                  entity_tag: str | None = None, cache_control: str = "no-store") -> None:
+                  entity_tag: str | None = None, cache_control: str = "no-store",
+                  extra_headers: dict[str, str] | None = None) -> None:
             operation = getattr(self, "_metric_operation", None)
             if operation:
                 processing_ms = (time.monotonic() - self._metric_started) * 1000
@@ -383,6 +384,8 @@ def _handler(
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", cache_control)
+                for name, value in (extra_headers or {}).items():
+                    self.send_header(name, value)
                 if entity_tag:
                     self.send_header("ETag", entity_tag)
                 self.send_header("X-Content-Type-Options", "nosniff")
@@ -928,8 +931,17 @@ def _handler(
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
-                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
-                        "Runtime maintenance is pausing new work. Try again shortly.")})
+                    generation = getattr(self.server, "edge_fenced_generation", None)
+                    if generation:
+                        # The stable edge may retry only this response, which
+                        # proves the request never entered mutation admission.
+                        from .runtime_edge import FENCED_HEADER
+                        data = json.dumps({"error": "Coordinator admission is switching."}).encode()
+                        self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json; charset=utf-8",
+                                   data, extra_headers={FENCED_HEADER: generation})
+                    else:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
+                            "Runtime maintenance is pausing new work. Try again shortly.")})
                     return
                 try:
                     self._admitted_POST()
@@ -1534,6 +1546,7 @@ def make_ui_server(
     browser_sessions: BrowserSessions | None = None,
     remote_access: RemoteAccess | None = None,
     admission_paused: bool = False,
+    csrf_token: str | None = None,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
@@ -1553,7 +1566,8 @@ def make_ui_server(
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions,
+            csrf_token or secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
     except Exception:
         coordination_metrics.close()
         push.close()
