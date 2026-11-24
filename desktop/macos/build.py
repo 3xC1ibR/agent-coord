@@ -177,6 +177,7 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
         for name in modules:
             scripts.append((web / name).read_text())
             index = index.replace(f'  <script src="/{name}" defer></script>\n', "")
+            index = index.replace(f'  <link rel="preload" as="script" href="/{name}" data-startup>\n', "")
         (web / "app.js").write_text("\n;\n".join(scripts + [(web / "app.js").read_text()]))
         index = index.replace('  <link rel="stylesheet" href="/html-preview.css">\n', "")
         (web / "index.html").write_text(index)

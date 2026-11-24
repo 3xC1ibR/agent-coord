@@ -160,6 +160,7 @@ class DesktopPackagingTests(unittest.TestCase):
             index, application = (web / "index.html").read_text(), (web / "app.js").read_text()
             for name in ("html-preview.js", "response-actions.js", "permission-menu.js"):
                 self.assertNotIn(f'src="/{name}"', index)
+                self.assertNotIn(f'href="/{name}"', index)
                 self.assertIn((build.SCRIPTS / "agent_coord/web" / name).read_text(), application)
             self.assertNotIn('href="/html-preview.css"', index)
             self.assertIn((build.SCRIPTS / "agent_coord/web/html-preview.css").read_text(), (web / "styles.css").read_text())
