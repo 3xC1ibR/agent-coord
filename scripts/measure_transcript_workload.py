@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from contextlib import closing, ExitStack
+import hashlib
 import inspect
 import json
 import os
@@ -82,13 +83,14 @@ def gates(report):
     if report['search']['indexed'] < 1: failures.append('isolated search made no progress')
     stream = report['streaming']
     if stream['turns'] != 10 or stream['projected_deltas'] < 10: failures.append('ten streaming turns not observed')
-    if (stream['state_commits'] or stream['transport_changes'] or
+    if (stream['state_data_version_changes'] or stream['transport_changes'] or
             stream.get('state_write_statements', 0) or stream.get('transport_write_statements', 0)): failures.append('SQLite writes during streaming deltas')
     return failures
 
 
 def measure(seconds=15, threads=2000, turns=350, rounds=10):
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=Path(__file__).resolve().parents[1], text=True).strip()
+    harness_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     setup_start = time.monotonic()
     errors = []
     with tempfile.TemporaryDirectory(prefix='transcript_workload_') as directory, ExitStack() as cleanup:
@@ -207,7 +209,7 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                     for item in sessions.histories[thread]['turns'][-1]['items'])
                     for thread in streams)
                 stream_result = {'turns': observed, 'projected_deltas': projected,
-                    'state_commits': observer.execute('PRAGMA data_version').fetchone()[0] - before_state,
+                    'state_data_version_changes': observer.execute('PRAGMA data_version').fetchone()[0] - before_state,
                     'transport_changes': journal.db.total_changes - before_transport,
                     'state_write_statements': write_statements['state'],
                     'transport_write_statements': write_statements['transport'],
@@ -277,7 +279,7 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                 'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'durable_coverage': search.coverage() if search else None},
                 'streaming': stream_result, 'error_count': len(errors), 'errors': errors[:20],
                 'throughput_per_second': {kind: round(len(values) / elapsed, 2) for kind, values in samples.items()},
-                'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': revision},
+                'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': revision, 'harness_sha256': harness_sha256},
                 'coverage': {'http_recent_open': True, 'durable_composer_receipt': True, 'retained_transport_journal': True, 'live_provider_process': False,
                              'search_unavailable': search is None, 'search_http_query': False, 'search_async_finalized_indexing': search is not None, 'streaming_interval': 'delta-only interval precedes mixed HTTP/finalization interval'}}
             report['budget_failures'] = gates(report)

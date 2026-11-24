@@ -14,13 +14,13 @@ class TranscriptWorkloadTests(unittest.TestCase):
                 'send_accept': {'count': 5, 'p95_ms': 1}, 'writer_hold': {'p95_ms': 1},
                 'admission_timeouts': 0, 'durable_receipts': 5, 'finalized_writes': 2,
                 'seeded': {'threads': 2, 'turns': 6}, 'workload': {'seconds': 1, 'threads': 2, 'turns_per_thread': 3}, 'search': {'indexed': 2, 'database_isolated': True}, 'streaming': {'turns': 10, 'projected_deltas': 100,
-                'state_commits': 0, 'transport_changes': 0}}
+                'state_data_version_changes': 0, 'transport_changes': 0}}
 
     def test_each_required_outcome_is_gated(self):
         baseline = self.report()
         self.assertEqual(gates(baseline), [])
         for section, field, value in [('open', 'p95_ms', 15), ('send_accept', 'p95_ms', 15),
-                ('writer_hold', 'p95_ms', 2), ('streaming', 'state_commits', 1),
+                ('writer_hold', 'p95_ms', 2), ('streaming', 'state_data_version_changes', 1),
                 ('streaming', 'transport_changes', 1), ('streaming', 'turns', 9),
                 ('streaming', 'projected_deltas', 0), ('search', 'indexed', 0),
                 ('open', 'count', 0), ('seeded', 'turns', 5)]:
@@ -38,6 +38,11 @@ class TranscriptWorkloadTests(unittest.TestCase):
     def test_small_real_fixture_progress_and_receipts(self):
         report = measure(seconds=1, threads=2, turns=3, rounds=2)
         self.assertEqual(report['error_count'], 0, report['errors'])
+        self.assertEqual(report['seeded'], {'threads': 2, 'turns': 6})
+        if report['search']['available']:
+            self.assertTrue(report['search']['database_isolated'])
+            self.assertGreater(report['search']['indexed'], 0)
+            self.assertEqual(report['search']['durable_coverage']['saved_histories'], 2)
         self.assertGreater(report['open']['count'], 0)
         self.assertGreater(report['send_accept']['count'], 0)
         self.assertEqual(report['durable_receipts'], report['send_accept']['count'])
@@ -45,7 +50,7 @@ class TranscriptWorkloadTests(unittest.TestCase):
         self.assertEqual(report['streaming']['projected_deltas'], 20)
         self.assertEqual(report['streaming']['turns'], 10)
         # Hardware latency is measured by --check, never asserted by a unit fixture.
-        if report['streaming']['state_commits'] or report['streaming']['transport_changes']:
+        if report['streaming']['state_data_version_changes'] or report['streaming']['transport_changes']:
             self.assertIn('SQLite writes during streaming deltas', report['budget_failures'])
         if not report['search']['available']:
             self.assertIn('isolated search made no progress', report['budget_failures'])
