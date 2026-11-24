@@ -139,13 +139,18 @@ class HistoryResponseTests(unittest.TestCase):
             db.executemany("""INSERT INTO messages(sender_session_id,recipient_session_id,body,created_at,thread_id,classification)
                 VALUES (?,?,'unrelated',1,?,'informational')""",
                 [(self.identity, self.identity, "unrelated-" + str(i)) for i in range(4000)])
+            # Match an upgraded database: this later-added recipient index is
+            # newer than the exchange index, unlike fresh schema creation.
+            db.execute("DROP INDEX messages_recipient_sequence_idx")
+            db.execute("CREATE INDEX messages_recipient_sequence_idx ON messages(recipient_session_id,id)")
         # Bound VM work, not wall time, so host contention cannot excuse a
         # full scan. The source query exceeds this bound on the same fixture.
         import sqlite3
         db = sqlite3.connect(self.store.database_path)
         try:
             db.set_progress_handler(lambda: 1, 10000)
-            row = db.execute(_TIMELINE_ROWS + " WHERE m.id=?", (identity,)).fetchone()
+            row = db.execute(_TIMELINE_ROWS + " WHERE m.id IN (SELECT value FROM json_each(?))",
+                             (json.dumps([identity]),)).fetchone()
             self.assertIsNotNone(row)
             self.assertIsNone(row[-1])
         finally:
