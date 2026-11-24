@@ -1788,8 +1788,14 @@ def run_and_clean_up(runner):
         # Residual source free pages and every rollback copy are local-only.
         # Preserve all existing teardown/receipt failures, then remove the root
         # even when an unsuccessful gate would normally retain diagnostics.
-        with cleanup_on_exit(runner.root):
-            return _run_and_clean_up(runner)
+        try:
+            with cleanup_on_exit(runner.root) as cleanup:
+                runner.report['private_workspace_cleanup'] = cleanup
+                return _run_and_clean_up(runner)
+        finally:
+            # Persist the reaped guardian's exit status after its context has
+            # verified removal, including when the qualification itself fails.
+            runner.persist()
     return _run_and_clean_up(runner)
 
 

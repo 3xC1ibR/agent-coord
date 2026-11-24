@@ -312,20 +312,27 @@ def _guardian_identity(root, device, inode):
     return _private_root(root)
 
 
-def _guardian_main(root, pipe_fd, ready_fd, device, inode):
-    root = _guardian_identity(Path(root), device, inode)
+def _guardian_main(pipe_fd, ready_fd):
     if not stat.S_ISFIFO(os.fstat(pipe_fd).st_mode):
         return 2
-    os.write(ready_fd, b'ready\n')
-    os.close(ready_fd)
-    try:
-        while os.read(pipe_fd, 64):
-            pass
-    finally:
-        os.close(pipe_fd)
-        if root.exists():
-            _guardian_identity(root, device, inode)
-            shutil.rmtree(root)
+    # Initialization and liveness share an inherited pipe. Keeping the root
+    # out of argv prevents the gate's strict command-line ownership scan from
+    # mistaking its cleanup supervisor for a backend left behind by Stop.
+    with os.fdopen(pipe_fd, 'rb') as pipe:
+        configuration = pipe.readline(65537)
+        if not configuration.endswith(b'\n') or len(configuration) > 65536:
+            return 2
+        root, device, inode = json.loads(configuration)
+        root = _guardian_identity(Path(root), device, inode)
+        os.write(ready_fd, b'ready\n')
+        os.close(ready_fd)
+        try:
+            while pipe.read(64):
+                pass
+        finally:
+            if root.exists():
+                _guardian_identity(root, device, inode)
+                shutil.rmtree(root)
     return 0
 
 
@@ -345,9 +352,11 @@ def cleanup_on_exit(root):
     ready_read, ready_write = os.pipe()
     guardian = None
     previous = None
+    receipt = {'guardian_pid': None, 'ready': False, 'exit_status': None,
+               'root_removed': False, 'verified': False}
     try:
         guardian = subprocess.Popen([sys.executable, '-I', '-B', str(Path(__file__).resolve()),
-            '--cleanup-guardian', str(root), str(pipe_read), str(ready_write), str(info.st_dev), str(info.st_ino)],
+            '--cleanup-guardian', str(pipe_read), str(ready_write)],
             pass_fds=(pipe_read, ready_write), close_fds=True, start_new_session=True,
             env={'PATH': '/usr/bin:/bin', 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1'},
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -355,17 +364,22 @@ def cleanup_on_exit(root):
         pipe_read = None
         os.close(ready_write)
         ready_write = None
+        receipt['guardian_pid'] = guardian.pid
+        configuration = memoryview(json.dumps([str(root), info.st_dev, info.st_ino]).encode() + b'\n')
+        while configuration:
+            configuration = configuration[os.write(pipe_write, configuration):]
         ready, _, _ = select.select([ready_read], [], [], 10)
         if not ready or os.read(ready_read, 32) != b'ready\n':
             raise FixturePreparationError('Private workspace cleanup guardian did not become ready')
         os.close(ready_read)
         ready_read = None
+        receipt['ready'] = True
         if threading.current_thread() is threading.main_thread():
             previous = signal.getsignal(signal.SIGTERM)
             def terminate(number, frame):
                 raise SystemExit(128 + number)
             signal.signal(signal.SIGTERM, terminate)
-        yield
+        yield receipt
     finally:
         try:
             if root.exists():
@@ -384,7 +398,9 @@ def cleanup_on_exit(root):
                     # Its sole job remains cleanup; never stop it while files
                     # could still contain residual source pages.
                     raise FixturePreparationError('Private workspace cleanup guardian did not finish') from None
-                if status or root.exists():
+                receipt.update(exit_status=status, root_removed=not root.exists())
+                receipt['verified'] = receipt['ready'] and status == 0 and receipt['root_removed']
+                if not receipt['verified']:
                     raise FixturePreparationError('Private workspace cleanup could not be verified')
 
 
@@ -526,7 +542,7 @@ def main():
 
 if __name__ == '__main__':
     if sys.argv[1:2] == ['--cleanup-guardian']:
-        if len(sys.argv) != 7:
+        if len(sys.argv) != 4:
             raise SystemExit(2)
-        raise SystemExit(_guardian_main(sys.argv[2], *map(int, sys.argv[3:])))
+        raise SystemExit(_guardian_main(*map(int, sys.argv[2:])))
     raise SystemExit(main())

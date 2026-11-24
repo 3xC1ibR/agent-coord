@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import closing
 import hashlib
 import ctypes
+import json
 import os
 from pathlib import Path
 import signal
@@ -11,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -228,6 +230,17 @@ class PrivateFixtureTests(unittest.TestCase):
         self.assertFalse(root.exists())
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.before)
 
+    def test_removed_root_does_not_hide_unexpected_guardian_failure(self):
+        root = Path(tempfile.mkdtemp(prefix='private-upgrade-fixture-', dir=self.root))
+        with self.assertRaisesRegex(fixture.FixturePreparationError, 'could not be verified'):
+            with fixture.cleanup_on_exit(root) as cleanup:
+                self.prepare(root)
+                os.kill(cleanup['guardian_pid'], signal.SIGKILL)
+        self.assertFalse(root.exists())
+        self.assertEqual(cleanup['exit_status'], -signal.SIGKILL)
+        self.assertTrue(cleanup['root_removed'])
+        self.assertFalse(cleanup['verified'])
+
     def test_sigterm_runs_private_workspace_cleanup(self):
         root = Path(tempfile.mkdtemp(prefix='private-upgrade-fixture-', dir=self.root))
         code = """import sys,time
@@ -363,7 +376,7 @@ class SignedFixtureInjectionTests(unittest.TestCase):
     def test_opt_in_failed_gate_still_deletes_private_residual_root(self):
         import validate_signed_runtime_responsiveness as gate
         root = Path(tempfile.mkdtemp(prefix='private-upgrade-fixture-', dir=self.root))
-        run = SimpleNamespace(root=root, private_apfs_fixture=True)
+        run = SimpleNamespace(root=root, private_apfs_fixture=True, report={}, persist=lambda: None)
         def refused(runner):
             self.prepare(root)
             (root / 'rollback.sqlite3').write_bytes(b'private residual copy')
@@ -372,6 +385,68 @@ class SignedFixtureInjectionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'gate failure'):
                 gate.run_and_clean_up(run)
         self.assertFalse(root.exists())
+
+    def validation_cleanup(self, failing):
+        import runtime_upgrade_validation as validation
+        import validate_signed_runtime_responsiveness as gate
+
+        output = self.root / 'cleanup-receipt.json'
+        run = validation.Validation(output, 1, 'idle-control')
+        run.root.chmod(0o700)
+        self.addCleanup(lambda: fixture.shutil.rmtree(run.root, ignore_errors=True))
+        run.private_apfs_fixture, run.candidate_only = True, False
+        run.report.update(passed=not failing, violations=[])
+        run.persist = lambda: output.write_text(json.dumps(run.report))
+        child = None
+        reaper = None
+
+        def execute():
+            nonlocal child, reaper
+            self.prepare(run.root)
+            (run.root / 'rollback.sqlite3').write_bytes(b'private residual rollback')
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(run.root)],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Validation proves child exit with kill(pid, 0). Reap the child as
+            # an ordinary fixture parent would, without changing that check.
+            reaper = threading.Thread(target=child.wait)
+            reaper.start()
+            if failing:
+                raise RuntimeError('qualification deliberately failed')
+
+        run.execute = execute
+        try:
+            if failing:
+                with self.assertRaisesRegex(RuntimeError, 'qualification deliberately failed'):
+                    gate.run_and_clean_up(run)
+            else:
+                self.assertEqual(gate.run_and_clean_up(run), 0)
+            saved = json.loads(output.read_text())
+            cleanup = saved['private_workspace_cleanup']
+            self.assertEqual(cleanup['exit_status'], 0)
+            self.assertTrue(cleanup['verified'])
+            self.assertTrue(cleanup['root_removed'])
+            self.assertNotEqual(child.pid, cleanup['guardian_pid'])
+            self.assertNotIn(str(cleanup['guardian_pid']), saved['leftover_processes'])
+            self.assertIn(str(child.pid), saved['leftover_processes'])
+            self.assertFalse(saved['leftover_processes'][str(child.pid)]['alive_after_cleanup'])
+            self.assertEqual(child.returncode, -signal.SIGTERM)
+            self.assertFalse(run.root.exists())
+            self.assertEqual(saved['passed'], not failing)
+            self.assertEqual(saved['violations'], [])
+            if failing:
+                self.assertEqual(saved['execution_error']['type'], 'RuntimeError')
+            self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.before)
+        finally:
+            if child is not None and child.poll() is None:
+                child.kill()
+            if reaper is not None:
+                reaper.join(timeout=5)
+
+    def test_real_validation_close_preserves_guardian_and_terminates_owned_child(self):
+        self.validation_cleanup(False)
+
+    def test_real_validation_close_preserves_failed_gate_and_verified_guardian_exit(self):
+        self.validation_cleanup(True)
 
 
 class DefaultInjectionTests(unittest.TestCase):
