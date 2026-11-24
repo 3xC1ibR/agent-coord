@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager, nullcontext
 from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler
 import json
@@ -248,6 +248,33 @@ class CoordinatorEdgeTests(unittest.TestCase):
     def test_origin_and_pending_approval_survive_three_coordinator_changes(self):
         self.exercise_mixed_origin(range(2, 5))
 
+    @contextmanager
+    def browser_traffic(self, address, threads, module):
+        fixture = self.fixture
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Browser qualification requires Node and Playwright")
+        script = Path(__file__).with_name("fixtures") / "runtime_edge_browser.mjs"
+        (fixture.root / "edge-browser-input.json").write_text(json.dumps({"address": address, "threads": list(threads)}))
+        errors = fixture.root / "edge-browser.log"
+        with errors.open("w") as log, subprocess.Popen([node, str(script), str(fixture.root), module],
+                stdout=log, stderr=log, cwd=fixture.root) as observer:
+            def ready():
+                if observer.poll() is not None:
+                    self.fail("Browser stopped during initialization: " + errors.read_text())
+                return (fixture.root / "edge-browser-ready").exists()
+
+            try:
+                fixture.wait(ready, timeout=15)
+                yield
+            finally:
+                (fixture.root / "edge-browser-stop").touch()
+                try:
+                    observer.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    observer.kill()
+                    observer.wait(timeout=5)
+            self.assertEqual(observer.returncode, 0, errors.read_text())
+
     def exercise_mixed_origin(self, builds):
         fixture = self.fixture
         source = fixture.resources
@@ -321,10 +348,14 @@ class CoordinatorEdgeTests(unittest.TestCase):
             self.fail("Coordinator switches exceeded the continuous workload time limit")
 
         cutovers, components, switches = [], [], []
-        with ThreadPoolExecutor(max_workers=32) as pool:
-            traffic = pool.submit(schedule, pool)
+        browser_module = os.environ.get("RIBBON_EDGE_PLAYWRIGHT")
+        browser_origin = time.time() - time.monotonic()
+        traffic_context = self.browser_traffic(address, streams, browser_module) if browser_module else nullcontext()
+        with traffic_context, ThreadPoolExecutor(max_workers=32) as pool:
+            traffic = None if browser_module else pool.submit(schedule, pool)
             try:
-                self.assertTrue(started.wait(2))
+                if traffic:
+                    self.assertTrue(started.wait(2))
                 for build, resources in resources_by_build.items():
                     began = time.monotonic()
                     staged = self.launch(resources, "--runtime-confirm-updates")
@@ -364,7 +395,25 @@ class CoordinatorEdgeTests(unittest.TestCase):
                 time.sleep(.35)  # Include resumed traffic at the same offered rate.
             finally:
                 stop.set()
-            samples = traffic.result(timeout=6)
+            if traffic:
+                samples = traffic.result(timeout=6)
+
+        browser_documents = None
+        if browser_module:
+            browser = json.loads((fixture.root / "edge-browser-result.json").read_text())
+            self.assertEqual(browser["errors"], [])
+            browser_documents = browser["documentCounts"]
+            self.assertEqual(browser_documents, {
+                **{f"composer-{index}": 1 for index in range(len(streams))}, "opening-0": 1, "opening-1": 1})
+            samples = []
+            for entry in browser["activity"]:
+                thread = entry["thread"]
+                turn = {"turnId": entry.get("activeTurn")}
+                value = {"acceptedMessage": turn} if entry["kind"] == "send" else {"activeTurn": entry["activeTurn"]}
+                timings = {"started_at": entry["began"] / 1000 - browser_origin, "total_ms": entry["elapsed"]}
+                if entry.get("coordinatorMs") is not None:
+                    timings["coordinator_ms"] = entry["coordinatorMs"]
+                samples.append((entry["status"], json.dumps(value).encode(), entry.get("body"), thread, streams[thread], timings))
 
         failures = [(code, response.decode()) for code, response, *_ in samples if code != 200]
         self.assertEqual(failures, [])
@@ -397,11 +446,11 @@ class CoordinatorEdgeTests(unittest.TestCase):
         deliveries = [(row["pid"], call["threadId"], call["expectedTurnId"], call["input"][0]["text"])
                       for row in wire() if row["kind"] == "input" and row["message"].get("method") == "turn/steer"
                       for call in (row["message"]["params"],)]
-        self.assertCountEqual(deliveries, [(original[thread][0], thread, original[thread][1], message)
-                                          for message, (thread, _, _) in sent_messages.items()])
+        self.assertCountEqual(deliveries, [(original[thread][0], thread, original[thread][1], body["message"])
+                                          for thread, _, body in sent_messages.values()])
         with closing(sqlite3.connect(fixture.database.as_uri() + "?mode=ro", uri=True)) as database:
             rows = database.execute("SELECT request_id, thread_id, state FROM browser_submission_receipts "
-                                    "WHERE request_id LIKE 'steer-%'").fetchall()
+                                    "WHERE json_extract(payload_json, '$.body.message') LIKE 'steer-%'").fetchall()
         self.assertCountEqual(rows, [(message, thread, "completed")
                                      for message, (thread, _, _) in sent_messages.items()])
         for cutover in cutovers:
@@ -415,7 +464,7 @@ class CoordinatorEdgeTests(unittest.TestCase):
                 "provider_deliveries": len(deliveries), "http_failures": 0, "streams": len(streams),
                 "send_p99_ms": send_p99, "fence_send_p99_ms": fence_send_p99,
                 "fence_sends": len(fence_sends), "slowest_sends": send_samples[-5:],
-                "offered": offered, "phases": components}, indent=2) + "\n")
+                "offered": offered, "phases": components, "browser_documents": browser_documents}, indent=2) + "\n")
         if os.environ.get("RIBBON_REQUIRE_EDGE_BUDGET") == "1":
             self.assertLess(max(cutovers), 250, f"Coordinator handover milliseconds: {cutovers}")
             self.assertLess(max(send_p99, fence_send_p99), 150, "Send latency includes waiting for coordinator admission")
