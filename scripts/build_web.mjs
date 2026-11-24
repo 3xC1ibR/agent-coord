@@ -38,8 +38,10 @@ async function compile(name) {
 }
 
 function program() {
-  const parts = [], sections = [];
-  let line = 0;
+  // esbuild omits each module's implicit strict directive in ESM output.
+  // The published program executes as a classic script on retained clients.
+  const parts = ['"use strict";\n'], sections = [];
+  let line = 1;
   for (const name of order) {
     const input = inputs.get(name);
     parts.push(input.code, ";\n");

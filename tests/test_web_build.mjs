@@ -36,7 +36,7 @@ test("the workspace watch publishes matching assets and indexed development maps
       write("index.html", '<link href="/dist/app.css"><script src="/dist/app.js"></script>'),
       write("web-entry.js", 'import "./definitions.js";\nimport "./main.js";\n'),
       write("definitions.js", 'const month = "November";'),
-      write("main.js", 'globalThis.displayed = month;'),
+      write("main.js", 'globalThis.displayed = month; globalThis.receiver = (function () { return this; })();'),
       write("web-entry.css", '@import "./palette.css";'),
       write("palette.css", 'body { color: red }'),
     ]);
@@ -48,6 +48,7 @@ test("the workspace watch publishes matching assets and indexed development maps
     const first = await published(), context = {};
     vm.runInNewContext(first.js.code, context);
     assert.equal(context.displayed, "November");
+    assert.equal(context.receiver, undefined, "compiled modules retain strict function calls");
     assert.deepEqual(first.js.map.sections.map(section => section.map.sources[0]), ["definitions.js", "main.js"]);
     for (const section of first.js.map.sections) {
       const line = first.js.code.split("\n")[section.offset.line];
