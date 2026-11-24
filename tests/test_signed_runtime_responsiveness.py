@@ -13,6 +13,38 @@ from validate_signed_runtime_responsiveness import SignedUpgrade, diagnostic_rea
 
 
 class SignedAcceptanceGateTests(unittest.TestCase):
+    def test_browser_phase_change_preserves_loading_fixture_and_blocks_other_origins(self):
+        import subprocess
+
+        source = (Path(__file__).resolve().parents[1] / "scripts" /
+                  "observe_signed_conversation_interactions.mjs").read_text()
+        code = source[source.index("const context ="):source.index("const interval =")]
+        probe = r"""
+const assert = require('node:assert/strict');
+let configuration = {url:'http://127.0.0.1:41001/', visit_origin:'http://127.0.0.1:41003'};
+let handler;
+const context = {route:async (_pattern, callback) => {handler = callback;}};
+const browser = {newContext:async () => context};
+const state = () => configuration;
+(async () => {
+  await new Function('browser','state', 'return (async () => {' + process.argv[1] + '})()')(browser,state);
+  const request = (url, method='GET') => handler({request:() => ({url:() => url,method:() => method}),
+    continue:() => 'allowed',abort:() => 'blocked'});
+  assert.equal(request(configuration.url), 'allowed');
+  configuration = {url:'http://127.0.0.1:41002/',visit_origin:'http://127.0.0.1:41004'};
+  assert.equal(request(configuration.url), 'allowed');
+  assert.equal(request('http://127.0.0.1:41001/config'), 'allowed');
+  assert.equal(request('http://127.0.0.1:41003/api/browser/activity/events','POST'), 'allowed');
+  assert.equal(request('http://127.0.0.1:41003/config'), 'blocked');
+  assert.equal(request('http://127.0.0.1:41004/api/browser/activity/events?token=x','POST'), 'blocked');
+  assert.equal(request('http://127.0.0.1:41004/api/browser/activity/events'), 'blocked');
+  assert.equal(request('http://127.0.0.1:41999/config'), 'blocked');
+  assert.equal(request('https://example.invalid/'), 'blocked');
+})().catch(error => {console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(['node', '-e', probe, code], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_offline_snapshot_readers_close_before_the_upgrade(self):
         import validate_signed_runtime_responsiveness as gate
 

@@ -13,13 +13,19 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 const log = record => appendFileSync(output, JSON.stringify(record) + "\n", {mode: 0o600});
 const browser = await chromium.launch({headless: true});
 const context = await browser.newContext();
+// A phase change selects future navigations; documents already loading retain
+// access to their fixture until the observer closes them.
+const fixtureOrigins = new Set();
+const visitOrigins = new Set();
 await context.route("**/*", route => {
   const u = new URL(route.request().url());
   const active = state();
-  const visit = u.origin === active.visit_origin && u.pathname === "/api/browser/activity/events" &&
+  fixtureOrigins.add(new URL(active.url).origin);
+  if (active.visit_origin) visitOrigins.add(active.visit_origin);
+  const visit = visitOrigins.has(u.origin) && u.pathname === "/api/browser/activity/events" &&
     !u.search && ["POST", "OPTIONS"].includes(route.request().method());
   return u.protocol === "http:" && u.hostname === "127.0.0.1" &&
-    (u.origin === new URL(active.url).origin || visit) ? route.continue() : route.abort();
+    (fixtureOrigins.has(u.origin) || visit) ? route.continue() : route.abort();
 });
 const interval = 250;
 const pageFor = async () => {
