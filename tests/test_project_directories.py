@@ -96,20 +96,42 @@ class DirectoryProjectTests(unittest.TestCase):
         self.assertEqual([v['id'] for v in views.list() if v['cwd'] == str(self.root)], [later['id'], a['id']])
         self.assertEqual(next(v for v in views.list() if v['id'] == b['id'])['position'], b['position'])
 
-    def test_search_all_and_current_stay_inside_exact_project_after_cd(self):
+    def test_search_workspace_filters_preserve_membership_after_cd(self):
+        for directory in (self.root, self.child):
+            (directory / '.git').mkdir()
         parent, child = self.create(self.root), self.create(self.child)
         self.store.threads.update(parent, title='Shared keyword parent')
         self.store.threads.update(child, title='Shared keyword child')
         self.sessions.send(parent, {'message': '/cd ' + str(self.child)})
+        moved = self.sessions.work_thread(parent)
+        self.assertEqual(moved['cwd'], str(self.child))
+        self.assertEqual(moved['project_cwd'], str(self.root))
         server = make_ui_server(self.store, port=0, browser_sessions=self.sessions)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         self.addCleanup(server.server_close)
         self.addCleanup(worker.join)
         self.addCleanup(server.shutdown)
+
+        def search(scope, **filters):
+            query = urllib.parse.urlencode({'q': 'keyword', 'scope': scope, **filters})
+            with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/browser/search?{query}') as response:
+                return [item['thread_id'] for item in json.load(response)['items']]
+
         for scope in ('all', 'current'):
-            for directory, expected in ((self.root, [parent]), (self.child, [child]), ('', [])):
-                query = urllib.parse.urlencode({'q': 'keyword', 'scope': scope, 'project_cwd': str(directory)})
-                with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/browser/search?{query}') as response:
-                    result = json.load(response)
-                self.assertEqual([item['thread_id'] for item in result['items']], expected)
+            with self.subTest(scope=scope):
+                self.assertEqual(search(scope, project_cwd=str(self.root)), [parent])
+                self.assertEqual(search(scope, project_cwd=str(self.child)), [child])
+                self.assertCountEqual(search(scope, project_cwd=''), [parent, child])
+                self.assertCountEqual(search(scope), [parent, child])
+
+        group = self.store.threads.organization.create_project('Feature', str(self.root))
+        self.store.threads.update(child, project_id=group['id'])
+        member = self.sessions.work_thread(child)
+        self.assertEqual(member['repository_root'], str(self.child))
+        self.assertEqual(member['cwd'], str(self.child))
+        self.assertEqual(member['project_launch_cwd'], str(self.root))
+        self.assertEqual(search('current', project_cwd=str(self.root), project=group['id']), [child])
+        other_folder = self.root / 'other'
+        other_folder.mkdir()
+        self.assertEqual(search('current', project_cwd=str(other_folder), project=group['id']), [child])

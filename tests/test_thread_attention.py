@@ -97,16 +97,25 @@ class ThreadAttentionTests(unittest.TestCase):
         self.assertEqual(result["response_state"], "reply")
         self.assertTrue(result["needs_attention"])
         self.assertTrue(result["unread_result"])
+        self.assertEqual(result["seen_completion_id"], 0)
+        self.assertEqual(result["handled_completion_id"], 0)
+        completion = result["turn_completion"]
         read = self.sessions.update_work_thread("terminal", {
             "seen": True, "seen_checkpoint_id": checkpoint["id"],
-            "seen_completion_id": result["turn_completion"]["id"],
+            "seen_completion_id": completion["id"],
         })
-        self.assertFalse(read["unread"])
-        self.assertEqual(read["response_state"], "reply")
-        self.assertTrue(read["needs_attention"])
-        self.assertFalse(self.sessions.update_work_thread("terminal", {
+        older_receipt = self.sessions.update_work_thread("terminal", {
             "seen": True, "seen_checkpoint_id": 0, "seen_completion_id": 0,
-        })["unread"], "an older receipt must not regress read state")
+        })
+        for projection in (read, older_receipt):
+            self.assertEqual(projection["response_state"], "available")
+            self.assertFalse(projection["needs_attention"])
+            self.assertFalse(projection["unread"])
+            self.assertFalse(projection["unread_result"])
+            self.assertEqual(projection["turn_completion"], completion)
+            for receipt in ("seen", "handled"):
+                self.assertEqual(projection[f"{receipt}_checkpoint_id"], checkpoint["id"])
+                self.assertEqual(projection[f"{receipt}_completion_id"], completion["id"])
 
     def test_new_question_after_finished_task_is_a_new_conversation_turn(self):
         self.start()

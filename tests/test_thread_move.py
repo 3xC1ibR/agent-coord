@@ -210,12 +210,39 @@ class ThreadMoveTests(unittest.TestCase):
         thread = self.create('claude')
         self.sessions.send(thread, {'message': 'First'})
         connection = self.sessions.claude.connections[thread]
-        connection.callback({'type': 'result', 'subtype': 'success'})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
+        # The conversation mirror can finish before the durable move guard clears.
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def hold_persistence():
+            entered.set()
+            release.wait(10)
+
+        self.sessions.persistence.submit(hold_persistence, key=thread)
+        try:
+            self.assertTrue(entered.wait(3))
+            connection.callback({'type': 'result', 'subtype': 'success'})
+            detail = self.sessions.read(thread)
+            self.assertFalse(detail['running'])
+            self.assertEqual(detail['thread']['turns'][-1]['status'], 'completed')
+            self.assertTrue(self.store.get_session(thread)['turn_active'])
+            self.assertEqual(self.sessions.work_thread(thread)['status'], 'running')
+            with self.assertRaisesRegex(CoordinationError, 'running turn'):
+                move_work_thread(self.sessions, thread, str(self.a))
+            self.assert_directory(thread, self.b)
+        finally:
+            release.set()
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
+        self.assertFalse(self.store.get_session(thread)['turn_active'])
+        self.assertNotEqual(self.sessions.work_thread(thread)['status'], 'running')
         move_work_thread(self.sessions, thread, str(self.a))
+        self.assert_directory(thread, self.a)
         self.sessions.send(thread, {'message': 'Next'})
         self.assertEqual(self.sessions.claude.options[thread]['cwd'], str(self.a))
         self.assertIsNot(self.sessions.claude.connections[thread], connection)
         self.sessions.claude.connections[thread].callback({'type': 'result', 'subtype': 'success'})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
 
     def test_cli_queues_move_for_explicit_and_inherited_target_and_can_cancel(self):
         thread = self.create()
