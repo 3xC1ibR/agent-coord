@@ -38,7 +38,8 @@ class KimiConnection(ACPConnection):
         removed = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE"}
         env = {k: v for k, v in os.environ.items() if k not in removed and not k.startswith("ZELLIJ")}
         env = client_environment(env, store.database_path, "kimi", session_id=options.get("threadId"))
-        super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+        super().__init__(callback, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="kimi", thread_id=options.get("threadId"))
 
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": 1,
@@ -332,7 +333,8 @@ class KimiRPC:
             try:
                 self.journals[thread_id] = PromptJournal(self.native[thread_id], self.options[thread_id]["cwd"])
                 future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-                future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
+                if not getattr(connection, "channel", None):
+                    future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc))
                 raise
@@ -579,6 +581,10 @@ class KimiRPC:
             self._capture_usage(thread_id)
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.connections):
             self._finish(thread_id, "interrupted")

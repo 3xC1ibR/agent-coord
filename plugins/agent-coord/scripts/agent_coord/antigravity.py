@@ -115,7 +115,11 @@ class AntigravityConnection(ACPConnection):
         self.temporary = tempfile.TemporaryDirectory(prefix="process-", dir=root)
         env.update({key: self.temporary.name for key in ("TMPDIR", "TMP", "TEMP")})
         try:
-            super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+            super().__init__(callback, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="antigravity", thread_id=options.get("threadId"))
+            if self.channel:
+                self.resource_path = self.temporary.name
+                self.temporary._finalizer.detach()
         except Exception:
             self.temporary.cleanup()
             raise
@@ -149,10 +153,14 @@ class AntigravityConnection(ACPConnection):
         return self._authorization(line)
 
     def close(self):
-        try:
-            super().close()
-        finally:
+        super().close()
+        if not self.closed:
+            return
+        if self.temporary:
             self.temporary.cleanup()
+        elif getattr(self, "resource_path", None):
+            import shutil
+            shutil.rmtree(self.resource_path, ignore_errors=True)
 
 
 class AntigravityRPC:
@@ -530,7 +538,8 @@ class AntigravityRPC:
             self.delivery.attempted(turn_id, batch, provider_turn_id=turn_id)
             state.update(batch=batch, accepted=False)
             future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-        future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
+        if not getattr(connection, "channel", None):
+            future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
 
     def _confirm_delivery(self, thread_id):
         state = self.delivery_turns.get(thread_id)
@@ -735,6 +744,10 @@ class AntigravityRPC:
         self.requests.pop(message["id"], None)
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.turns):
             self._finish(thread_id, "interrupted",
