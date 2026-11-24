@@ -749,6 +749,58 @@ class ConversationSearchTests(unittest.TestCase):
                 self.assertNotIn(document.references, requested)
         self.assertEqual(conversation_search.search_metrics(self.store)["document_read"]["decoded_documents"], 0)
 
+    def test_dirty_search_reads_seeded_prose_without_decoding_tool_output(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        text = "x" * (conversation_search._TEXT_CHARACTERS - 3) + "Boundary Straße" + "y" * 7000
+        history = {"historyUnavailable": True, "turns": [{"startedAt": 1793247626.5940921,
+            "status": "inProgress", "items": [
+                {"type": "commandExecution", "output": "excluded output " * 40000},
+                {"id": "duplicate", "type": "agentMessage", "text": "obsolete evidence"},
+                {"id": "duplicate", "type": "agentMessage", "text": "replacement evidence"},
+                {"type": "userMessage", "timelineAt": 1793247626.5940921,
+                 "content": [{"type": "text", "text": text}]}]}]}
+        prepared = self.save_chunked("thread", history, seed=True)
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            result = search_threads(self.store, "boundary strasse", snapshot_dirty=True, my_messages=True)
+        self.assertEqual([r["thread_id"] for r in result["items"]], ["thread"])
+        match = result["items"][0]["matches"][0]
+        self.assertEqual((match["turn_id"], match["item_id"], match["timestamp"]),
+                         ("search-turn-0", "search-item-3", 1793247626.5940921))
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        self.assertNotIn(prepared.documents[(0, 0)].references, requested,
+                         "Interactive dirty search decoded excluded tool output")
+        self.assertEqual(search_threads(self.store, "obsolete", snapshot_dirty=True)["items"], [])
+        self.assertEqual(search_threads(self.store, "excluded output", snapshot_dirty=True)["items"], [])
+        self.assertEqual(search_threads(self.store, "boundary strasse", my_messages=True), result)
+
+    def test_dirty_search_handles_missing_immutable_prose_cache_and_new_revisions(self):
+        from agent_coord import history_persistence as storage
+        self.create("thread")
+        history = {"turns": [{"items": [
+            {"type": "commandExecution", "output": "excluded " * 40000},
+            {"id": "message", "type": "agentMessage", "text": "original evidence"}]}]}
+        previous = self.save_chunked("thread", history)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='thread'")
+        scheduled = []
+        sessions = SimpleNamespace(cwd=str(self.root), persistence=SimpleNamespace(
+            submit=lambda callback, **options: scheduled.append(callback)))
+        first = search_browser_threads(self.store, sessions, {"q": ["original"]})
+        self.assertEqual(len(first["items"]), 1)
+        self.assertTrue(scheduled)
+        for callback in list(scheduled):
+            for _ in callback():
+                pass
+        with patch.object(storage, "_documents", wraps=storage._documents) as documents:
+            self.assertEqual(search_browser_threads(self.store, sessions, {"q": ["original"]}), first)
+        requested = [reference for call in documents.call_args_list for reference in call.args[1]]
+        self.assertNotIn(previous.documents[(0, 0)].references, requested)
+        history["turns"][0]["items"][1]["text"] = "replacement evidence"
+        self.save_chunked("thread", history, previous=storage.compact_history(previous), seed=True)
+        self.assertEqual(search_threads(self.store, "original", snapshot_dirty=True)["items"], [])
+        self.assertEqual(len(search_threads(self.store, "replacement", snapshot_dirty=True)["items"]), 1)
+
     def test_search_preparation_reuses_unchanged_turns_in_a_long_conversation(self):
         from agent_coord import history_persistence as storage
         self.create("thread")

@@ -402,12 +402,16 @@ def _cached_documents(db, identities, *, metadata=True):
         batch = identities[offset:offset + batch_rows]
         # Preserve the header shape, but load payload only after selecting the
         # last 200 routing occurrences. The covering index excludes excerpts.
-        fields = "document,item_id,role,timestamp,NULL,text_length" if metadata else "document"
+        fields = ("document,item_id,role,CASE WHEN timestamp IS NULL THEN NULL "
+                  "ELSE printf('%!.17g',timestamp) END,NULL,text_length") if metadata else "document"
         rows = db.execute("SELECT json_group_array(json_array(" + fields + "))"
             " FROM conversation_search_documents INDEXED BY conversation_search_document_headers"
             " WHERE document IN (" + ",".join("?" * len(batch)) + ")",
             batch).fetchone()[0]
-        result.update((row[0], tuple(row)) for row in json.loads(rows))
+        for row in json.loads(rows):
+            if metadata and row[3] is not None:
+                row[3] = float(row[3])
+            result[row[0]] = tuple(row)
     return result
 
 
@@ -951,9 +955,64 @@ def _refresh_messages(store, cwd, measurement, schedule_index):
                 raise
 
 
+def _pending_prose_history(db, manifest, measurement):
+    """Read current occurrence order with immutable prose, in the caller's snapshot."""
+    from .history_persistence import _documents
+
+    root = _documents(db, [manifest["root"]])[0]
+    if not isinstance(root["metadata"], dict) or not isinstance(root["turns"], list):
+        raise ValueError("Invalid conversation manifest")
+    turns = _documents(db, root["turns"])
+    references = {}
+    for turn in turns:
+        if not isinstance(turn["metadata"], dict) or not isinstance(turn.get("items", []), list):
+            raise ValueError("Invalid conversation turn manifest")
+        for reference in turn.get("items", []):
+            references[_document_key(reference)] = reference
+    headers = _cached_documents(db, references)
+    prose = {key for key, header in headers.items() if header[2] is not None}
+    text = _cached_document_excerpts(db, {key for key in prose if headers[key][5] <= 6000})
+    large = sorted(key for key in prose if headers[key][5] > 6000)
+    for offset in range(0, len(large), _STAGE_ROWS):
+        batch = large[offset:offset + _STAGE_ROWS]
+        rows = db.execute("SELECT document,group_concat(text,'') FROM "
+            "(SELECT document,text FROM conversation_search_document_text WHERE document IN ("
+            + ",".join("?" * len(batch)) + ") ORDER BY document,part) GROUP BY document", batch)
+        text.update(rows)
+    if any(len(text.get(key, "")) != headers[key][5] for key in prose):
+        raise ValueError("Incomplete immutable search prose")
+    missing = [(key, reference) for key, reference in references.items() if key not in headers]
+    for offset in range(0, len(missing), _STAGE_ROWS):
+        batch = missing[offset:offset + _STAGE_ROWS]
+        for (key, _), item in zip(batch, _documents(db, [reference for _, reference in batch])):
+            header, chunks = _document_rows(key, item)
+            headers[key] = header
+            if header[2] is not None:
+                text[key] = "".join(chunk[2] for chunk in chunks)
+    measurement["decoded_documents"] = measurement.get("decoded_documents", 0) + len(missing)
+    measurement["reused_documents"] = measurement.get("reused_documents", 0) + len(references) - len(missing)
+    decoded = []
+    for turn in turns:
+        items = []
+        for reference in turn.get("items", []):
+            key = _document_key(reference)
+            _, identity, role, stamp, _, _ = headers[key]
+            # Keep placeholders: fallback item IDs use original positions.
+            item = {}
+            if role is not None:
+                item = {"id": identity, "timelineAt": stamp}
+                if role == "user":
+                    item.update(type="userMessage", content=[{"type": "text", "text": text[key]}])
+                else:
+                    item.update(type="agentMessage", text=text[key])
+            items.append(item)
+        decoded.append({**turn["metadata"], "items": items})
+    return {**root["metadata"], "turns": decoded}
+
+
 def pending_search_evidence(db, terms, thread_ids, *, user_only, published, measurement):
     """Inspect current revisions in the same SQLite snapshot as the ranked query."""
-    from .history_persistence import decode_history, prepared_history_view
+    from .history_persistence import MARKER, decode_history, prepared_history_view
 
     filter_ids = "" if thread_ids is None else " WHERE p.thread_id IN (SELECT value FROM json_each(?))"
     parameters = () if thread_ids is None else (json.dumps(sorted(thread_ids)),)
@@ -969,8 +1028,13 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
         try:
             prepared = published.get(identity)
             history = prepared_history_view(prepared, serialized)
+            missing_documents = measurement.get("decoded_documents", 0)
             if history is None:
-                history = decode_history(serialized, db=db)
+                manifest = json.loads(serialized)
+                if isinstance(manifest, dict) and manifest.get(MARKER) == 1 and manifest.get("layout") == "turns":
+                    history = _pending_prose_history(db, manifest, measurement)
+                else:
+                    history = decode_history(serialized, db=db)
                 measurement["database_reads"] = measurement.get("database_reads", 0) + 1
             else:
                 measurement["published_reads"] = measurement.get("published_reads", 0) + 1
@@ -989,8 +1053,9 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
                     found.pop(key, None)
             matches.extend(found.values())
             statuses[identity] = "partial" if history.get("historyUnavailable") else "saved"
-            if not active and not any(turn.get("status") == "inProgress" for turn in history.get("turns", [])
-                                      if isinstance(turn, dict)):
+            if (measurement.get("decoded_documents", 0) > missing_documents or
+                    (not active and not any(turn.get("status") == "inProgress" for turn in history.get("turns", [])
+                                           if isinstance(turn, dict)))):
                 settled.append(identity)
         except (ValueError, TypeError, AttributeError, KeyError):
             statuses[identity] = "unavailable"
@@ -998,14 +1063,16 @@ def pending_search_evidence(db, terms, thread_ids, *, user_only, published, meas
 
 
 def index_search_snapshot(store, identities, schedule_index):
-    """Try each observed thread once. A later search can schedule a newer revision."""
+    """Seed immutable documents even for active threads; publish only idle revisions."""
     for identity in identities:
         with store.reading(), store._connection() as db:
-            pending = db.execute(f"""SELECT 1 FROM ({_PENDING}) p LEFT JOIN sessions s ON s.session_id=p.thread_id
-                WHERE p.thread_id=? AND COALESCE(s.turn_active, 0)=0""", (identity,)).fetchone()
+            pending = db.execute(f"""SELECT COALESCE(s.turn_active, 0) FROM ({_PENDING}) p
+                LEFT JOIN sessions s ON s.session_id=p.thread_id WHERE p.thread_id=?""", (identity,)).fetchone()
         if pending is None:
             continue
-        publish_messages(store, prepare_messages(store, identity), schedule_index=schedule_index)
+        prepared = prepare_messages(store, identity)
+        if not pending[0]:
+            publish_messages(store, prepared, schedule_index=schedule_index)
         yield
     _cleanup_messages(store)
 
