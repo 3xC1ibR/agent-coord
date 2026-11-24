@@ -36,6 +36,8 @@ _TABLES = {
         source TEXT PRIMARY KEY, usable INTEGER NOT NULL)""",
     "conversation_substring_revisions": """CREATE TABLE IF NOT EXISTS conversation_substring_revisions (
         message_rowid INTEGER PRIMARY KEY, revision INTEGER NOT NULL)""",
+    "conversation_substring_pending": """CREATE TABLE IF NOT EXISTS conversation_substring_pending (
+        identity TEXT PRIMARY KEY, source TEXT NOT NULL)""",
 }
 _FTS = """CREATE VIRTUAL TABLE IF NOT EXISTS conversation_substring_terms USING fts5(
     folded, tokenize='trigram case_sensitive 1', content='', detail=none, columnsize=0)"""
@@ -84,6 +86,78 @@ def _unsupported(error):
                                               "unrecognized tokenizer", "no such function: octet_length"))
 
 
+def _entry_keys(table, row):
+    if table == "conversation_search_document_entries":
+        return (f"'document:'||json_array({row}.generation,{row}.position)", f"'document:'||{row}.document")
+    if table == "conversation_search_entries":
+        key = f"'generation:'||{row}.generation||':'||{row}.position"
+        return key, key
+    return (f"'legacy:'||json_array({row}.thread_id,{row}.turn_id,{row}.item_id)",
+            f"'legacy:'||{row}.rowid||':'||COALESCE((SELECT revision FROM conversation_substring_revisions "
+            f"WHERE message_rowid={row}.rowid),0)")
+
+
+def _source_position(source, offset):
+    tail = f"substr({source},{offset})"
+    return f"substr({tail},1,instr({tail},':')-1)", f"CAST(substr({tail},instr({tail},':')+1) AS INTEGER)"
+
+
+def _pending_schema(db):
+    """Keep exact fallback entries in the same transaction as projection writes.
+
+    Entries, rather than immutable documents, bound this registry. An INSERT
+    OR REPLACE can change a document or legacy rowid without a delete trigger;
+    its stable projection identity replaces the previous pending entry too.
+    """
+    db.execute("CREATE INDEX IF NOT EXISTS conversation_substring_pending_source ON conversation_substring_pending(source)")
+    db.execute("CREATE INDEX IF NOT EXISTS conversation_substring_document_entries "
+               "ON conversation_search_document_entries(document,generation)")
+    tables = ("conversation_search_document_entries", "conversation_search_entries", "conversation_search_messages")
+
+    def trigger(name, event, table, body):
+        sql = f"CREATE TRIGGER {name} AFTER {event} ON {table} BEGIN {body} END"
+        old = db.execute("SELECT sql FROM sqlite_master WHERE name=?", (name,)).fetchone()
+        if old is None or old[0] != sql:
+            db.execute(f"DROP TRIGGER IF EXISTS {name}")
+            db.execute(sql)
+
+    for table in tables:
+        identity, source = _entry_keys(table, "NEW")
+        insert = (f"INSERT OR REPLACE INTO conversation_substring_pending SELECT {identity},{source} "
+                  f"WHERE NOT EXISTS (SELECT 1 FROM conversation_substring_ready WHERE source={source} AND usable=1);")
+        for event, references in (("insert", ("NEW",)), ("update", ("OLD", "NEW")), ("delete", ("OLD",))):
+            body = ""
+            for row in references:
+                key, _ = _entry_keys(table, row)
+                body += f"DELETE FROM conversation_substring_pending WHERE identity={key};"
+                if table == "conversation_search_messages":
+                    body += (f"INSERT INTO conversation_substring_revisions VALUES ({row}.rowid,1) "
+                             "ON CONFLICT(message_rowid) DO UPDATE SET revision=revision+1;")
+            if event != "delete":
+                body += insert
+            name = (f"conversation_substring_legacy_{event}" if table == "conversation_search_messages"
+                    else f"conversation_substring_pending_{table}_{event}")
+            trigger(name, event.upper(), table, body)
+
+    def refresh(source):
+        generation, position = _source_position(source, 12)
+        rowid, _ = _source_position(source, 8)
+        filters = (f"substr({source},1,9)='document:' AND e.document=substr({source},10)",
+                   f"substr({source},1,11)='generation:' AND e.generation={generation} AND e.position={position}",
+                   f"substr({source},1,7)='legacy:' AND e.rowid=CAST({rowid} AS INTEGER)")
+        body = f"DELETE FROM conversation_substring_pending WHERE source={source};"
+        for table, condition in zip(tables, filters):
+            key, current = _entry_keys(table, "e")
+            body += (f"INSERT OR REPLACE INTO conversation_substring_pending SELECT {key},{current} FROM {table} e "
+                     f"WHERE {condition} AND {current}={source} AND NOT EXISTS "
+                     f"(SELECT 1 FROM conversation_substring_ready WHERE source={source} AND usable=1);")
+        return body
+
+    for event, references in (("insert", ("NEW",)), ("update", ("OLD", "NEW")), ("delete", ("OLD",))):
+        trigger(f"conversation_substring_pending_ready_{event}", event.upper(), "conversation_substring_ready",
+                "".join(refresh(f"{row}.source") for row in references))
+
+
 def ensure_schema(store):
     with _LOCK:
         known = _CAPABILITY.get(store)
@@ -95,6 +169,7 @@ def ensure_schema(store):
             _ensure_generation_schema(db)
             # octet_length reads record lengths without paging overflow prose.
             db.execute("SELECT octet_length('')").fetchone()
+            initialize_pending = not db.execute("SELECT 1 FROM sqlite_master WHERE name='conversation_substring_pending'").fetchone()
             for statement in _TABLES.values():
                 db.execute(statement)
             db.execute(_FTS)
@@ -104,11 +179,12 @@ def ensure_schema(store):
             # Explicit page-budget merges below maintain the index instead.
             db.execute("INSERT INTO conversation_substring_terms(conversation_substring_terms,rank) VALUES('automerge',0)")
             db.execute("INSERT INTO conversation_substring_terms(conversation_substring_terms,rank) VALUES('crisismerge',65536)")
-            for event, references in (("insert", ("NEW",)), ("update", ("OLD", "NEW")), ("delete", ("OLD",))):
-                updates = " ".join(f"""INSERT INTO conversation_substring_revisions VALUES ({ref}.rowid,1)
-                    ON CONFLICT(message_rowid) DO UPDATE SET revision=revision+1;""" for ref in references)
-                db.execute(f"""CREATE TRIGGER IF NOT EXISTS conversation_substring_legacy_{event}
-                    AFTER {event.upper()} ON conversation_search_messages BEGIN {updates} END""")
+            _pending_schema(db)
+            if initialize_pending:
+                for table in ("conversation_search_document_entries", "conversation_search_entries", "conversation_search_messages"):
+                    identity, source = _entry_keys(table, "e")
+                    db.execute(f"INSERT INTO conversation_substring_pending SELECT {identity},{source} FROM {table} e "
+                               f"WHERE NOT EXISTS (SELECT 1 FROM conversation_substring_ready WHERE source={source} AND usable=1)")
     except sqlite3.OperationalError as error:
         if not _unsupported(error):
             raise
@@ -409,29 +485,43 @@ def candidates(db, terms, measurement):
 
 
 def message_source(*, include_text, indexed):
-    """Push candidates before payload reconstruction in each visibility branch."""
-    def allowed(source):
-        return (f"({source} IN (SELECT value FROM json_each(:substring_candidates)) OR NOT EXISTS "
-                f"(SELECT 1 FROM conversation_substring_ready r WHERE r.source={source} AND r.usable=1))") if indexed else "1"
+    """Seek eligible sources before payload reconstruction or visibility checks."""
     text = ("(SELECT group_concat(text,'') FROM (SELECT text FROM conversation_search_document_text c "
             "WHERE c.document=e.document ORDER BY part))") if include_text else "NULL"
     old_text = ("(SELECT group_concat(text,'') FROM (SELECT text FROM conversation_search_text_chunks c "
                 "WHERE c.generation=e.generation AND c.position=e.position ORDER BY part))") if include_text else "NULL"
     legacy_key = "'legacy:'||m.rowid||':'||COALESCE(v.revision,0)"
-    return f"""SELECT h.thread_id,e.turn_id,e.item_id,e.role,e.timestamp,{text} AS text,
+    prefix = ""
+    documents = "conversation_search_heads h JOIN conversation_search_document_entries e ON e.generation=h.generation"
+    generations = "conversation_search_heads h JOIN conversation_search_entries e ON e.generation=h.generation"
+    legacy = "conversation_search_messages m"
+    document_filter = generation_filter = legacy_filter = "1"
+    if indexed:
+        prefix = """WITH eligible AS MATERIALIZED (
+            SELECT value AS source FROM json_each(:substring_candidates)
+            UNION SELECT source FROM conversation_substring_pending) """
+        documents = """eligible k CROSS JOIN conversation_search_document_entries e ON e.document=substr(k.source,10)
+            JOIN conversation_search_heads h ON h.generation=e.generation"""
+        generation, position = _source_position("k.source", 12)
+        generations = (f"eligible k CROSS JOIN conversation_search_entries e ON e.generation={generation} AND e.position={position} "
+                       "JOIN conversation_search_heads h ON h.generation=e.generation")
+        rowid, _ = _source_position("k.source", 8)
+        legacy = (f"eligible k CROSS JOIN conversation_search_messages m ON m.rowid=CAST({rowid} AS INTEGER) "
+                  "LEFT JOIN conversation_substring_revisions v ON v.message_rowid=m.rowid")
+        document_filter = "substr(k.source,1,9)='document:'"
+        generation_filter = "substr(k.source,1,11)='generation:'"
+        legacy_filter = f"substr(k.source,1,7)='legacy:' AND k.source={legacy_key}"
+    return f"""{prefix}SELECT h.thread_id,e.turn_id,e.item_id,e.role,e.timestamp,{text} AS text,
         (SELECT group_concat(folded,'') FROM (SELECT folded FROM conversation_search_document_text c
             WHERE c.document=e.document ORDER BY part)) AS folded,e.position
-        FROM conversation_search_heads h JOIN conversation_search_document_entries e ON e.generation=h.generation
-        WHERE {allowed("'document:'||e.document")}
+        FROM {documents} WHERE {document_filter}
         UNION ALL SELECT h.thread_id,e.turn_id,e.item_id,e.role,e.timestamp,{old_text},
         (SELECT group_concat(folded,'') FROM (SELECT folded FROM conversation_search_text_chunks c
             WHERE c.generation=e.generation AND c.position=e.position ORDER BY part)),e.position
-        FROM conversation_search_heads h JOIN conversation_search_entries e ON e.generation=h.generation
-        WHERE {allowed("'generation:'||e.generation||':'||e.position")}
+        FROM {generations} WHERE {generation_filter}
         UNION ALL SELECT m.thread_id,m.turn_id,m.item_id,m.role,m.timestamp,{"m.text" if include_text else "NULL"},m.folded,m.position
-        FROM conversation_search_messages m
-        {"LEFT JOIN conversation_substring_revisions v ON v.message_rowid=m.rowid" if indexed else ""}
+        FROM {legacy}
         WHERE NOT EXISTS (SELECT 1 FROM conversation_search_heads h WHERE h.thread_id=m.thread_id)
           AND NOT EXISTS (SELECT 1 FROM conversation_search_dirty d WHERE d.thread_id=m.thread_id)
           AND EXISTS (SELECT 1 FROM conversation_search_routing r WHERE r.thread_id=m.thread_id)
-          AND {allowed(legacy_key)}"""
+          AND {legacy_filter}"""
