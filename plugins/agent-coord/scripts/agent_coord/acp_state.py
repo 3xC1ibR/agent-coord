@@ -102,6 +102,8 @@ def replay_update(adapter, identity, update):
     if turns is None:
         return False
     kind = update.get("sessionUpdate")
+    if kind not in {"user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"}:
+        return False
     if kind == "user_message_chunk" or not turns:
         native_id = update.get("turnId")
         if kind == "user_message_chunk" and turns and turns[-1]["items"] and all(
@@ -175,8 +177,23 @@ def merge_replay(adapter, identity, turns):
         matched.add(existing["id"])
         if existing.get("status") == "inProgress":
             continue  # A snapshot must not complete an independently active turn.
+        item_positions = {}
         for item in turn.get("items", []):
             old = next((entry for entry in existing.get("items", []) if entry["id"] == item["id"]), None)
+            kind = item.get("type")
+            position = item_positions.get(kind, 0)
+            item_positions[kind] = position + 1
+            if old is None and kind in {"agentMessage", "reasoning"}:
+                candidates = [entry for entry in existing.get("items", []) if entry.get("type") == kind]
+                if position < len(candidates):
+                    candidate = candidates[position]
+                    field = "text" if kind == "agentMessage" else "summary"
+                    previous, current = candidate.get(field), item.get(field)
+                    if previous == current or isinstance(previous, str) and isinstance(current, str) and current.startswith(previous):
+                        if candidate.get(field) != current:
+                            candidate[field] = copy.deepcopy(current)
+                            changed = True
+                        continue
             if old is None:
                 comparable = {k: v for k, v in item.items() if k != "id"}
                 if item.get("type") == "userMessage" or any(

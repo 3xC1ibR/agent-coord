@@ -125,8 +125,12 @@ class ACPConnection:
     def cancel(self, native_id, *, timeout=2.0):
         """Let the provider publish its terminal prompt reply before closing."""
         with self.lock:
-            futures = [self.pending[key] for key, binding in self.bindings.items()
-                       if binding.get("method") == "session/prompt" and key in self.pending]
+            futures = []
+            for key, binding in self.bindings.items():
+                if binding.get("method") == "session/prompt":
+                    # A replacement coordinator has the durable correlation but
+                    # no original waiter. Recreate only the cancellation wait.
+                    futures.append(self.pending.setdefault(key, Future()))
         self.write({"method": "session/cancel", "params": {"sessionId": native_id}})
         if futures:
             try:

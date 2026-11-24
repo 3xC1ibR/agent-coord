@@ -265,6 +265,44 @@ class ACPProjectionTests(unittest.TestCase):
             self.assertEqual(events[-1]["method"], normalized)
             self.assertEqual(events[-1]["params"]["delta"], "x")
 
+    def test_native_replay_extends_a_saved_partial_item_without_duplicating_it(self):
+        adapter, connection = self.bind()
+        adapter.turns.clear()
+        self.sessions.histories[self.identity] = {"id": self.identity, "turns": [{"id": "local-turn", "status": "completed", "items": [
+            {"id": "local-user", "type": "userMessage", "content": [{"type": "text", "text": "question"}]},
+            {"id": "local-answer", "type": "agentMessage", "text": "partial"}]}]}
+        acp_state.begin_replay(adapter, self.identity)
+        self.assertFalse(acp_state.replay_update(adapter, self.identity, {"sessionUpdate": "usage_update", "used": 10, "size": 100}))
+        self.assertEqual(adapter.native_replays[self.identity], [])
+        for kind, text in (("user_message_chunk", "question"), ("agent_message_chunk", "partial answer")):
+            acp_state.replay_update(adapter, self.identity, {"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+        acp_state.finish_replay(adapter, self.identity)
+        items = self.sessions.histories[self.identity]["turns"][0]["items"]
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[-1]["id"], "local-answer")
+        self.assertEqual(items[-1]["text"], "partial answer")
+
+    def test_cancel_after_reattach_waits_for_durable_prompt_reply(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+        adapter, connection = self.bind()
+        connection.submit("session/prompt", {"sessionId": "native-session", "prompt": []})
+        request_id = next(iter(connection.bindings))
+        restored = CoordinatorProjection(self.sessions, self.fixture.client)
+        self.store.provider_projection = self.sessions.projection = restored
+        restored.load()
+        attached = adapter.connections[self.identity]
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            future = worker.submit(attached.cancel, "native-session")
+            deadline = time.monotonic() + 2
+            while request_id not in attached.pending and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertFalse(future.done())
+            with patch.object(adapter, "_capture_usage"):
+                restored.project(self.event(1, {"id": request_id, "result": {"stopReason": "cancelled"}}))
+            future.result(timeout=2)
+        self.assertEqual(adapter.completed[self.identity]["status"], "interrupted")
+
 
 class ACPCancellationTests(unittest.TestCase):
     def test_cancel_waits_for_native_terminal_reply_before_close(self):
