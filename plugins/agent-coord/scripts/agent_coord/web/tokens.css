@@ -1,0 +1,146 @@
+/* Ribbon Field design tokens. Dark mode overrides semantic paints in theme.css. */
+:root {
+  color-scheme: light;
+
+  --paper: #f5f5f4;
+  --surface: #ffffff;
+  --panel: var(--hover-bg);
+  --hover-bg: #ededee;
+  --ink: #18181b;
+  --muted: #6a6a71;
+  --line: #e4e4e6;
+  --line-strong: #cfcfd3;
+  --hover-line: #b3b3b9;
+  --sb-bg: #121215;
+  --sb-hover: #1c1c21;
+  --sb-ink: #e6e6ea;
+  --sb-muted: #85858d;
+  --sb-line: #27272c;
+  --sb-accent: #8fb0ff;
+  --sb-primary-ink: var(--sb-bg);
+  --accent: #2550d8;
+  --accent-hover: #1d42b8;
+  --on-accent: #ffffff;
+  --user-message-bg: #e4edff;
+  --user-message-line: #c3d3f5;
+  --warm: #c2410c;
+  --warm-tint: #fbe9e0;
+  --danger: #c0392b;
+  --danger-tint: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  --responded: #1f8a4c;
+  --responded-tint: color-mix(in srgb, var(--responded) 10%, var(--surface));
+  --dot-idle: #a6a6ad;
+  --backdrop: #0006;
+  --user-message-muted: var(--muted);
+  --shadow-color: #18181b26;
+  --white: #fff;
+  --mask-opaque: var(--white);
+
+  --font-sans: system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --control-sm: 32px;
+  --control-md: 36px;
+  --hit-target: 44px;
+  --stroke: 1px;
+  --stroke-strong: 2px;
+  --icon-stroke: 1.6;
+
+  --shadow-sm: 0 4px 14px color-mix(in srgb, var(--shadow-color) 55%, transparent);
+  --shadow-lg: 0 12px 42px var(--shadow-color);
+  --transition-fast: 150ms ease;
+  --transition-pan: 340ms cubic-bezier(.2, .7, .2, 1);
+  --motion-thread-border: 2.8s linear infinite;
+  --motion-thread-destination: .8s ease-out;
+  --motion-atlas-blink: 1.3s steps(2, start) infinite;
+  --motion-atlas-breathe: 2.6s ease-in-out infinite;
+  --motion-atlas-locate: 1.6s ease-out 3;
+  --motion-agent-route: 1.5s ease-out both;
+  --motion-status-pulse: 1.4s ease-in-out infinite;
+  --motion-list-pulse: 1.6s ease-in-out infinite;
+  --layer-sticky: 10;
+  --layer-floating: 20;
+  --layer-popover: 40;
+  --layer-drawer: 60;
+  --layer-dialog: 100;
+
+  /* Geometry shared across stylesheet, layout and browser states. */
+  --mobile-chat-header-height: 56px;
+  --mobile-chat-input-leading: 1.5;
+  --mobile-draft-max-height: 320px;
+  --mobile-input-max-height: 240px;
+  --chat-control-icon: 20px;
+  --chat-placeholder-leading: 1.375;
+  --chat-menu-width: 340px;
+  --response-copy-buffer-offset: -10000px;
+  --schedule-form-inset: 100px;
+  --sidebar-width: 254px;
+  --sidebar-entry-icon: 18px;
+  --count-size: 18px;
+  --connection-dot: 5px;
+  --conversation-min-width: 300px;
+  --conversation-inset: 28px;
+  --context-panel-default-width: 340px;
+  --agent-panel-default-width: 52%;
+  --tl-title: clamp(200px, 24vw, 360px);
+  --tl-label: 112px;
+  --tl-phase: 104px;
+  --tl-indent: 28px;
+  --agent-tree-card-width: 232px;
+  --agent-tree-card-height: 152px;
+  --agent-tree-compact-size: 40px;
+  --thread-hover-width: 420px;
+  --thread-hover-max-height: 620px;
+  --settings-width: 650px;
+  --usage-content-width: 1000px;
+  --focus-card-action-inset: 54px;
+  --focus-attention-action-inset: 70px;
+  --focus-minimap-reserve: 225px;
+  --coordination-table-width: 760px;
+  --coordination-chart-height: 210px;
+  --coordination-chart-dash: 5px;
+  --coordination-operation-mobile-width: 176px;
+  --coordination-calls-mobile-width: 72px;
+  --activity-width: 1120px;
+  --activity-dialog-width: 1180px;
+  --activity-dialog-height: 900px;
+  --activity-confirm-width: 440px;
+  --activity-apply-width: 92px;
+  --activity-table-min: 680px;
+  --activity-event-min: 640px;
+  --asks-dialog-width: 860px;
+  --asks-dialog-height: 900px;
+  --asks-width: 760px;
+  --asks-note-min: 220px;
+  --asks-snooze-width: 8ch;
+  --asks-clamp-lines: 3;
+  --thread-asks-height: 40vh;
+  --thread-asks-height-narrow: 55%;
+  --thread-asks-height-editing: 75%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-fast: 0s;
+    --transition-pan: 0s;
+  }
+}

@@ -9,16 +9,29 @@ colors:
   primary: "#2550d8"
   danger: "#c0392b"
 typography:
+  xs: {fontFamily: system-ui, fontSize: 11px}
+  sm: {fontFamily: system-ui, fontSize: 12px}
+  md: {fontFamily: system-ui, fontSize: 13px}
   body: {fontFamily: system-ui, fontSize: 14px, lineHeight: 21px}
-  meta: {fontFamily: system-ui, fontSize: 12px, lineHeight: 18px}
-  heading: {fontFamily: system-ui, fontSize: 24px, fontWeight: 600, lineHeight: 30px}
+  lg: {fontFamily: system-ui, fontSize: 16px}
+  heading: {fontFamily: system-ui, fontSize: 20px, fontWeight: 600}
+  display: {fontFamily: system-ui, fontSize: 24px, fontWeight: 600}
 rounded:
+  inline: 4px
   control: 6px
   panel: 10px
+  pill: 999px
 spacing:
-  small: 8px
-  row: 12px
-  section: 24px
+  space-1: 4px
+  space-2: 8px
+  space-3: 12px
+  space-4: 16px
+  space-5: 20px
+  space-6: 24px
+  space-8: 32px
+  small-control: 32px
+  medium-control: 36px
+  touch-target: 44px
 ---
 
 ## Overview
@@ -28,37 +41,48 @@ and Activity use the same paper, ink, controls and type with more reading room.
 This contract records the existing interface; it does not authorize a redesign.
 
 ## Colors
-`web/styles.css` is the implementation source of truth; `web/theme.css` replaces
-semantic tokens in dark mode. Use `--paper`, `--surface`, `--ink`, `--muted`,
-`--line`, `--accent` and `--danger`, not new literal colors. Cobalt indicates an
-action or link, orange attention, and green an unread response. No decorative color.
+`web/tokens.css` defines the design scales and semantic colors. `web/theme.css`
+overrides their color values for dark mode. Cobalt indicates actions and links,
+orange marks attention, red marks blocking states and failures, and green marks
+unread replies and success. Data displays derive their tints from these roles.
+Sidebar colors stay on the dark palette in both themes.
 
 ## Typography
-Use the system font. Titles lead, supporting copy uses muted ink, and numeric
-comparisons use tabular figures. Use readable sentence case and explicit labels.
+Use `--font-sans` for interface text and `--font-mono` for code and compact
+technical values. Use the seven `--text-*` sizes from 11px to 24px. View titles use
+20px semibold. Titles lead, supporting copy uses muted ink, and numeric
+comparisons use tabular figures. Use sentence case and explicit labels.
 
 ## Layout
-The workspace has navigation, an overview or conversation, and optional context
-and pane regions. In the Mac app, a workspace window's header is its title bar: a
+The workspace retains its existing sidebar, projects bar, conversation tabs,
+views bar, workspace tools and overview status bar. The overview opens in List.
+Focus, Atlas and Dispatcher Workspace remain available. The sidebar's Asks entry
+opens the Asks view. Send work names direct delegation, and Dispatcher names
+the autonomous project dispatcher.
+The workspace has an overview or conversation and optional context and pane regions. In the Mac app, a workspace window's header is its title bar: a
 40px band holds the window controls, project tabs and header actions, and its empty
 space moves the window. Settings and detached conversation windows keep the
 standard title bar. Auxiliary pages have a simple title, controls, and centered
 content. Activity uses a 1120px content maximum, 24px page spacing, 12px row spacing,
-and 8px control gaps. Declare additional module dimensions once as CSS properties.
+and 8px control gaps. Declare shared geometry in `web/tokens.css`. Use the grid
+for spacing and stroke widths for fine insets and rings. Intrinsic layout may
+use percentages and viewport units. Transcript spacing uses em units where it
+follows the text. Media-query breakpoints are written in the query because CSS
+custom properties resolve inside declarations.
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
-Mobile conversations use one 56px header with Back, a single truncated title,
-status and thread options. Workspace and conversation tabs return in the overview.
-The composer has a short touch-oriented prompt above one row of attachment, model,
-effort and send controls. Send work, Review and Schedule live in the existing
-thread options sheet; reuse their original controls and handlers. Keep 44px touch
-targets and a visible send action as drafts grow or the keyboard opens. Mobile
-dimensions are declared once in `web/styles.css`.
+At 720px and below, a mobile conversation has one 56px header with Back, a
+single ellipsized title, status and thread options. Workspace and conversation
+tabs return in the overview. The existing thread options sheet houses secondary
+actions, including Send work, Review and Schedule, with their original controls
+and handlers. On coarse pointers the composer uses “Message agent…” and a 16px
+input above attachment, model, effort and send controls. Keep 44px touch targets
+and a visible send action as drafts grow or the keyboard opens. Keep Send work
+and Dispatcher dock affordances in their overview and workspace surfaces.
 Jump to latest is a floating, arrow-only 44px button above the composer. Its
 anchor never reserves a layout row; retain its accessible name and tooltip.
 The asks view opens in a workspace dialog and uses the auxiliary-page grammar: a
 simple title, sections, and a 760px reading width. Its sidebar entry sits above
-the thread list; the dialog fills the screen on narrow layouts. Its dimensions
-are declared once in `web/asks.css`.
+the thread list; the dialog fills the screen on narrow layouts. Its reading width is defined in `web/tokens.css`.
 A conversation's own asks sit in a strip between the conversation and its
 composer, with the request area's insets. One line states how many wait; it folds
 the strip. One ask is shown in full and the others as their title and meta line.
@@ -67,17 +91,19 @@ phone) and scrolls within that. It is absent when the conversation has no open
 asks: nothing about asks sits above the composer then. The conversation's
 resolved asks are a section of its side panel, in the panel's own type.
 Scheduled prompt actions wrap on desktop and use two columns on narrow screens.
-Their `--schedule-gap` (8px) and `--schedule-action-height` (44px) tokens live in
-`web/styles.css`; the form's action row stays visible as its body scrolls.
+They use an 8px gap and 44px touch targets. The form's action row stays visible as
+its body scrolls.
 `--schedule-form-inset` (100px) reserves the existing dialog margin, padding and borders.
 
 ## Elevation & Depth
-Content precedes controls, popovers, dialogs, and notices. Reuse native dialogs for
-deliberate destructive confirmation. Avoid nested cards and unnecessary shadows.
+Content precedes sticky controls, floating controls, popovers, drawers and
+dialogs. Use the named layers and the small and large shadows from the token
+file. Reuse native dialogs for deliberate destructive confirmation.
 
 ## Shapes
-Use the existing 6px control and 10px panel radii, one-pixel dividers, and simple
-stroke icons. Auxiliary report sections use whitespace rather than card outlines.
+Use 4px for inline badges and keys, 6px for controls and rows, 10px for panels
+and popovers, and the pill radius for round controls and marks. Use one-pixel
+dividers and simple stroke icons. Auxiliary report sections use whitespace.
 
 ## Components
 | Component | Use |
@@ -101,9 +127,11 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. App agents start collapsed beneath their current supervisor at each depth; expanding a branch survives refresh. An app agent enters Attention on its own row only when it fails, stalls or needs a permission approval, and that row names it "App agent of <supervisor>"; its questions and checkpoint requests stay with its supervisor. Sections are Pinned and Quiet (each only when it holds threads), Attention, Working and Idle, with Pinned first; a pinned thread or app agent appears only in Pinned. The row menu adds Dismiss from Attention and Mark as read when they apply; live approvals and blocking questions resolve only by answering |
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Closed agent in the tree | A closed sub-agent folds to its provider icon at 40px with its title as the tooltip; a click or Enter opens its card in place and Minimize folds it again. The root and the selected agent always show their cards |
-| Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
+| Role designation | A user-named role beside a conversation's metadata, muted 11px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
-| Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta. Every row has a reply field in view with Send reply beside it; the kind's resolutions lead the next row (a decision's options and Answer with my text; Mark done and Not done, and so on), with Reply in conversation, Snooze and Dismiss after them as quiet text controls. The arrangement is the same for every kind. Enter sends the reply and never picks a resolution; once text is typed a muted line says what each control does with it. A replied ask shows the last reply and its time as a muted line. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in the copy block of `web/asks.js` |
+| Asks view | Sidebar entry with an open count, red for a blocking ask. Rows lead with the title, followed by muted metadata. Enter and Answer resolve the ask with typed text. Preset actions resolve with their selected option and include typed text as a note. Shift+Enter and the quiet Discuss in thread action send a comment and leave the ask open. Snooze and Dismiss are quiet actions. Red marks Blocking. Overdue and stale use the attention colour. Resolutions and the last discussion comment use muted text. Groups use headings and one-pixel dividers. Shared wording lives in the copy block of `web/asks.js` |
+| Agent breadcrumb | A compact Root › Lead › Specialist path in the conversation header, with status dots and a switcher for siblings and children. The workspace tab keeps the root task name while the user switches family members. Agents and Context open on explicit selection |
+| Later action | One control moves the thread to Later immediately and offers a menu for a timed reminder |
 | Conversation asks | The asks view's rows above the composer, without the thread name: open asks only, with the Blocking flag in red on the row. Unfolded while an ask waits; the user's fold is kept per conversation. One ask shows in full, the first in order unless the user opens another by its title; the rest show title and meta. Folded, the summary line carries the blocking count and the first ask's title. No card, no heading: dividers and the summary line only |
 | Resolved asks in the side panel | A section of the thread context panel after the scratchpad: the panel's heading, then each resolution as its title, a muted outcome line (resolution, kind, time) and its answer or note. The ten most recent; a muted line says when earlier ones are in the asks view. Absent when the conversation has none |
 | Navigation toggle count | The sidebar entry's count pill on the corner of the navigation toggle, ringed in the paper colour, only while the navigation is closed (a phone, or a collapsed sidebar); red when an ask is blocking. The toggle's name and action do not change |
@@ -117,8 +145,12 @@ wrappable, light/dark states legible, and controls usable by keyboard and touch.
 Do not add global style overrides for a local report.
 
 ## Conceptual model
-A thread is the durable conversation. Projects, domains and groups organize
-threads. Activity is a retrospective view of recorded interactions with those
+A thread is the durable conversation and retains its execution directory.
+Workspaces and Groups can include threads across repositories and directories.
+A workspace has a default launch directory and may offer a folder filter.
+Opening a member or following a direct thread link keeps the workspace and its
+tabs in place. A family keeps one tab named for its root supervisor task.
+Activity is a retrospective view of recorded interactions with those
 threads: messages, visits, returns and answered decisions. It is not a productivity
 score. A visit is a foreground interaction or return; background restores and
 agent output are not human visits. An unfinished visit is not a no-message visit.
@@ -136,10 +168,13 @@ Quiet is a saved attribute of a thread, changed from the thread options menu.
 A quiet thread does not notify or enter Attention for ordinary results. It does
 for failures, stalls, approvals, blocking questions and checkpoints that need the
 user. Otherwise it is listed in Working while it runs and in Quiet afterwards.
-A reply is the user's own words about an open ask. It is a message in the asking
-conversation that names the ask, not a resolution: the ask stays open and shows
-the last reply. Text typed on an ask is a reply when sent alone and the note when
-a resolution is chosen.
+An informational reply or routine completion clears from Attention when read.
+Blocking asks, live approvals, stalls and failures stay in Attention until resolved
+or explicitly dismissed where allowed. Attention orders severity before recency.
+A quiet send suppresses routine completion notifications.
+Answering an ask closes it and sends the answer to the asking thread. A preset
+resolution uses typed text as its note. Discuss in thread delivers a comment to
+the asking thread and leaves the ask open.
 
 ## Motion and states
 Reuse the existing control transitions and honor reduced motion. Loading and
@@ -154,6 +189,11 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-24 | Canonical web tokens and one mobile conversation header | Consolidate theme, type, shape, spacing and layers while keeping the existing sidebar and bars. The viewport controls header collision, and touch inputs keep readable text and full-size targets. |
+| 2026-11-24 | List is the default overview, with Focus, Atlas and Dispatcher Workspace retained | Remove the duplicate Cards overview and the duplicate Asks shortcut. Reserve Dispatcher for the autonomous dispatcher and use Send work for delegation. |
+| 2026-11-24 | Workspace membership spans execution directories and delegation stays in a stable root tab | Follow work across repositories and choose family members in the header while retaining the current workspace and root tab. |
+| 2026-11-24 | Informational attention clears on read and critical attention stays actionable | Reading a routine reply completes acknowledgement. Blocking asks, approvals, stalls and failures retain their resolution paths. |
+| 2026-11-24 | Enter answers an ask and Shift+Enter discusses it | Match the primary Answer control and keep clarification available through the quiet Discuss in thread action. |
 | 2026-11-24 | A Pinned section leads the inbox; inbox row menus offer Dismiss from Attention and Mark as read; a phone opens a conversation on the conversation, not the agent tree | The owner expected pins at the top regardless of state, had no way to dismiss or read from an inbox row, and had to close the tree sheet to read a thread with agents |
 | 2026-11-24 | The tab dot and the agent tree badge share one needs-you derivation built on the inbox's request rule; closed tree children fold to icons | Dismissing a request left the tree badge and the parent's tab dot orange, and a parent showed orange while working, because three copies derived attention differently |
 | 2026-11-24 | Runtime-generated prompts render as Agent Coord system rows with a popover, or fold into the matching message card | Deliveries and subscription events appeared as user bubbles of raw JSON beside their own cards; they are not the user's words |

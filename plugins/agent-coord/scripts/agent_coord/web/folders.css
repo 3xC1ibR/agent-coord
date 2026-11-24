@@ -1,23 +1,23 @@
-.folder-control { display: grid; gap: 6px; }
-.folder-control label { color: var(--muted); font-size: 12px; margin: 0; }
-.folder-control select { width: 100%; min-width: 0; text-overflow: ellipsis; color-scheme: dark; color: var(--sb-ink); background: var(--sb-bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; }
+.folder-control { display: grid; gap: var(--space-2); }
+.folder-control label { color: var(--muted); font-size: var(--text-sm); margin: 0; }
+.folder-control select { width: 100%; min-width: 0; text-overflow: ellipsis; color-scheme: dark; color: var(--sb-ink); background: var(--sb-bg); border: 1px solid var(--line); border-radius: var(--radius-md); padding: var(--space-2); font-size: var(--text-sm); }
 .folder-control button { justify-self: start; }
-.folder-welcome { padding: 24px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 12px; }
-.folder-welcome h2 { margin: 0 0 8px; }
+.folder-welcome { padding: var(--space-6); margin-bottom: var(--space-5); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.folder-welcome h2 { margin: 0 0 var(--space-2); }
 .folder-welcome p { color: var(--muted); max-width: 48ch; }
-.projects-bar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 38px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.projects-bar { display: flex; align-items: center; gap: var(--space-2); min-width: 0; padding: 0 var(--space-8); border-bottom: 1px solid var(--line); flex-shrink: 0; }
 main:has(> .conversation:not([hidden])) > .projects-bar { display: none; }
 .project-tab { display: flex; align-items: center; flex-shrink: 0; min-width: 0; }
-.project-tab-close { border: 0; padding: 5px 7px; font-size: 16px; color: var(--muted); background: transparent; }
-.project-tab-close:hover { color: var(--ink); background: var(--tint); }
+.project-tab-close { border: 0; padding: var(--space-1) var(--space-2); font-size: var(--text-lg); color: var(--muted); background: transparent; }
+.project-tab-close:hover { color: var(--ink); background: var(--hover-bg); }
 .no-project .workspace-tools, .no-project .views-bar, .no-project #overview,
 .no-project .overview-footer, .no-project #search-options, .no-project #conversation-results { display: none; }
 #project-target-path { overflow-wrap: anywhere; }
-@media (max-width: 1100px) { .projects-bar { padding-inline: 27px; } }
+@media (max-width: 1100px) { .projects-bar { padding-inline: var(--space-6); } }
 /* Phones pick projects from the header; the tab strip and its close buttons are desktop chrome. */
 @media (max-width: 720px) {
   .projects-bar { display: none; }
-  .no-project #mobile-overview { display: none !important; }
+  .no-project #mobile-overview { display: none; }
 }
 
 /* Directory tabs share the title bar and join the workspace surface. */
@@ -28,32 +28,32 @@ main:has(> .conversation:not([hidden])) > .projects-bar { display: none; }
 .project-tab:hover .project-tab-close,
 .project-tab:focus-within .project-tab-close { opacity: 1; pointer-events: auto; }
 .workspace-switcher { position: relative; flex: none; }
-.workspace-switcher > summary { display: flex; align-items: center; gap: 7px; padding: 8px 4px; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: pointer; list-style: none; }
+.workspace-switcher > summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-1); color: var(--muted); font-size: var(--text-sm); white-space: nowrap; cursor: pointer; list-style: none; }
 .workspace-switcher > summary::-webkit-details-marker { display: none; }
 .workspace-switcher > summary:hover, .workspace-switcher[open] > summary { color: var(--ink); }
-.workspace-switcher > summary > span { font-size: 10px; }
-.workspace-switcher-panel { position: absolute; top: calc(100% + 8px); left: 0; z-index: 25; display: grid; gap: 3px; min-width: 220px; padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 12px 32px var(--shadow); }
-.workspace-switcher-panel button, .workspace-switcher-panel a { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--ink); font-size: 12px; text-align: left; }
+.workspace-switcher > summary > span { font-size: var(--text-xs); }
+.workspace-switcher-panel { position: absolute; top: calc(100% + var(--space-2)); left: 0; z-index: var(--layer-popover); display: grid; gap: var(--space-1); min-width: 220px; padding: var(--space-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); }
+.workspace-switcher-panel button, .workspace-switcher-panel a { display: block; width: 100%; padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--ink); font-size: var(--text-sm); text-align: left; }
 .workspace-switcher-panel a:hover { background: var(--hover-bg); }
 @media (hover: none) { .project-tab-close { opacity: 1; pointer-events: auto; } }
 @media (min-width: 721px) {
-  main > .workspace-bar.header-tabs { min-height: 50px; padding: 0 12px; gap: 14px; background: var(--panel); }
-  .header-tabs .breadcrumb { flex: none; gap: 8px; }
-  .header-tabs .breadcrumb > :not(#menu-toggle) { display: none !important; }
-  .header-tabs #menu-toggle { width: 30px; height: 30px; padding: 5px; border: 0; background: transparent; color: var(--muted); }
-  .header-tabs .projects-bar { align-self: stretch; flex: 1; align-items: end; gap: 7px; padding: 0; border: 0; }
-  .header-tabs .view-tabs { align-self: stretch; align-items: end; flex: 0 1 auto; padding: 7px 2px 0; gap: 3px; scrollbar-width: none; }
+  main > .workspace-bar.header-tabs { min-height: 50px; padding: 0 var(--space-3); gap: var(--space-4); background: var(--panel); }
+  .header-tabs .breadcrumb { flex: none; gap: var(--space-2); }
+  .header-tabs .breadcrumb > :not(#menu-toggle) { display: none; }
+  .header-tabs #menu-toggle { width: 30px; height: 30px; padding: var(--space-1); border: 0; background: transparent; color: var(--muted); }
+  .header-tabs .projects-bar { align-self: stretch; flex: 1; align-items: end; gap: var(--space-2); padding: 0; border: 0; }
+  .header-tabs .view-tabs { align-self: stretch; align-items: end; flex: 0 1 auto; padding: var(--space-2) var(--stroke-strong) 0; gap: var(--space-1); scrollbar-width: none; }
   .header-tabs .view-tabs::-webkit-scrollbar { display: none; }
-  .header-tabs .project-tab { position: relative; height: 38px; max-width: 242px; padding-right: 5px; border: 1px solid transparent; border-bottom: 0; border-radius: 9px 9px 0 0; }
+  .header-tabs .project-tab { position: relative; height: 38px; max-width: 242px; padding-right: var(--space-1); border: 1px solid transparent; border-bottom: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
   .header-tabs .project-tab:hover { background: var(--hover-bg); }
-  .header-tabs .project-tab:has([aria-selected="true"]) { height: 39px; margin-bottom: -1px; border-color: var(--line); background: var(--paper); z-index: 1; }
-  .header-tabs .project-tab .view-tab { height: 100%; min-width: 0; padding: 0 8px 0 12px; gap: 7px; border: 0; background: transparent; font-size: 12px; }
+  .header-tabs .project-tab:has([aria-selected="true"]) { height: 39px; margin-bottom: calc(-1 * var(--stroke)); border-color: var(--line); background: var(--paper); z-index: var(--layer-sticky); }
+  .header-tabs .project-tab .view-tab { height: 100%; min-width: 0; padding: 0 var(--space-2) 0 var(--space-3); gap: var(--space-2); border: 0; background: transparent; font-size: var(--text-sm); }
   .header-tabs .project-tab .view-tab:hover { background: transparent; }
-  .header-tabs .project-tab-close { flex: none; width: 23px; height: 23px; padding: 0; border-radius: 5px; }
-  .header-tabs #open-project-tab { flex: none; width: 28px; height: 30px; padding: 0; margin-bottom: 4px; border: 0; font-size: 18px; }
-  .header-tabs .connection { font-size: 0; gap: 0; }
+  .header-tabs .project-tab-close { flex: none; width: 23px; height: 23px; padding: 0; border-radius: var(--radius-sm); }
+  .header-tabs #open-project-tab { flex: none; width: 28px; height: 30px; padding: 0; margin-bottom: var(--space-1); border: 0; font-size: var(--text-lg); }
+  .header-tabs .connection { gap: 0; width: var(--connection-dot); overflow: hidden; color: transparent; }
   .header-tabs .workspace-actions { flex: none; margin-left: 0; }
-  .header-tabs .workspace-actions button { padding: 7px 11px; font-size: 11px; }
+  .header-tabs .workspace-actions button { padding: var(--space-2) var(--space-3); font-size: var(--text-xs); }
   main:not(:has(> .welcome:not([hidden]))) .header-tabs .workspace-actions,
   .no-project .header-tabs .workspace-actions { display: none; }
 }
@@ -66,16 +66,16 @@ html.native-titlebar body > main > .workspace-bar,
 html.native-titlebar main:has(> .conversation:not([hidden])) > .workspace-bar {
   min-height: var(--native-titlebar-height); padding-top: calc(var(--native-titlebar-height) - var(--native-titlebar-tab-height));
 }
-html.native-titlebar { --native-titlebar-tab-height: 32px; } /* drift-ok: tab height; tab centers fall at IntegratedTitlebar.controlCenter (40 - 32 / 2) */
+html.native-titlebar { --native-titlebar-tab-height: 32px; }
 html.native-titlebar-controls .sidebar { padding-top: var(--native-titlebar-height); }
 /* The desktop bridge measures the header: it is inset where it meets the controls
    in every layout, and the page starts below the band when the header is hidden. */
-html.native-titlebar-inset body > main > .workspace-bar { padding-left: var(--native-titlebar-inset) !important; } /* drift-ok: measured clearance outranks every layout's header padding */
+html.native-titlebar-inset body > main > .workspace-bar { padding-left: var(--native-titlebar-inset); }
 html.native-titlebar-uncovered body > main { padding-top: var(--native-titlebar-height); }
 @media (min-width: 721px) {
   html.native-titlebar .header-tabs .projects-bar { align-self: stretch; }
   html.native-titlebar .header-tabs .view-tabs { padding-top: 0; }
   html.native-titlebar .header-tabs .project-tab { height: var(--native-titlebar-tab-height); }
   html.native-titlebar .header-tabs .project-tab:has([aria-selected="true"]) { height: calc(var(--native-titlebar-tab-height) + 1px); }
-  html.native-titlebar .header-tabs #open-project-tab { margin-bottom: 1px; }
+  html.native-titlebar .header-tabs #open-project-tab { margin-bottom: var(--stroke); }
 }
