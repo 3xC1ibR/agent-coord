@@ -237,8 +237,14 @@ def seed(root, workspace, sessions, state):
             "project": project_id, "dispatcherTarget": dispatcher_target}
 
 
-def fixture_handler(parent, sessions, fixture, stop):
+def fixture_handler(parent, sessions, fixture, stop, cacheable_shell):
     class FixtureHandler(parent):
+        def _send(self, status, content_type, body, **options):
+            if (cacheable_shell and status == HTTPStatus.OK and urlsplit(self.path).path == "/"
+                    and content_type.startswith("text/html")):
+                options["cache_control"] = "private, no-cache"
+            return super()._send(status, content_type, body, **options)
+
         def do_GET(self):
             parsed = urlsplit(self.path)
             if parsed.path == "/fixture/document":
@@ -286,6 +292,7 @@ def main():
     parser.add_argument("--scope", choices=("root", "workspace"), default="root")
     parser.add_argument("--state-directory", type=Path, help="Use an external owner-managed disposable directory.")
     parser.add_argument("--resume", action="store_true", help="Reopen a previously seeded disposable fixture.")
+    parser.add_argument("--cacheable-shell", action="store_true", help="Permit back-forward caching of the disposable HTML shell only.")
     args = parser.parse_args()
     scripts = args.source.resolve() / "plugins/agent-coord/scripts"
     if not (scripts / "agent_coord/ui.py").is_file():
@@ -355,7 +362,8 @@ def main():
             for component in (server.app_control, sessions.inbox_wake, sessions.sidecars, server.stoic_integration):
                 if component is not None:
                     component.close()
-            server.RequestHandlerClass = fixture_handler(server.RequestHandlerClass, sessions, fixture, stop)
+            server.RequestHandlerClass = fixture_handler(server.RequestHandlerClass, sessions, fixture, stop,
+                                                         args.cacheable_shell)
             server.timeout = .2
             print(json.dumps({**fixture, "base": f"http://127.0.0.1:{server.server_port}",
                               "pid": os.getpid()}), flush=True)

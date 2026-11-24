@@ -60,13 +60,14 @@ async function stopFixture(child, exited) {
   }
 }
 
-async function startFixture(state, {scope = "root", directory, resume = false, port} = {}) {
+async function startFixture(state, {scope = "root", directory, resume = false, port, cacheableShell = false} = {}) {
   const args = ["-B", "-W", "error::ResourceWarning", join(root, "tests/interface_fixture_server.py"),
     "--state", state, "--scope", scope, "--source", resolve(options.source)];
   if (options["web-root"]) args.push("--web-root", resolve(options["web-root"]));
   if (directory) args.push("--state-directory", directory);
   if (resume) args.push("--resume");
   if (port) args.push("--port", port);
+  if (cacheableShell) args.push("--cacheable-shell");
   const child = spawn(options.python, args, {stdio: ["ignore", "pipe", "pipe"]});
   const exited = new Promise(resolve => child.once("close", (code, signal) => resolve({code, signal})));
   observers.add(child);
@@ -536,6 +537,42 @@ async function mobileTiledComposers(page, fixture) {
   return geometry;
 }
 
+async function mobileLongAsk(page, fixture) {
+  await openConversation(page, fixture, fixture.threads.failed);
+  const strip = page.locator("#thread-asks");
+  const choice = strip.getByRole("button", {name: "Apply the existing engineering waiver", exact: true});
+  await choice.waitFor({state: "visible"});
+  const measure = button => {
+    const strip = button.closest("#thread-asks"), composer = document.getElementById("composer");
+    const stripRect = strip.getBoundingClientRect(), buttonRect = button.getBoundingClientRect();
+    const composerTop = composer.getBoundingClientRect().top;
+    const stickyBottom = strip.querySelector(".thread-asks-toggle").getBoundingClientRect().bottom;
+    const point = document.elementFromPoint(buttonRect.left + buttonRect.width / 2, buttonRect.top + buttonRect.height / 2);
+    return {scrollHeight: strip.scrollHeight, clientHeight: strip.clientHeight, scrollTop: strip.scrollTop,
+      overflow: getComputedStyle(strip).overflowY, buttonTop: buttonRect.top, buttonBottom: buttonRect.bottom,
+      buttonWidth: buttonRect.width, buttonHeight: buttonRect.height,
+      stripTop: stripRect.top, stripBottom: stripRect.bottom, stickyBottom, composerTop,
+      composerFont: getComputedStyle(document.getElementById("message")).fontSize,
+      answerFont: getComputedStyle(strip.querySelector("input.ask-note")).fontSize,
+      targetReceivesInput: button.contains(point)};
+  };
+  const before = await choice.evaluate(measure);
+  const box = await strip.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height - 5);
+  await page.mouse.wheel(0, before.scrollHeight);
+  await page.waitForFunction(expected => document.getElementById("thread-asks").scrollTop > expected, before.scrollTop);
+  const after = await choice.evaluate(measure);
+  assert(after.scrollHeight > after.clientHeight && ["auto", "scroll"].includes(after.overflow), JSON.stringify(after));
+  assert(after.buttonTop >= after.stickyBottom - 1 && after.buttonBottom <= after.stripBottom + 1 &&
+    after.buttonBottom <= after.composerTop + 1 && after.targetReceivesInput, JSON.stringify({before, after}));
+  assert(after.buttonHeight >= 44 && after.buttonWidth >= 44, JSON.stringify(after));
+  assert.equal(after.composerFont, "16px");
+  assert.equal(after.answerFont, "16px");
+  await choice.click({trial: true});
+  await page.screenshot({path: join(output, "mobile-long-ask-choice-after-scroll.png")});
+  return {before, after};
+}
+
 async function familyNavigation(page, fixture) {
   const {supervisor, lead, specialist, sibling} = fixture.threads;
   await browserOpen(page, fixture);
@@ -895,9 +932,28 @@ async function postBrowserAPI(fixture, route, body) {
 
 async function metadataUpdates(page, fixture) {
   const thread = fixture.threads.metadata;
+  const route = `conversations/${thread.id}/open`;
+  const responseStatuses = [];
+  page.on("response", response => {
+    if (new URL(response.url()).pathname === `/api/browser/${route}`) responseStatuses.push(response.status());
+  });
+  await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    window.interfaceCatalogBatches = [];
+    window.EventSource = class extends NativeEventSource {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener("message", message => {
+          const batch = JSON.parse(message.data);
+          for (const event of batch.events || []) {
+            if (event.method === "browser/conversationInvalidated") window.interfaceCatalogBatches.push(event.params);
+          }
+        });
+      }
+    };
+  });
   await openConversation(page, fixture, thread);
   await shown(page, `#thread-asks .ask-row[data-id="${fixture.asks.metadata}"]`);
-  const route = `conversations/${thread.id}/open`;
   const before = await getBrowserAPI(fixture, route);
   assert.equal(before.status, 200);
   const title = "Revised inspection drawings";
@@ -913,7 +969,16 @@ async function metadataUpdates(page, fixture) {
     target_thread_id: thread.id, run_at: fixture.anchor + 8 * 86400, timezone: "America/Chicago",
     message: schedule,
   });
-  await expectContains(page.locator("#title-heading"), title);
+  try {
+    await expectContains(page.locator("#title-heading"), title);
+  } catch (error) {
+    const after = await getBrowserAPI(fixture, route);
+    const batches = await page.evaluate(() => window.interfaceCatalogBatches);
+    throw new Error(`${error.message}\nBrowser catalog invalidations: ${JSON.stringify(batches)}\n` +
+      `Browser composite response statuses: ${JSON.stringify(responseStatuses)}\n` +
+      `Authoritative composite: ${JSON.stringify({status: after.status, title: after.body.work_thread?.title,
+        before: before.body.metadata_revision, after: after.body.metadata_revision})}`, {cause: error});
+  }
   await page.locator(`#thread-asks .ask-row[data-id="${fixture.asks.metadata}"]`).waitFor({state: "hidden"});
   await page.waitForFunction(() => !document.querySelector("#quiet-thread")?.textContent.includes("Make quiet"));
   const alarm = page.locator("#thread-schedules");
@@ -1014,7 +1079,7 @@ async function startupAsset(page, fixture, scenario) {
   return {scenario, requests};
 }
 
-async function browserCacheRecovery(page, fixture) {
+async function browserHistoryRecovery(page, fixture, requirePersisted = false) {
   const sources = [];
   page.on("request", request => {
     if (new URL(request.url()).pathname === "/api/browser/events") sources.push(Date.now());
@@ -1022,30 +1087,49 @@ async function browserCacheRecovery(page, fixture) {
   await page.addInitScript(() => {
     window.interfaceReturnEvents = [];
     window.addEventListener("pageshow", event => window.interfaceReturnEvents.push(event.persisted));
+    const NativeEventSource = window.EventSource;
+    const observed = window.interfaceEventSources = [];
+    window.EventSource = class extends NativeEventSource {
+      constructor(...args) { super(...args); observed.push(this); }
+    };
   });
   const thread = fixture.threads.background;
+  const text = "Keep this unsent until the calibration completes.";
+  const preview = '#image-attachments img[alt="calibration-history.png"]';
   await openConversation(page, fixture, thread);
   await expectContains(page.locator("#timeline"), "Streaming inspection update");
-  await page.locator("#message").fill("Keep this unsent until the calibration completes.");
+  await page.locator("#message").fill(text);
+  await page.locator("#image-picker").setInputFiles({name: "calibration-history.png", mimeType: "image/png",
+    buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9h8AAAAASUVORK5CYII=", "base64")});
+  await shown(page, preview);
   await page.waitForFunction(() => window.interfaceReturnEvents.length === 1);
   await page.goto(fixture.base + "/fixture/document", {waitUntil: "load"});
   const result = await fetch(fixture.base + "/fixture/advance");
   assert(result.ok);
-  await page.goBack({waitUntil: "commit"});
-  try {
-    await page.waitForFunction(() => window.interfaceReturnEvents?.includes(true));
-  } catch {
-    const navigation = await page.evaluate(() => {
+  const traversals = [];
+  for (let index = 0; index < 2; index++) {
+    await page.goBack({waitUntil: "commit"});
+    await page.waitForFunction(() => window.interfaceReturnEvents?.length &&
+      window.interfaceEventSources?.filter(source => source.readyState === EventSource.OPEN).length === 1);
+    await expectContains(page.locator("#title-heading"), thread.title);
+    await expectContains(page.locator("#timeline"), "Applied the final calibration sample.");
+    await page.waitForFunction(text => document.getElementById("message").value === text, text);
+    await shown(page, preview);
+    traversals.push(await page.evaluate(() => {
       const timing = performance.getEntriesByType("navigation")[0];
-      return {type: timing?.type, notRestoredReasons: timing?.notRestoredReasons,
-        pageShow: window.interfaceReturnEvents};
-    });
-    assert.fail("Browser did not enter the back-forward cache: " + JSON.stringify(navigation));
+      const reasons = timing?.notRestoredReasons?.reasons?.map(item => item.reason) || [];
+      return {type: timing?.type, persisted: window.interfaceReturnEvents.at(-1), reasons,
+        openSources: window.interfaceEventSources.filter(source => source.readyState === EventSource.OPEN).length};
+    }));
+    assert.equal(traversals.at(-1).openSources, 1);
+    if (index === 0) {
+      await page.goForward({waitUntil: "load"});
+      await expectContains(page.getByRole("paragraph"), "Fixture holding page");
+    }
   }
-  await expectContains(page.locator("#timeline"), "Applied the final calibration sample.");
-  assert.equal(await page.locator("#message").inputValue(), "Keep this unsent until the calibration completes.");
-  assert.equal(sources.length, 2);
-  return {persistedPageShow: true, eventSourceRequests: sources.length};
+  assert.equal(sources.length, 3);
+  if (requirePersisted) assert(traversals.every(item => item.persisted), JSON.stringify(traversals));
+  return {traversals, eventSourceRequests: sources.length, restoredText: true, restoredAttachment: true};
 }
 
 async function interactions(browser, fixture, report) {
@@ -1103,8 +1187,8 @@ async function interactions(browser, fixture, report) {
     await recordCheck(report, "hashed workspace startup " + scenario, () =>
       withPage(browser, page => startupAsset(page, fixture, scenario)));
   }
-  await recordCheck(report, "browser back-forward cache resumes SSE and keeps the draft",
-    () => desktop(page => browserCacheRecovery(page, fixture)));
+  await recordCheck(report, "browser Back and Forward restore conversation, draft, image, and SSE",
+    () => desktop(page => browserHistoryRecovery(page, fixture)));
 }
 
 
@@ -1397,7 +1481,11 @@ async function idleNetwork(page, fixture, duration, result) {
   page.on("request", collect);
   page.on("response", observeResponse);
   try {
-    await openConversation(page, fixture, fixture.threads.other);
+    // The Enter samples append records to their own conversation in this fixture.
+    // Use a stable, deep transcript whose expected latest record has not moved.
+    const thread = fixture.threads.supervisor;
+    result.thread = thread.id;
+    await openConversation(page, fixture, thread);
     await page.waitForFunction(() => window.interfaceEventSources.some(entry => entry.source.readyState === EventSource.OPEN));
     // One-time health and visit receipts can overlap opening the conversation.
     // Use a fixed settling window so recurring requests cannot postpone sampling.
@@ -1495,6 +1583,17 @@ async function main() {
           () => compositeOpen(fixture, true)), "workspace");
       await recordCheck(report, "persisted frontend cache and composer after coordinator process replacement",
         () => persistedCacheRestart(browser));
+      await recordCheck(report, "long mobile Ask scrolls wholly above the composer with a 44px choice",
+        () => withFixture("long-error", fixture => withPage(browser, page => mobileLongAsk(page, fixture),
+          {viewport: {width: 390, height: 844}, hasTouch: true, colorScheme: "dark"})));
+      if (options.engine === "chromium") {
+        await recordCheck(report, "cacheable disposable shell resumes a persisted pageshow",
+          async () => {
+            const {fixture, cleanup} = await startFixture("interactions", {cacheableShell: true});
+            try { return await withPage(browser, page => browserHistoryRecovery(page, fixture, true)); }
+            finally { await cleanup(); }
+          });
+      }
     }
     if (["all", "performance"].includes(options.mode) && typeof performanceChecks === "function") {
       await withFixture("interactions", fixture => performanceChecks(browser, fixture, report));
