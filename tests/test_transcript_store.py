@@ -1,0 +1,154 @@
+import copy
+import json
+from pathlib import Path
+import sys
+import tempfile
+import threading
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
+from agent_coord.store import CoordinationStore
+from agent_coord.history_persistence import HistoryPersistence, ensure_schema, read_history
+from agent_coord.transcript_store import TranscriptStore
+
+
+class TranscriptStoreTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = CoordinationStore(Path(directory.name) / "state.sqlite3")
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_history(thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL)")
+            ensure_schema(db)
+        self.transcripts = TranscriptStore(self.store)
+        self.history = {"id": "thread", "metadata": "λ雪", "turns": [
+            {"id": str(i), "status": "completed", "items": [
+                {"id": "tool", "type": "commandExecution", "output": "雪" * 2000},
+                {"id": "answer", "type": "agentMessage", "text": str(i)}]}
+            for i in range(83)]}
+        self.persistence = HistoryPersistence(self.store)
+        self.persistence.save("thread", self.history)
+
+    def test_copy_activation_pagination_and_previous_build(self):
+        reports = self.transcripts.migrate()
+        self.assertEqual(reports[0]["items"], 166)
+        self.assertIsNone(self.transcripts.read_window("thread"))
+        self.transcripts.migrate(activate=True)
+        self.assertEqual(self.transcripts.read_full("thread"), self.history)
+        page = self.transcripts.read_window("thread")
+        self.assertEqual(page["beforeSeq"], 43)
+        self.assertEqual(len(page["turns"]), 40)
+        self.assertTrue(page["turns"][0]["items"][0]["abridged"])
+        second = self.transcripts.read_window("thread", before_seq=page["beforeSeq"])
+        self.assertEqual(second["beforeSeq"], 3)
+        self.assertEqual(self.transcripts.read_full_turn("thread", "0"), self.history["turns"][0])
+        legacy = {"id": "thread", "turns": []}
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_history SET history_json=?", (json.dumps(legacy),))
+        self.assertIsNone(self.transcripts.read_window("thread"))
+        self.assertEqual(read_history(self.store, "thread"), legacy)
+
+    def test_restart_after_unpublished_files(self):
+        with patch.object(self.transcripts, "_sync_directory", side_effect=OSError("simulated crash")):
+            with self.assertRaises(OSError):
+                self.transcripts.migrate()
+        restarted = TranscriptStore(self.store)
+        restarted.migrate(activate=True)
+        self.assertEqual(restarted.read_full("thread"), self.history)
+        first = sorted(restarted.directory("thread").glob("*.jsonl"))
+        restarted.migrate(activate=True)
+        self.assertEqual(sorted(restarted.directory("thread").glob("*.jsonl")), first)
+
+    def test_normal_save_keeps_both_readers_current(self):
+        self.transcripts.migrate(activate=True)
+        changed = copy.deepcopy(self.history)
+        changed["turns"][-1]["items"][1]["text"] = "replacement"
+        self.persistence.save("thread", changed)
+        self.assertEqual(self.transcripts.read_full("thread"), changed)
+        from agent_coord.history_persistence import decode_history
+        with self.store.reading(), self.store._connection() as db:
+            raw = db.execute("SELECT history_json FROM browser_history").fetchone()[0]
+            self.assertEqual(decode_history(raw, db=db), changed)
+
+    def test_readers_never_observe_partial_generation(self):
+        self.transcripts.migrate(activate=True)
+        errors = []
+        def reader():
+            try:
+                for _ in range(20):
+                    value = self.transcripts.read_full("thread")
+                    self.assertIn(len(value["turns"]), (82, 83))
+            except Exception as error:
+                errors.append(error)
+        worker = threading.Thread(target=reader)
+        worker.start()
+        self.transcripts.save("thread", {**self.history, "turns": self.history["turns"][:-1]}, activate=True)
+        worker.join()
+        self.assertEqual(errors, [])
+
+    def test_append_proportional_and_private_surrogate_round_trip(self):
+        self.transcripts.migrate(activate=True)
+        path = self.transcripts.directory("thread") / "turns.full.jsonl"
+        initial_size = path.stat().st_size
+        turn = {"id": "83", "items": [{"text": "\ud800雪"}]}
+        from agent_coord.transcript_store import encode
+        self.transcripts.save_turns("thread", {83: turn}, metadata={"id": "thread"}, turn_count=84)
+        self.assertEqual(path.stat().st_size - initial_size, len(encode(turn)) + 1)
+        self.transcripts.save_turns("thread", {83: turn}, metadata={"id": "thread"}, turn_count=84)
+        self.assertEqual(path.stat().st_size - initial_size, len(encode(turn)) + 1)
+        self.assertEqual(self.transcripts.read_full_turn("thread", "83"), turn)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT item_count FROM transcript_generations").fetchone()[0], 167)
+
+    def test_restart_between_threads_and_corruption_detection(self):
+        self.persistence.save("second", {"id": "second", "turns": []})
+        original = self.transcripts.save
+        calls = []
+        def interrupted(*args, **kwargs):
+            calls.append(args[0])
+            if len(calls) == 2:
+                raise OSError("migration interrupted")
+            return original(*args, **kwargs)
+        with patch.object(self.transcripts, "save", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                self.transcripts.migrate()
+        restarted = TranscriptStore(self.store)
+        self.assertEqual(len(restarted.migrate(activate=True)), 2)
+        path = restarted.directory("thread") / "turns.full.jsonl"
+        with path.open("r+b") as file:
+            file.write(b"X")
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            restarted.read_full("thread")
+
+    def test_cursor_failure_rolls_back_publication(self):
+        self.transcripts.migrate(activate=True)
+        def fail(db):
+            db.execute("UPDATE browser_history SET history_json='{}'")
+            raise RuntimeError("cursor failure")
+        with self.assertRaises(RuntimeError):
+            self.transcripts.save("thread", {"id": "thread", "turns": []}, checkpoint=5, on_publish=fail)
+        self.assertEqual(self.transcripts.read_full("thread"), self.history)
+        self.assertEqual(read_history(self.store, "thread"), self.history)
+
+    def test_journal_does_not_write_sqlite(self):
+        with patch.object(self.store, "_connection", side_effect=AssertionError("SQLite on delta")):
+            self.transcripts.append_live("thread", {"sequence": 1})
+            self.assertEqual(list(self.transcripts.replay_live("thread")), [{"sequence": 1}])
+
+    def test_journal_torn_tail_and_monotonic_checkpoint(self):
+        self.transcripts.append_live("thread", {"sequence": 1, "text": "λ"})
+        with (self.transcripts.directory("thread") / "live.jsonl").open("ab") as file:
+            file.write(b'{"torn":')
+        self.transcripts.append_live("thread", {"sequence": 2, "text": "complete"})
+        self.assertEqual([x["sequence"] for x in self.transcripts.replay_live("thread")], [1, 2])
+        self.transcripts.save("thread", self.history, activate=True, checkpoint=2)
+        with self.assertRaises(ValueError):
+            self.transcripts.save("thread", self.history, checkpoint=1)
+        self.assertEqual(list(self.transcripts.replay_live("thread", after_seq=2)), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
