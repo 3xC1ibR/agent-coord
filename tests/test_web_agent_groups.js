@@ -28,6 +28,7 @@ function harness(threads) {
     savedViews: {activeId: "all", render() {}}, conversationSearch: null,
     threadGrouping: grouping, threadOrganization: require("../plugins/agent-coord/scripts/agent_coord/web/organization.js"),
     threadViews: require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews,
+    WorkingSet: require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js"),
     groupHeading: label => element("h2", label), renderStatus() {}, renderClosedToggle() {},
     associationLabel: () => "", relativeTime: () => "", snoozeLabel: () => "", action: fn => fn(), select: id => selected.push(id)};
   c.threadsInProject = threads => threads; // This fixture supplies one project’s inventory.
@@ -288,4 +289,24 @@ test("agents group under their current supervisor, and the user's agents stand a
     withClass(group, "agent-row").map(row => row.dataset.thread).sort()]));
   assert.deepEqual(membership.next, ["moved"]);
   assert.deepEqual(membership.lead, ["kept"]);
+});
+
+test("sidebar agent rows share the needs-you rule: a dismissed request clears, and only escalations count for the parent", () => {
+  const request = {response_state: "input", attention_reason: "review", needs_attention: true, unhandled_response: true,
+    can_handle_response: true, checkpoint: {id: 4, phase: "planning", next_actor: "user", next_action: "Choose"}};
+  const c = harness([thread("parent"), thread("child", "parent", request)]);
+  const row = () => c.rows().find(r => r.dataset.thread === "child");
+  const label = () => walk(row()).map(n => n.textContent || "").join(" ");
+  const counts = () => walk(withClass(c.$("overview"), "agent-children")[0]).filter(n => n.className === "agent-counts").map(n => n.textContent);
+  assert.match(row().className, /needs-attention/, "the child's own open request marks its row, as in the tree");
+  assert.deepEqual(counts(), [], "a child's saved request does not count toward its parent");
+  // Dismissed in the thread: the backend records the handled checkpoint and clears needs_attention.
+  Object.assign(c.state.sessions[1], {handled_checkpoint_id: 4, needs_attention: false, can_handle_response: false});
+  c.renderList();
+  assert.doesNotMatch(row().className, /needs-attention/);
+  assert.doesNotMatch(label(), /Blocked|Review requested/, "a dismissed request reads as the agent's phase");
+  Object.assign(c.state.sessions[1], {status: "needs input", needs_attention: true});
+  c.renderList();
+  assert.match(row().className, /needs-attention/);
+  assert.deepEqual(counts(), ["1 needs you"], "a live approval escalates to the parent");
 });

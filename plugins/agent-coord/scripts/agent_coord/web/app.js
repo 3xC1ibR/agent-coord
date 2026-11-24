@@ -1013,10 +1013,8 @@ function agentThreadTree(threads) {
   }
   for (const items of children.values()) items.sort((a, b) =>
     (a.created_at || 0) - (b.created_at || 0) || a.thread_id.localeCompare(b.thread_id));
-  const requiresInput = thread => threadGrouping.awaitsUser(thread) && (
-    ["input", "action", "failed"].includes(thread.response_state) || thread.snooze_due ||
-    ["blocked", "review"].includes(thread.attention_reason) ||
-    (!thread.checkpoint_stale && thread.checkpoint?.next_actor === "user" && thread.checkpoint.next_action));
+  // An agent row needs the user by the same rule as its tab dot and tree badge, which honors dismissal.
+  const requiresInput = thread => threadViews.needsAction(thread);
   return {children, requiresInput,
     // Use the badge's attention predicate: unread findings and replies need
     // their own card even when their creator has nothing in Attention.
@@ -1064,7 +1062,8 @@ function agentThreadChildren(parent, tree, compact) {
   details.open = expansion.get(key) ?? true;
   details.ontoggle = () => { if (details.isConnected) expansion.set(key, details.open); };
   const working = children.filter(thread => threadGrouping.status(thread).key === "running").length;
-  const needsInput = children.filter(tree.requiresInput).length;
+  // As in the inbox, only what escalates (approval or stall) counts toward the parent's "needs you".
+  const needsInput = children.filter(child => WorkingSet.escalates(child) && WorkingSet.requestOf(child) !== "failed").length;
   const unread = children.filter(thread => thread.unread_result).length;
   const summary = node("summary", null, "agent-children-toggle");
   const counts = [needsInput && needsInput + " needs you"].filter(Boolean);
@@ -1077,8 +1076,10 @@ function agentThreadChildren(parent, tree, compact) {
   details.append(summary);
   const list = node("ul", null, "agent-rows");
   for (const child of children) {
-    const item = node("li"), status = threadGrouping.status(child);
-    const button = node("button", null, "agent-row" + (status.key === "running" ? " working" : "") + (tree.requiresInput(child) ? " needs-attention" : "") + (child.unread_result ? " response-unread" : ""));
+    const item = node("li"), needs = tree.requiresInput(child);
+    // A dismissed request keeps its saved reason; without a current need it reads as the agent's phase.
+    const raw = threadGrouping.status(child), status = raw.key === "waiting" && !needs ? {key: "idle", label: threadGrouping.phaseLabel(child)} : raw;
+    const button = node("button", null, "agent-row" + (status.key === "running" ? " working" : "") + (needs ? " needs-attention" : "") + (child.unread_result ? " response-unread" : ""));
     button.type = "button";
     button.dataset.thread = child.thread_id;
     button.setAttribute("aria-current", state.selected === child.thread_id ? "true" : "false");
