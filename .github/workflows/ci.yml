@@ -136,7 +136,7 @@ jobs:
           retention-days: 30
 
   ios-companion:
-    name: iOS companion policy and simulator build
+    name: iOS companion policy and device builds
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -151,7 +151,8 @@ jobs:
           xcodebuild -project mobile/ios/RibbonField.xcodeproj \
             -scheme RibbonField -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build/ios-simulator CODE_SIGNING_ALLOWED=NO build
+            -derivedDataPath build/ios-simulator CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
       - name: Retain the simulator application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -164,7 +165,8 @@ jobs:
           xcodebuild -project mobile/ios/RibbonField.xcodeproj \
             -scheme RibbonField -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build/ios-device CODE_SIGNING_ALLOWED=NO build
+            -derivedDataPath build/ios-device CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build
       - name: Retain the device application for local provisioning
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
