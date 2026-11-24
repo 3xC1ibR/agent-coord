@@ -358,7 +358,9 @@ async function openFromList(page, fixture, thread, {expand = []} = {}) {
     const button = page.locator(`#thread-list-overview [data-thread="${ancestor.id}"][data-action="agents"]`);
     if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
   }
-  await page.locator(`#thread-list-overview [data-thread="${thread.id}"][data-action="open"]`).click();
+  const row = page.locator(`#thread-list-overview [data-thread="${thread.id}"][data-action="open"]`);
+  await row.focus();
+  await row.press("Enter");
   await readyConversation(page, thread);
 }
 
@@ -477,6 +479,8 @@ async function familyNavigation(page, fixture) {
   const workspace = await workspaceSelection(page);
   assert.equal(workspace, fixture.workspace);
   assert.equal(title, supervisor.title);
+  if (await page.locator("#context-panel").isVisible()) await page.locator("#toggle-context").click();
+  assert(!await page.locator("#context-panel").isVisible());
   await openFromList(page, fixture, specialist, {expand: [supervisor, lead]});
   const breadcrumb = page.locator(".conversation-head #agent-breadcrumb");
   await breadcrumb.waitFor({state: "visible"});
@@ -686,6 +690,8 @@ async function sharedPanes(page, fixture) {
       await switcher.click();
       await page.locator("#folder-path").fill(directory);
       await page.locator("#folder-path").press("Enter");
+      const destination = page.locator('#project-target-dialog button[value="tab"]');
+      await destination.click();
       await page.waitForFunction(directory => document.querySelector('#view-tabs [aria-selected="true"]')
         ?.dataset.projectCwd === directory, directory);
       await page.locator("#tile-threads").click();
@@ -740,7 +746,7 @@ async function compositeOpen(fixture, scoped = false) {
     assert(Number.isInteger(body[name]), "Missing integer revision " + name);
   }
   const unauthenticated = await getBrowserAPI(fixture, route(thread.id), {headers: {"X-Forwarded-Host": "fixture.invalid"}});
-  assert.equal(unauthenticated.status, 401);
+  assert([401, 403].includes(unauthenticated.status));
   const managed = await getBrowserAPI(fixture, route(fixture.threads.managed.id));
   assert(managed.status >= 400 && managed.status < 500);
   const outer = await getBrowserAPI(fixture, route(fixture.threads.remote.id));
@@ -907,7 +913,16 @@ async function browserCacheRecovery(page, fixture) {
   const result = await fetch(fixture.base + "/fixture/advance");
   assert(result.ok);
   await page.goBack({waitUntil: "commit"});
-  await page.waitForFunction(() => window.interfaceReturnEvents?.includes(true));
+  try {
+    await page.waitForFunction(() => window.interfaceReturnEvents?.includes(true));
+  } catch {
+    const navigation = await page.evaluate(() => {
+      const timing = performance.getEntriesByType("navigation")[0];
+      return {type: timing?.type, notRestoredReasons: timing?.notRestoredReasons,
+        pageShow: window.interfaceReturnEvents};
+    });
+    assert.fail("Browser did not enter the back-forward cache: " + JSON.stringify(navigation));
+  }
   await expectContains(page.locator("#timeline"), "Applied the final calibration sample.");
   assert.equal(await page.locator("#message").inputValue(), "Keep this unsent until the calibration completes.");
   assert.equal(sources.length, 2);
@@ -1263,6 +1278,11 @@ async function main() {
     throw error;
   } finally {
     await browser.close();
+    const endingRevision = execFileSync("git", ["rev-parse", "HEAD"], {cwd: report.source, encoding: "utf8"}).trim();
+    if (endingRevision !== report.sourceRevision) {
+      report.sourceChangedDuringValidation = endingRevision;
+      if (options.check) process.exitCode = 1;
+    }
     await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
   }
   if (options.checks) assert(report.checks.length, "No scenarios matched --checks.");

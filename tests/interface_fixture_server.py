@@ -30,7 +30,8 @@ LONG_TITLE = ("Final inspection of assemblies from the northern fabrication line
               "with replacement fasteners and revised acceptance limits")
 POST_PREFIXES = ("/api/browser/asks/", "/api/browser/threads/", "/api/browser/sessions/",
                  "/api/browser/activity/", "/api/browser/workspaces/open",
-                 "/api/browser/notifications/", "/api/browser/events/", "/api/browser/schedules")
+                 "/api/browser/notifications/", "/api/browser/events/", "/api/browser/schedules",
+                 "/api/browser/navigation/resolve")
 
 
 def make_turn(thread, index, text, *, status="completed", request=None):
