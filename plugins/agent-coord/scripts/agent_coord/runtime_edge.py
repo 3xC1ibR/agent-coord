@@ -1,9 +1,10 @@
 """Retain the desktop browser origin while its loopback coordinator changes."""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
+import fcntl
 from http.client import HTTPConnection, HTTPException
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,12 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+from .image_inputs import MAX_MESSAGE_BODY_BYTES
+from .local_http import LocalHTTPServer
+
 WAIT_SECONDS = 2.0
 CONNECT_SECONDS = .2
 REQUEST_SECONDS = 30
-MAX_BODY = 8 * 1024 * 1024
 HEALTH = "/_runtime/health"
 OBSERVER_HEADER = "X-Ribbon-Runtime-Observer"
 FENCED_HEADER = "X-Ribbon-Admission-Fenced"
@@ -72,7 +75,7 @@ def probe(edge):
 
 def ensure(database, payload):
     """Start the detached listener from a retained payload under its own lock."""
-    from .desktop_runtime import lock_file, payload_environment, runtime_directory
+    from .desktop_runtime import lock_file, payload_command, payload_environment, runtime_directory
     directory = runtime_directory(database)
     with closing(os.fdopen(lock_file(directory / "edge-launch.lock", blocking=True), "rb")):
         edge = read_address(directory)
@@ -84,7 +87,7 @@ def ensure(database, payload):
                 pass
         owner = lock_file(directory / "edge-owner.lock")
         try:
-            command = [sys.executable, "-B", "-u", "-m", "agent_coord.runtime_edge",
+            command = [payload_command(payload)[0], "-B", "-u", "-m", "agent_coord.runtime_edge",
                        str(directory), str(owner)]
             with (directory / "runtime.log").open("ab", buffering=0) as log:
                 child = subprocess.Popen(command, pass_fds=(owner,), env=payload_environment(payload),
@@ -121,8 +124,14 @@ def adoption_status(directory, status):
     return status
 
 
-def publish(directory, status, browser_token, *, ready):
+def publish(directory, status, browser_token, *, ready, predecessor=False):
     """Publish a route only after the coordinator owns the serving generation."""
+    from .desktop_runtime import lock_file
+    with closing(os.fdopen(lock_file(directory / "edge-route.lock", blocking=True), "rb")):
+        _publish_route(directory, status, browser_token, ready, predecessor)
+
+
+def _publish_route(directory, status, browser_token, ready, predecessor):
     from .desktop_runtime import atomic_json
     current = private_json(directory / "edge-route.json")
     generation = status["instance"]
@@ -133,14 +142,35 @@ def publish(directory, status, browser_token, *, ready):
     # close its own route but cannot overwrite a replacement's route.
     if not ready and current and current["status"]["instance"] != generation:
         return
+    if predecessor and current and not current.get("predecessor") and current["status"]["instance"] != generation:
+        return
     public_status = {key: status.get(key) for key in (
         "status", "url", "pid", "instance", "payload", "pending", "pending_confirmation",
         "runtime_updates", "runtime_update_prompts", "uninterrupted_updates",
         "interrupted_provider_continuation", "paused", "upgrade_error",
     )}
-    route = {"status": public_status, "browser_token": browser_token, "ready": ready}
+    route = {"status": public_status, "browser_token": browser_token, "ready": ready, "predecessor": predecessor}
+    if current and not current["ready"]:
+        route["fenced_since"] = current.get("fenced_since")
+    if not ready and not route.get("fenced_since"):
+        route["fenced_since"] = time.monotonic()
+    if ready and route.get("fenced_since"):
+        route["handover_ms"] = round(1000 * (time.monotonic() - route.pop("fenced_since")), 2)
+    elif ready and current and current["status"]["instance"] == generation and "handover_ms" in current:
+        route["handover_ms"] = current["handover_ms"]
     if current != route:
         atomic_json(directory / "edge-route.json", route)
+
+
+def publish_predecessor(directory, status):
+    """Bind a signed runtime that predates explicit edge publication."""
+    with closing(HTTPConnection(authority(status["url"]), timeout=1)) as connection:
+        connection.request("GET", CONFIG)
+        with connection.getresponse() as response:
+            if response.status != 200:
+                raise RuntimeError("The preceding coordinator did not provide browser authentication.")
+            token = json.load(response)["token"]
+    publish(directory, status, token, ready=True, predecessor=True)
 
 
 def _cursor(target, generation, event_id):
@@ -168,7 +198,25 @@ def _safe_headers(headers):
     return HOP_HEADERS | nominated
 
 
-class EdgeServer(ThreadingHTTPServer):
+@contextmanager
+def inflight_descriptor(directory):
+    fd = os.open(directory / "edge-inflight.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def drained(directory):
+    with inflight_descriptor(directory) as fd:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+
+class EdgeServer(LocalHTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
@@ -189,10 +237,16 @@ class EdgeServer(ThreadingHTTPServer):
         route = self.route()
         update = read(self.directory)
         status = dict(route["status"]) if route else {}
-        if not route or not route["ready"]:
+        predecessor_switching = (route and route.get("predecessor") and update
+            and update.get("source_instance") == status.get("instance")
+            and update["phase"] in {"stopping", "prepared", "trial", "committed"})
+        if predecessor_switching:
+            status["status"] = "updating"
+        elif not route or not route["ready"]:
             status["status"] = "updating" if update and update["phase"] not in TERMINAL else "unavailable"
         return {**adoption_status(self.directory, {**status, "update": update}),
-                "edge_url": self.origin + "/", "edge_instance": self.instance}
+                "edge_url": self.origin + "/", "edge_instance": self.instance,
+                "edge_handover_ms": route.get("handover_ms") if route else None}
 
 
 class EdgeHandler(BaseHTTPRequestHandler):
@@ -255,24 +309,38 @@ class EdgeHandler(BaseHTTPRequestHandler):
                 self.respond(400, {"error": "Invalid request framing."})
                 return
             length = int(lengths[0]) if lengths else 0
-            if length > MAX_BODY or (length and self.command != "POST"):
+            if length > MAX_MESSAGE_BODY_BYTES or (length and self.command != "POST"):
                 self.respond(413, {"error": "Invalid request size."})
-                return
-            body = self.rfile.read(length) if length else None
-            if body is not None and len(body) != length:
-                self.respond(400, {"error": "Incomplete request."})
                 return
             token = self.headers.get_all(TOKEN_HEADER, [])
             if token and (len(token) != 1 or not secrets.compare_digest(
                     token[0].encode("latin-1"), self.server.browser_token.encode())):
                 self.respond(403, {"error": "Invalid local runtime request token."})
                 return
+            body = self.rfile.read(length) if length else None
+            if body is not None and len(body) != length:
+                self.respond(400, {"error": "Incomplete request."})
+                return
             end = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < end:
                 route = self.server.route()
-                if route and route["ready"] and self.forward(route, path, body):
-                    return
-                time.sleep(.02)
+                if route and route["ready"]:
+                    if path == SSE:
+                        if self.forward(route, path, body):
+                            return
+                    else:
+                        with inflight_descriptor(self.server.directory) as fd:
+                            try:
+                                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                pass
+                            else:
+                                # A request holding the lease after this read
+                                # is counted before the old process can exit.
+                                route = self.server.route()
+                                if route and route["ready"] and self.forward(route, path, body):
+                                    return
+                time.sleep(.005)
             self.respond(503, {"error": "The coordinator is switching. The request was not admitted."})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
@@ -311,6 +379,8 @@ class EdgeHandler(BaseHTTPRequestHandler):
             except (OSError, HTTPException):
                 # The receiving handler may already have committed. Let its
                 # durable request receipt resolve retries from the caller.
+                if self.command in {"GET", "HEAD"}:
+                    return False
                 self.respond(502, {"error": "The coordinator response was lost. Check the request outcome."})
                 return True
             if response.status == 503 and response.getheader(FENCED_HEADER) == generation:
@@ -376,7 +446,6 @@ def serve(directory):
 
 if __name__ == "__main__":
     # Hold the inherited edge owner descriptor for the listener lifetime.
-    import fcntl
     directory = Path(sys.argv[1])
     owner = int(sys.argv[2])
     descriptor, lock = os.fstat(owner), (directory / "edge-owner.lock").stat()

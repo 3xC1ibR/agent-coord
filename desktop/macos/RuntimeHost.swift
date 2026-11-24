@@ -346,7 +346,7 @@ final class Backend {
         guard !polling, !stopping else { return }
         polling = true
         if let edgeURL = edgeURL, let observer = edgeObserver {
-            var request = URLRequest(url: edgeURL.appendingPathComponent("_runtime/health"))
+            var request = URLRequest(url: edgeURL.appendingPathComponent("_runtime").appendingPathComponent("health"))
             request.setValue(observer, forHTTPHeaderField: "X-Ribbon-Runtime-Observer")
             healthSession.dataTask(with: request) { [weak self] data, response, error in
                 DispatchQueue.main.async {
@@ -414,7 +414,7 @@ final class Backend {
         }
         if expectedUpdate != nil { completion(Self.failure("The requested backend update is still being observed.")); return }
         let request = interactionRequestID ?? UUID().uuidString
-        if interactionURL != nil { interactionRequestID = request }
+        if legacyInteractionURL != nil { interactionRequestID = request }
         expectedUpdate = (request, payload)
         worker.async {
             do {
