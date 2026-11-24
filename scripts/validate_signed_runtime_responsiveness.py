@@ -523,18 +523,26 @@ class SignedUpgrade(Validation):
         now = time.monotonic()
         stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
         next_sample = now
-        lowest = None
+        previous_pending = None
+        credited_head = None
         while now < min(deadline, stall_deadline):
             if self.gateway_control("identity").get("settled") is True:
                 return
             if now >= next_sample and intake.is_file():
                 with closing(sqlite3.connect(intake.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                    pending, = db.execute("SELECT COUNT(*) FROM intake WHERE state IN ('uncertain','queued')").fetchone()
-                self.report.setdefault("intake_settlement_observations", []).append({"at_ms": time.time()*1000,
-                                                                                   "pending": pending})
-                if lowest is None or pending < lowest:
-                    lowest = pending
+                    pending, head = db.execute(
+                        "SELECT count(*), min(sequence) FROM intake WHERE state IN ('uncertain','queued')"
+                    ).fetchone()
+                self.report.setdefault("intake_settlement_observations", []).append(
+                    {"at_ms": time.time()*1000, "pending": pending, "oldest_pending_sequence": head})
+                # A burst of new arrivals can exceed the initial depth. Credit
+                # a shrinking queue only when the oldest outstanding request
+                # also advances. All arrivals still have to finish by deadline.
+                if previous_pending is None or (pending < previous_pending and
+                        (head is None or credited_head is None or head > credited_head)):
                     stall_deadline = now + UPDATE_PHASE_STALL_SECONDS
+                    credited_head = head
+                previous_pending = pending
                 next_sample = now + 5
             time.sleep(.25)
             now = time.monotonic()

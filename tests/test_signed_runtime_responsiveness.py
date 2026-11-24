@@ -407,11 +407,13 @@ class GuardedAuthorizationTests(unittest.TestCase):
         intake.parent.mkdir(parents=True)
         run = self.run_fixture
         with closing(sqlite3.connect(intake, isolation_level=None)) as db:
-            db.execute("CREATE TABLE intake(state TEXT)")
-            db.executemany("INSERT INTO intake VALUES ('queued')", [(), (), ()])
+            db.execute("CREATE TABLE intake(sequence INTEGER PRIMARY KEY, state TEXT)")
+            db.executemany("INSERT INTO intake(state) VALUES ('queued')", [(), (), ()])
             elapsed = [0]
             def advance(_):
                 elapsed[0] += 10
+                if elapsed[0] == 40:
+                    db.executemany("INSERT INTO intake(state) VALUES ('queued')", [()] * 20)
                 if elapsed[0] in (90, 180):
                     db.execute("DELETE FROM intake WHERE rowid=(SELECT MIN(rowid) FROM intake)")
             with mock.patch.object(self.gate.time, "monotonic", side_effect=lambda: elapsed[0]), \
