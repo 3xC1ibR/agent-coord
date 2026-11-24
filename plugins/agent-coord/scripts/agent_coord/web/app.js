@@ -1202,7 +1202,7 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
       }
       if (!items.length) for (const message of (snapshot.coordinationMessages || []).slice(-12))
         content.append(node("article", (message.body || "").slice(0, 8192), "message"));
-      if (content.childElementCount) replaceTimelineContent(content);
+      if (content.childElementCount) { replaceTimelineContent(content); updateOutgoing(id); }
     }).catch(() => {});
   }
   const fresh = current || await refreshDetail({markSeen: false});
@@ -1712,7 +1712,8 @@ function renderStatus() {
   const orderedInput = !dispatcher && state.outgoing?.pendingTransferCounts?.has(state.selected) &&
     ["codex", "claude"].includes(work?.client);
   const ordinaryStartingInput = starting && (orderedInput || state.detail.acceptsUntargetedInput) && ["codex", "claude"].includes(work?.client);
-  $("send").disabled = !state.detail || !work?.browser_session || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
+  const opening = !state.detail && state.detailRefreshing && state.conversations?.get(state.selected)?.pending;
+  $("send").disabled = (!work?.browser_session && !opening) || (starting && !ordinaryStartingInput) || archived || sessionBusy() || !!state.attachments?.pending() || state.closing.has(state.selected);
   const sendAction = dispatcher ? "Send request" : orderedInput ? "Send after pending messages" : running && !ordinaryStartingInput ? (!["codex", "claude", "muse"].includes(work?.client) ? "Queue message" : "Steer current turn") : "Send message";
   $("send").setAttribute?.("aria-label", sendAction);
   $("send").title = sendAction + " (Enter)";
@@ -2169,13 +2170,18 @@ class OutgoingMessages {
     status.className = "message-time outgoing-status";
     status.setAttribute("role", "status");
     const statusText = {sent: "Sent", sending: "Sending…", queued: "Queued during update",
-      uncertain: "Delivery unconfirmed", failed: "Not sent · " + entry.error};
+      uncertain: "Delivery unconfirmed", unverified: "Delivery unconfirmed · no further attempts", failed: "Not sent · " + entry.error};
     status.textContent = statusText[entry.status];
     message.append(body, status);
     if (entry.retry && entry.status === "uncertain") {
       const retry = document.createElement("button");
       retry.className = "quiet"; retry.type = "button"; retry.textContent = "Check delivery";
       retry.onclick = entry.retry; message.append(retry);
+    }
+    if (entry.release && entry.status === "uncertain") {
+      const release = document.createElement("button");
+      release.className = "quiet"; release.type = "button"; release.textContent = "Continue without resending";
+      release.onclick = () => entry.release().catch(showError); message.append(release);
     }
     return message;
   }
@@ -4229,6 +4235,7 @@ $("search").onkeydown = event => {
   if (event.key === "Escape") { $("search").value = ""; filtersChanged(); }
 };
 async function sendMessage(mode = "send", quiet = false) {
+  if (!state.detail && state.detailRefreshing) return submitAfterFirstRead(quiet);
   const reviewing = state.detail?.reviews?.some(run => run.active);
   if (reviewing) mode = "steer";
   else if (state.detail?.running && ["antigravity", "kimi"].includes(state.detail?.work_thread?.client)) mode = "queue";
@@ -4410,7 +4417,7 @@ function composerKeydown(event) {
   if (state.config?.quietSubmissions === 1 && TurnNotifications.isQuietShortcut(event)) {
     event.preventDefault();
     if (!$("send").disabled) action(() => sendMessage("send", true));
-    else submitAfterFirstRead(true);
+    else action(() => submitAfterFirstRead(true));
     return;
   }
   if (event.isComposing || event.keyCode === 229 || state.slashCommands?.composing || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
@@ -4420,7 +4427,7 @@ function composerKeydown(event) {
     if (globalThis.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
     event.preventDefault();
     if (!$("send").disabled) requestComposerSubmit();
-    else submitAfterFirstRead(false);
+    else action(() => submitAfterFirstRead(false));
   } else if (event.key === "Tab" && state.detail?.running && ($("message").value.trim() || state.attachments?.snapshot().length)) {
     event.preventDefault();
     if (!$("queue").disabled) action(() => sendMessage("queue"));
@@ -4432,6 +4439,19 @@ function submitAfterFirstRead(quiet) {
   const revision = state.navigationRevision, text = $("message").value;
   const images = state.attachments?.snapshot(id) || [];
   if (!text.trim() && !images.length) return;
+  if (!text.trimStart().startsWith("/") && state.durableDrafts?.resolveSubmission) {
+    const mentions = state.mentions?.snapshot(id, text) || [];
+    const body = {message: text, windowId: state.sourceWindowId};
+    if (mentions.length) body.mentions = mentions;
+    if (images.length) body.images = images.map(({name, url}) => ({name, url}));
+    if (quiet || state.quietSubmissions?.has(id)) { body.quiet = true; state.quietSubmissions?.delete(id); }
+    return submitComposerMessage({id, text, images, mentions, body, detail: null, path: "", clear() {
+      $("message").value = ""; state.drafts.delete(id);
+      state.mentions?.sent(id, text, mentions);
+      if (images.length) state.attachments?.sent(id, images);
+      state.timelineScroll?.latest();
+    }});
+  }
   const intent = entry.firstReadIntent = {};
   // Attach to this exact read. A retry or a later read cannot submit an
   // abandoned draft, and normal background reconciliation never holds Enter.

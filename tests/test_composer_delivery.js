@@ -286,18 +286,25 @@ test("second Enter cannot overtake a prior echo whose discovery failed before it
 test("a browser without locks grants its scope only to the document following its own pagehide", async () => {
   const f = environment();
   let sequence = 0;
+  const consumed = new Set();
+  const claim = async (database, scope, generation) => {
+    const key = scope + ":" + generation;
+    if (consumed.has(key)) return false;
+    consumed.add(key); return true;
+  };
   function open(seed) {
     const events = new Map(), store = new Map(seed), view = {navigator: {}, crypto: {randomUUID: () => String(++sequence)},
       addEventListener: (name, handler) => events.set(name, handler),
       sessionStorage: {getItem: key => store.get(key), setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)}};
     return {store, events, view};
   }
-  const first = open(), id = await f.context.composerWindowScope(first.view);
+  const first = open(), id = await f.context.composerWindowScope(first.view, claim);
   const duplicate = open(first.store);
-  assert.notEqual(await f.context.composerWindowScope(duplicate.view), id);
+  assert.notEqual(await f.context.composerWindowScope(duplicate.view, claim), id);
   first.events.get("pagehide")();
-  const reload = open(first.store);
-  assert.equal(await f.context.composerWindowScope(reload.view), id);
+  const reload = open(first.store), copiedHandoff = open(first.store);
+  assert.equal(await f.context.composerWindowScope(reload.view, claim), id);
+  assert.notEqual(await f.context.composerWindowScope(copiedHandoff.view, claim), id);
 });
 
 test("checkpoint persists the first decoded image while the second is pending and drains both file reads", async () => {
@@ -351,4 +358,52 @@ test("a definitive creation rejection retires A while preserving the newer proje
   assert.equal(first.input.value, "B"); assert.equal((await store.read(first.projectId)).text, "B");
   assert.equal((await store.pending(first.projectId)).length, 0);
   assert.equal(first.state.creationIntents.has(first.projectId), false);
+});
+
+test("Enter before a verified open paints and stages immediately, then binds only the fresh route", async () => {
+  const f = environment(), opening = deferred(), routes = [], stored = new Map();
+  f.discovery.resolve([]);
+  f.state.selected = "one"; f.state.detail = null; f.state.detailRefreshing = true;
+  f.state.attachments = {snapshot: () => [], pending: () => false};
+  f.state.outgoing.update = () => {};
+  f.state.sourceWindowId = "window";
+  const entry = {pending: opening.promise, detail: null};
+  f.state.conversations = new Map([["one", entry]]);
+  f.context.conversationEntry = () => entry;
+  f.context.sessionPath = id => "sessions/" + id;
+  f.context.crypto = {randomUUID: () => "cold-intent"};
+  f.state.durableDrafts.stage = async (id, key, row) => stored.set(key, row);
+  f.state.durableDrafts.resolveSubmission = async (id, key, path, body) => {
+    const row = {...stored.get(key), path, body}; stored.set(key, row); return row;
+  };
+  f.context.api = async (path, body) => {routes.push([path, body]); return {};};
+  vm.runInContext(section(app, "function submitAfterFirstRead(", "function requestComposerSubmit()"), f.context);
+  f.input.value = "Wait for routing";
+  const sending = f.context.submitAfterFirstRead(false);
+  assert.equal(f.input.value, "");
+  assert.equal(f.rows[0].text, "Wait for routing");
+  await f.context.drainComposerWrites();
+  assert.equal(stored.get("cold-intent").path, "");
+  assert.equal(routes.length, 0);
+  entry.detail = {work_thread: {thread_id: "one", client: "codex", browser_session: true}, running: true, activeTurn: "current"};
+  opening.resolve(true);
+  await sending;
+  assert.equal(routes[0][0], "sessions/one/messages");
+  assert.equal(routes[0][1].expectedTurnId, "current");
+  assert.equal(stored.get("cold-intent").path, routes[0][0]);
+});
+
+test("a legacy unknown row releases later messages only after the user explicitly stops tracking it", async () => {
+  const f = environment();
+  const newer = f.send("one", "next");
+  f.discovery.resolve([{requestId: "legacy", text: "earlier", images: [], mentions: [],
+    body: {requestId: "legacy"}, path: "sessions/one/messages"}]);
+  await tick();
+  assert.deepEqual(f.effects, []);
+  const echo = f.rows.find(row => row.submissionId === "legacy");
+  assert.equal(echo.retry, undefined);
+  await echo.release(); await newer;
+  assert.equal(echo.status, "unverified");
+  assert.deepEqual(f.effects, ["next"]);
+  assert.deepEqual(f.acknowledged, ["legacy", "next"]);
 });

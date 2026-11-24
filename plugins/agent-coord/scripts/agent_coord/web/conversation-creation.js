@@ -7,6 +7,11 @@ function showCreationIntent(projectId, intent) {
   const row = intent.row;
   replaceTimelineContent(state.outgoing.node(document, {
     key: row.requestId, text: row.text, images: row.images.length, status: intent.status,
+    release: !canReplayCreation(row) && intent.status === "uncertain" ? async () => {
+      await state.durableDrafts.acknowledge(projectId, row.requestId);
+      state.creationIntents.delete(projectId);
+      intent.status = "unverified"; showCreationIntent(projectId, intent);
+    } : null,
     error: intent.error, retry: canReplayCreation(row) ? () => continueCreation(projectId, intent).catch(showError) : null,
   }));
 }

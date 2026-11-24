@@ -53,7 +53,27 @@ function hydrateConversationControls(id, detail) {
 
 // A browser can copy sessionStorage into an opened or duplicated tab. Hold a
 // document lease on the stored ID and allocate a new one if its owner is live.
-async function composerWindowScope(view) {
+async function claimComposerWindowHandoff(database, id, generation) {
+  if (!database || !Number.isSafeInteger(generation) || generation < 1) return false;
+  return new Promise(resolve => {
+    const open = database.open("ribbon-field-composer-windows", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("generations");
+    open.onerror = open.onblocked = () => resolve(false);
+    open.onsuccess = () => {
+      const db = open.result, transaction = db.transaction("generations", "readwrite");
+      const store = transaction.objectStore("generations"), prior = store.get(id);
+      let claimed = false;
+      prior.onsuccess = () => {
+        if ((prior.result || 0) + 1 !== generation) return;
+        store.put(generation, id); claimed = true;
+      };
+      transaction.oncomplete = () => { db.close(); resolve(claimed); };
+      transaction.onerror = transaction.onabort = () => { db.close(); resolve(false); };
+    };
+  });
+}
+
+async function composerWindowScope(view, claim = claimComposerWindowHandoff) {
   if (view.agentCoordDesktop?.windowId) return view.agentCoordDesktop.windowId;
   const storageKey = "ribbon-field-composer-window";
   const allocate = () => "browser-" + view.crypto.randomUUID();
@@ -74,9 +94,13 @@ async function composerWindowScope(view) {
     // A throttled background tab cannot accidentally grant ownership by silence.
     const handoff = storageKey + "-handoff";
     try {
-      if (!previous || view.sessionStorage.getItem(handoff) !== previous) id = allocate();
+      const ticket = JSON.parse(view.sessionStorage.getItem(handoff) || "null");
+      let generation = 0;
+      if (previous && ticket?.id === previous && await claim(view.indexedDB, previous, ticket.generation))
+        generation = ticket.generation;
+      else id = allocate();
       view.sessionStorage.removeItem(handoff);
-      view.addEventListener("pagehide", () => view.sessionStorage.setItem(handoff, id));
+      view.addEventListener("pagehide", () => view.sessionStorage.setItem(handoff, JSON.stringify({id, generation: generation + 1})));
       view.addEventListener("pageshow", () => view.sessionStorage.removeItem(handoff));
     } catch { id = allocate(); }
   }
@@ -171,7 +195,7 @@ function updateOutgoing(id) {
   const entry = state.conversations?.get(id);
   if (entry && state.selected !== id) entry.nodes = null;
   const detail = entry?.detail || (state.selected === id ? state.detail : null);
-  if (state.selected === id && state.timelineThread === id)
+  if (state.selected === id && (state.timelineThread === id || !state.detail && state.detailRefreshing))
     state.outgoing.update(document, $("timeline"), id, detail);
   const pane = globalThis.agentCoordPanes?.records.get(id)?.api;
   if (pane?.timeline) state.outgoing.update(document, pane.timeline, id, detail);
@@ -197,10 +221,10 @@ function discoverComposerSubmissions(id) {
       state.submissionQueue.reserve(id, row.requestId);
       if (echo.awaitingDiscovery) continue;
       echo.status = "uncertain";
-      if (state.config.ordinarySubmissionReceipts === 1 && row.body?.client_message_id === row.requestId || echo.discoveryFailed) {
+      if (!row.path || state.config.ordinarySubmissionReceipts === 1 && row.body?.client_message_id === row.requestId || echo.discoveryFailed) {
         echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
         echo.retry();
-      }
+      } else allowUnconfirmedRelease(id, row, echo);
     }
     // Local Enter events can precede the journal commit as well as its read.
     // Put the entire live suffix behind restored rows in its original order.
@@ -238,15 +262,51 @@ function submissionOutcomeUnknown(error) {
      error.message.startsWith("This submission has an unconfirmed outcome."));
 }
 
+function allowUnconfirmedRelease(id, row, echo) {
+  echo.release = async () => {
+    await state.durableDrafts?.acknowledge(id, row.requestId);
+    state.submissionQueue.confirm(id, row.requestId);
+    echo.status = "unverified"; echo.release = null;
+    updateOutgoing(id);
+  };
+}
+
+async function bindComposerSubmission(id, row) {
+  const entry = conversationEntry(id);
+  const fresh = await (entry.pending || refreshDetail({threadId: id, markSeen: false, background: true}));
+  const detail = entry.detail, work = detail?.work_thread;
+  if (fresh === false || !work || work.thread_id !== id || entry.accessDenied)
+    throw new Error("Waiting for current conversation details.");
+  if (!work.browser_session || work.attention === "archived")
+    throw Object.assign(new Error("This conversation does not accept messages."), {status: 400});
+  const reviewing = detail.reviews?.some(review => review.active);
+  const ordered = state.outgoing.pendingTransferCounts?.has(id) && ["codex", "claude"].includes(work.client);
+  const queue = !work.dispatcher && !reviewing && detail.running && ["antigravity", "kimi"].includes(work.client);
+  const body = {...row.body}, path = sessionPath(id) + (queue ? "/queue" : "/messages");
+  if (work.dispatcher) body.askDispatcher = false;
+  else if (!queue && !reviewing && !ordered && detail.running) {
+    if (detail.activeTurn) body.expectedTurnId = detail.activeTurn;
+    else if (!detail.acceptsUntargetedInput) throw new Error("Waiting for the current turn to accept input.");
+  }
+  if (!state.durableDrafts) return {...row, path, body};
+  return writeComposerRecord(id, () => state.durableDrafts.resolveSubmission(id, row.requestId, path, body), "route:" + row.requestId);
+}
+
 async function deliverComposerSubmission(id, row, echo, staged) {
   const live = state.discoveringSubmissions?.get(id);
   live?.delete(row.requestId);
   if (live && !live.size) state.discoveringSubmissions.delete(id);
   return state.submissionQueue.submit(id, row.requestId, async () => {
     if (echo.deliveryResult) return echo.deliveryResult;
-    let posted = false, accepted = false;
+    let posted = false, accepted = false, journaled = false;
     try {
       await staged;
+      journaled = true;
+      if (!row.path) {
+        const bound = await bindComposerSubmission(id, row);
+        if (!bound) throw new Error("The original submission could not be located.");
+        row = bound;
+      }
       if (echo.acceptance || echo.transferReceipt) {
         await state.durableDrafts?.acknowledge(id, row.requestId);
         return {acceptedMessage: echo.acceptance, transferSubmission: echo.transferReceipt};
@@ -273,14 +333,17 @@ async function deliverComposerSubmission(id, row, echo, staged) {
         return {acceptedMessage: echo.acceptance, transferSubmission: echo.transferReceipt};
       }
       if (accepted) throw error;
-      if (posted && submissionOutcomeUnknown(error)) {
+      const awaitingRoute = journaled && !posted && !row.path &&
+        (!error.status || error.status >= 500 || error.status === 429);
+      if (awaitingRoute || posted && submissionOutcomeUnknown(error)) {
         error.submissionUnconfirmed = true;
         echo.status = "uncertain";
-        if (state.config?.ordinarySubmissionReceipts === 1)
+        if (awaitingRoute || state.config?.ordinarySubmissionReceipts === 1)
           echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
+        else allowUnconfirmedRelease(id, row, echo);
       } else {
         state.outgoing.rejected(echo, error.message || String(error));
-        const restored = !posted || !state.durableDrafts || await state.durableDrafts.recover(id, row.requestId);
+        const restored = !journaled || !state.durableDrafts || await state.durableDrafts.recover(id, row.requestId);
         if (!restored) await state.durableDrafts?.acknowledge(id, row.requestId);
         if (restored && !state.drafts.get(id) && !(id === state.selected && $("message").value)) {
           state.drafts.set(id, row.text);
