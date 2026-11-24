@@ -111,6 +111,19 @@ for (const engine of process.env.RIBBON_BROWSER ? [process.env.RIBBON_BROWSER] :
       assert.deepEqual(promoted.composerIds, ["created"]);
       assert.equal(promoted.previous, null);
       assert.deepEqual(promoted.draft, {text:"edit after promotion", mentions:[], images:[]});
+      const resolved = await page.evaluate(async () => {
+        const store = ComposerDrafts.create({scope:"unresolved route"});
+        await store.stage("thread", "first", {text:"one", body:{message:"one"}, path:""});
+        await store.stage("thread", "second", {text:"two", body:{message:"two"}, path:""});
+        const first = await store.resolveSubmission("thread", "first", "sessions/thread/messages", {message:"one"});
+        const replay = await store.resolveSubmission("thread", "first", "sessions/thread/queue", {message:"wrong"});
+        const ordered = await store.pending("thread");
+        return {first, replay, order:ordered.map(row => [row.requestId,row.path]),
+          missing:await store.resolveSubmission("thread", "absent", "sessions/thread/messages", {message:"absent"})};
+      });
+      assert.deepEqual(resolved.first, resolved.replay);
+      assert.deepEqual(resolved.order, [["first","sessions/thread/messages"],["second",""]]);
+      assert.equal(resolved.missing, null);
     } finally {
       await browser?.close();
       await new Promise(resolve => server.close(resolve));

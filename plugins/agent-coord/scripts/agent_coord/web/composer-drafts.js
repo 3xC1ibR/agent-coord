@@ -204,6 +204,19 @@
         return transact(["submissions"], "readonly", (store, read, end) =>
           read([store("submissions").index("composer").getAll(key)], rows => end(rows.map(pendingRecord))));
       },
+      resolveSubmission(id, requestId, path, body) {
+        if (typeof path !== "string" || !path) throw new TypeError("A submission route is required.");
+        const identifier = requestKey(id, requestId);
+        return transact(["submissions"], "readwrite", (store, read, end) => {
+          const journal = store("submissions"), index = journal.index("request");
+          read([index.get(identifier), index.getKey(identifier)], (saved, primary) => {
+            if (!saved || saved.path) { end(saved ? pendingRecord(saved) : null); return; }
+            const resolved = submissionRecord(id, requestId, {...saved, path, body});
+            journal.put(resolved, primary);
+            end(pendingRecord(resolved));
+          });
+        });
+      },
       pendingThreadIds() {
         return transact(["submissions"], "readonly", (store, _, end) => {
           const ids = [];
