@@ -826,20 +826,26 @@ def _handler(
                 if len(parts) != 5 or parts[2] != "turns" or not parts[1] or not parts[3]:
                     raise CoordinationError("Choose a session and a turn.")
                 self._json(HTTPStatus.OK, {"turn": browser_sessions.read_history_turn(unquote(parts[1]), unquote(parts[3]))})
-            elif route.startswith("sessions/") and ("before_seq" in query or "limit" in query):
+            elif route.startswith("sessions/") and query.keys() & {"before_seq", "limit", "turn_id"}:
                 if "/" in route[9:] or not route[9:]:
                     raise CoordinationError("Choose a session for transcript pagination.")
                 try:
                     before = int(query["before_seq"][0]) if "before_seq" in query else None
                     limit = int(query.get("limit", ["40"])[0])
-                    if len(query.get("before_seq", [])) > 1 or len(query.get("limit", [])) > 1:
+                    if any(len(query.get(key, ())) > 1 for key in ("limit", "turn_id", "before_seq")):
+                        raise ValueError
+                    target = query.get("turn_id", [None])[0]
+                    if target == "" or (before is not None and target is not None):
                         raise ValueError
                     if not 1 <= limit <= 200 or before is not None and not 0 <= before < 2**63:
                         raise ValueError
                 except ValueError as exc:
                     raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
-                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit)
-                self._json(HTTPStatus.OK, {"thread": thread})
+                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
+                if thread is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Saved turn was not found."})
+                else:
+                    self._json(HTTPStatus.OK, {"thread": thread})
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
