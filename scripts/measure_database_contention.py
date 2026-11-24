@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Repeatable writer-admission workload on generated, disposable state.
 
-No models, accounts, network requests or installed databases are used. This is
-an admission regression gate; measure_backend_latency.py separately exercises
-actual HTTP acceptance, provider events, indexing and history on a snapshot.
+No models, accounts or installed databases are used. The existing admission
+gate runs alongside generated real HTTP/transcript/search/projection coverage.
 """
 from __future__ import annotations
 
@@ -57,7 +56,7 @@ def measure(seconds=15, writers=6):
                         latencies.append((time.perf_counter() - started) * 1000)
                 except Exception as error:
                     with guard:
-                        failures.append(type(error).__name__ + ': ' + str(error))
+                        failures.append(type(error).__name__)
                 stop.wait(.02)
         def persistence():
             nonlocal background, active, maximum
@@ -77,7 +76,7 @@ def measure(seconds=15, writers=6):
                     background += 1
                 except Exception as error:
                     with guard:
-                        failures.append(type(error).__name__ + ': ' + str(error))
+                        failures.append(type(error).__name__)
                 stop.wait(.01)
         def reader():
             nonlocal reads
@@ -90,7 +89,7 @@ def measure(seconds=15, writers=6):
                         reads += 1
                 except Exception as error:
                     with guard:
-                        failures.append(type(error).__name__ + ': ' + str(error))
+                        failures.append(type(error).__name__)
                 stop.wait(.01)
         started = time.monotonic()
         try:
@@ -137,10 +136,17 @@ def main():
     parser.add_argument('--writers', type=int, default=6)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--threads', type=int, default=2000)
+    parser.add_argument('--turns', type=int, default=350)
     args = parser.parse_args()
     if not 1 <= args.seconds <= 3600 or not 1 <= args.writers <= 64:
         parser.error('seconds must be 1–3600 and writers 1–64')
+    if args.threads < 1 or args.turns < 1:
+        parser.error('threads and turns must be positive')
+    from measure_transcript_workload import measure as measure_transcripts
     result = measure(args.seconds, args.writers)
+    result['transcript_workload'] = measure_transcripts(args.seconds, args.threads, args.turns)
+    result['budget_failures'].extend('transcript: ' + failure for failure in result['transcript_workload']['budget_failures'])
     encoded = json.dumps(result, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
