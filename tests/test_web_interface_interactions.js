@@ -177,6 +177,43 @@ test("Send work transmits group context for an explicit member and keeps the rec
   assert.equal(requests[2].body.project_id, undefined);
 });
 
+test("Focus uses the render revision without serializing threads and compares content when no revision is supplied", () => {
+  const document = makeDocument(), createElement = document.createElement;
+  document.createElement = tag => {
+    const element = createElement(tag);
+    element.style = {};
+    element.classList.add = name => { element.className += " " + name; };
+    element.querySelector = selector => element.byClass(selector.slice(1))[0] || null;
+    return element;
+  };
+  const host = document.createElement("section"), rendered = [];
+  const view = WorkingSet.create({document, window: {ResizeObserver: class { observe() {} }},
+    renderCard(item) { rendered.push(item.title); return document.createElement("article"); }});
+  let serializations = 0;
+  const item = thread("report");
+  item.toJSON = function () { serializations++; return {thread_id: this.thread_id, title: this.title}; };
+  const threads = [item];
+
+  view.render(threads, host, {revision: 0});
+  assert.deepEqual(new Set(rendered), new Set(["Task report"]));
+  const initialRenders = rendered.length;
+  view.render([...threads], host, {revision: 0});
+  assert.equal(rendered.length, initialRenders);
+  item.title = "Revised report";
+  view.render(threads, host, {revision: 1});
+  assert.equal(rendered.at(-1), "Revised report");
+  assert.equal(serializations, 0);
+
+  view.render(threads, host);
+  const unversionedRenders = rendered.length;
+  view.render(threads, host);
+  assert.equal(rendered.length, unversionedRenders);
+  item.title = "Final report";
+  view.render(threads, host);
+  assert.equal(rendered.at(-1), "Final report");
+  assert.equal(serializations, 3);
+});
+
 test("quiet submission shortcut suppresses only its clean completion", async () => {
   const keyboard = {key: "Enter", altKey: true, metaKey: true};
   assert.equal(TurnNotifications.isQuietShortcut(keyboard), true);

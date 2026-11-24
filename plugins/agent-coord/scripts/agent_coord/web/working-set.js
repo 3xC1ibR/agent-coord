@@ -78,7 +78,7 @@ const WorkingSet = (() => {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     let host, viewport, vtrack, minimap, tracks = [], panes = [], groups = [], source = [], byId = new Map();
     let workspace = "all", context = "", positionKey = "", dimension = "group", level = 0, pageKey = ALL, pageIdx = 0, order = [], signature = "";
-    let selectedGroup;
+    let selectedGroup, revision;
     const positions = new Map(), scroll = new Map(), expanded = new Set();
     let wheelTimer, touch, observer, horizontal = 0, vertical = 0, cooldown = -Infinity, lastNative = -Infinity;
     const active = () => host && !host.hidden && host.isConnected && isActive();
@@ -313,8 +313,10 @@ const WorkingSet = (() => {
         if (!host) build(target);
         const controlled = options.selectedGroup !== undefined;
         const nextContext = JSON.stringify([options.workspace || "all", controlled ? "groups" : options.view || "all", options.placement || "active"]);
-        const nextSignature = JSON.stringify([threads, nextContext, options.selectedGroup, options.groupName, options.revision]);
-        if (signature === nextSignature) { layout(); return; }
+        const nextRevision = options.revision;
+        const nextSignature = JSON.stringify([nextContext, options.selectedGroup, options.groupName,
+          nextRevision === undefined ? threads : undefined]);
+        if (revision === nextRevision && signature === nextSignature) { layout(); return; }
         const changedContext = context !== nextContext;
         if (changedContext) { rememberScroll(); context = nextContext; restore("agent-coord.working-set:v3:" + context, options.placement); }
         if (controlled && (changedContext || selectedGroup !== options.selectedGroup)) {
@@ -328,7 +330,7 @@ const WorkingSet = (() => {
           groups.push({key: pageKey, name: options.groupName || "Unnamed group", levels: LEVELS.map(() => [])});
         }
         pageIdx = Math.max(0, groups.findIndex(g => g.key === pageKey)); pageKey = groups[pageIdx].key;
-        signature = nextSignature; save(); paint(!changedContext);
+        revision = nextRevision; signature = nextSignature; save(); paint(!changedContext);
       },
       destroy() { document.removeEventListener("keydown", keydown); window.clearTimeout(wheelTimer); observer?.disconnect(); host?.replaceChildren(); },
     };
