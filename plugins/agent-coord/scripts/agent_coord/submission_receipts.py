@@ -68,9 +68,31 @@ class SubmissionReceipts:
                 pass
             raise
         try:
+            if result.get("acceptedMessage"):
+                result = {**result, "acceptedMessage": {**result["acceptedMessage"],
+                          "threadId": thread_id, "requestId": key}}
             with self.store._connection() as db:
                 db.execute("UPDATE browser_submission_receipts SET state='completed', result_json=?, updated_at=? WHERE thread_id=? AND request_id=?",
                            (json.dumps(result), self.store.clock(), thread_id, key))
         except Exception as error:
             raise CoordinationError("Your submission may have been received, but its receipt could not be saved. Check the conversation before sending again.") from error
         return result
+
+    def accepted(self, thread_id, history, *, active_turn=None):
+        """Restore provider acknowledgements for the visible canonical turns.
+
+        The existing receipt is the durable authority. Reserved, uncertain,
+        rejected, queued and command submissions never become accepted echoes.
+        Select only the small projection, not input images or provider results.
+        """
+        turns = [turn["id"] for turn in history.get("turns", []) if turn.get("id")]
+        if active_turn and active_turn not in turns:
+            turns.append(active_turn)
+        if not turns:
+            return []
+        with self.store.database_operation("send.read_accepted", priority="foreground"), self.store.reading(), self.store._connection() as db:
+            rows = db.execute("""SELECT json_extract(result_json, '$.acceptedMessage') AS message
+                FROM browser_submission_receipts WHERE thread_id=? AND state='completed'
+                AND json_extract(result_json, '$.acceptedMessage.turnId') IN (SELECT value FROM json_each(?))
+                ORDER BY updated_at, rowid""", (thread_id, json.dumps(turns))).fetchall()
+        return [json.loads(row["message"]) for row in rows]

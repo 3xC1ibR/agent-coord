@@ -63,6 +63,10 @@ class BrowserBusyError(CoordinationError):
 class BrowserTurnChangedError(BrowserBusyError):
     """Steering was rejected before submitting input to the expected turn."""
 
+    def __init__(self, message, *, attempted_turn_id=None):
+        super().__init__(message)
+        self.attempted_turn_id = attempted_turn_id
+
 
 class BrowserNotSubmittedError(CoordinationError):
     """Automatic input failed before the provider turn/start boundary."""
@@ -2462,7 +2466,9 @@ class BrowserSessions:
                 thread = recent_view(thread, live_turn=active_turn)
             # Read-side recovery may have changed the live turn. Project the card
             # after reconciliation so it agrees with the conversation status.
-            return {"session": record, "thread": self.reviews.public_history(thread_id, thread), "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
+            thread = self.reviews.public_history(thread_id, thread)
+            return {"session": record, "thread": thread, "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
+                    "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                     "activeTurn": active_turn, "running": running,
                     "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                     "dispatchRequests": self.dispatch.receipts(thread_id),
@@ -2560,7 +2566,9 @@ class BrowserSessions:
             if recent:
                 thread = recent_view(thread, live_turn=active_turn)
                 thread["earlierTurns"] += omitted_turns
-        return {"session": record, "thread": self.reviews.public_history(thread_id, thread),
+        thread = self.reviews.public_history(thread_id, thread)
+        return {"session": record, "thread": thread,
+                "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
@@ -2654,6 +2662,10 @@ class BrowserSessions:
                 result = self.submissions.run(thread_id, body, lambda: self._send_composer(thread_id, body))
             else:
                 result = self._submit(thread_id, body, queued=queued)
+        if result.get("acceptedMessage"):
+            # Only a committed completed receipt proves provider acceptance.
+            # Replayed receipts retain their identity; windows reconcile them once.
+            self._publish("browser/messageAccepted", result["acceptedMessage"])
         command = result.get("command")
         turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
         # Dispatcher and reviewed requests have their own durable acceptance
@@ -2684,10 +2696,11 @@ class BrowserSessions:
         # while reconciliation or native steering is in flight. Only a proven
         # rejection permits one handoff; a lost response must never be replayed.
         with self._thread_lock(thread_id):
+            accepted_input = {}
             try:
-                return self.send(thread_id, body)
-            except BrowserTurnChangedError:
-                expected_turn = body.get("expectedTurnId")
+                result = self.send(thread_id, body, accepted_input=accepted_input)
+            except BrowserTurnChangedError as rejected:
+                expected_turn = rejected.attempted_turn_id or body.get("expectedTurnId")
                 if not expected_turn:
                     raise
                 try:
@@ -2697,17 +2710,20 @@ class BrowserSessions:
                     # The original attempt was rejected, and no retry crossed
                     # the native submission boundary. Retain a retryable receipt.
                     raise BrowserTurnChangedError(str(error)) from error
-                return self.send(thread_id, body, start_only=True, completed_turn_id=expected_turn)
+                result = self.send(thread_id, body, start_only=True, completed_turn_id=expected_turn,
+                                   accepted_input=accepted_input)
+            return {**result, "acceptedMessage": accepted_input} if accepted_input.get("turnId") else result
 
     def send(self, thread_id: str, body: dict, *, start_only: bool = False, automatic: bool = False,
              preserve_text: bool = False, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
-             coordination_delivery=None) -> dict:
+             coordination_delivery=None, accepted_input=None) -> dict:
         with self._thread_lock(thread_id):
             submission = {"started": False}
             try:
                 return self._send(thread_id, body, start_only=start_only, automatic=automatic,
                                   preserve_text=preserve_text, literal=literal, submission=submission, recovery=recovery,
-                                  completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery)
+                                  completed_turn_id=completed_turn_id, coordination_delivery=coordination_delivery,
+                                  accepted_input=accepted_input)
             except BrowserBusyError:
                 raise
             except Exception as exc:
@@ -2728,7 +2744,7 @@ class BrowserSessions:
 
     def _send(self, thread_id: str, body: dict, *, start_only: bool, automatic: bool,
               preserve_text: bool, submission: dict, literal: bool = False, recovery=None, completed_turn_id: str | None = None,
-              coordination_delivery=None) -> dict:
+              coordination_delivery=None, accepted_input=None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
         with self.store._writer.measure_request("send.persistence_barrier"):
@@ -2787,9 +2803,12 @@ class BrowserSessions:
                     completed_turn = self.store.threads.get(thread_id, history=False)
                     stopped = self.store.threads.stop_requested(thread_id, completed_turn_id)
                 completion = completed_turn["turn_completion"] or {}
-                completion_handoff = (expected_turn == completed_turn_id == completed_turn["turn_id"]
+                completion_handoff = (expected_turn in {None, completed_turn_id}
+                                      and completed_turn_id == completed_turn["turn_id"]
                                       and not completed_turn["turn_active"] and not stopped
                                       and completion.get("status") == "completed")
+                if not completion_handoff:
+                    raise BrowserTurnChangedError("The attempted turn did not complete successfully or is no longer current. Your message was not sent.")
             with self.lock:
                 turn_id = self.active.get(thread_id)
                 if not automatic and turn_id and self.reviews.stage_for(thread_id, turn_id):
@@ -2809,6 +2828,16 @@ class BrowserSessions:
             if dispatch_context:
                 inputs.insert(0, {"type": "text", "text": dispatch_context["text"]})
             params = {"threadId": thread_id, "input": inputs}
+            if accepted_input is not None:
+                # Capture a provider-history anchor before the native effect. A
+                # reconnect can distinguish this input from older identical text,
+                # even when its canonical item arrives before the receipt event.
+                with self.lock:
+                    prior_turn = next((turn for turn in reversed(self._history(thread_id).get("turns", []))
+                                       if turn.get("id") == turn_id), {}) if turn_id else {}
+                    after_item = next((item["id"] for item in reversed(prior_turn.get("items", []))
+                                       if item.get("type") == "userMessage"), None)
+                accepted_input.update(message=message, imageCount=len(images), afterItemId=after_item)
             if turn_id:
                 # The server checks this too, covering completion during the RPC.
                 with self.lock:
@@ -2827,7 +2856,7 @@ class BrowserSessions:
                         "The active Claude turn changed or finished. Your message was not sent.",
                         "The active Muse turn changed or finished. Your message was not sent.",
                     }:
-                        raise BrowserTurnChangedError(str(error)) from error
+                        raise BrowserTurnChangedError(str(error), attempted_turn_id=turn_id) from error
                     raise
                 finally:
                     with self.lock:
@@ -2836,6 +2865,8 @@ class BrowserSessions:
                 self._record_accepted_input(thread_id, turn_id, {"origin": "user", "owner_thread_id": thread_id},
                                             user_input=True)
                 self._publish("browser/changed", {"threadId": thread_id})
+                if accepted_input is not None:
+                    accepted_input["turnId"] = turn_id
                 return result
             if record["model"]:
                 params["model"] = record["model"]
@@ -2901,6 +2932,8 @@ class BrowserSessions:
             self._record_accepted_input(thread_id, result["turn"]["id"], context, user_input=not automatic and not recovery,
                                         original_request=message or "\n".join("[Image]" for _ in images))
             self._publish("browser/changed", {"threadId": thread_id})
+            if accepted_input is not None:
+                accepted_input["turnId"] = result["turn"]["id"]
             return result
 
     def _record_accepted_input(self, thread_id, turn_id, context, *, user_input, original_request=None):

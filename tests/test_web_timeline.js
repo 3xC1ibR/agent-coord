@@ -62,6 +62,25 @@ test("a genuinely stopped latest turn keeps the stopped footer", () => {
   assert.equal(timeline.childNodes.at(-1).textContent, "Turn stopped.");
 });
 
+test("a reconnected window renders receipt acceptance before provider input, then only the canonical message", () => {
+  const {context: c, state, timeline, live} = harness();
+  live.items.push(user("earlier", "Correction"));
+  state.detail.acceptedMessages = [{threadId: "thread", requestId: "accepted-steer", turnId: "live",
+    message: "Correction", imageCount: 0, afterItemId: "earlier"}];
+  c.renderTimeline();
+  assert.equal(all(timeline).filter(n => n.className === "message user outgoing").length, 1);
+  assert.equal(all(timeline).filter(n => n.className === "message user").length, 1);
+  assert.ok(all(timeline).some(n => n.textContent === "Sent"));
+
+  live.items.push(user("canonical", "Correction"));
+  c.renderTimeline();
+  assert.equal(all(timeline).filter(n => n.className === "message user outgoing").length, 0);
+  assert.equal(all(timeline).filter(n => n.className === "message user").length, 2);
+  c.renderTimeline();
+  assert.equal(all(timeline).filter(n => n.className === "message user outgoing").length, 0);
+  assert.equal(all(timeline).filter(n => n.className === "message user").length, 2);
+});
+
 test("a new running turn missing from history cannot inherit the stopped turn's prose", () => {
   const {context: c, state, timeline, old} = harness();
   old.items.push({id: "old-prose", type: "agentMessage", text: "Earlier response."});

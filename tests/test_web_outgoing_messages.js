@@ -118,6 +118,91 @@ test("updating in place replaces only outgoing nodes", () => {
   assert.match(timeline.text, /Sent/);
 });
 
+const acceptance = (requestId, message = "Correction", extra = {}) => ({
+  threadId: "thread", requestId, turnId: "turn", message, imageCount: 0, afterItemId: "old", ...extra,
+});
+
+test("other windows render durable acceptance before a withheld provider item and reconcile once", () => {
+  const messages = outgoing(), timeline = new FakeElement("div");
+  const detail = detailWith(user("old", "Correction"));
+  const record = acceptance("request-1");
+  messages.confirm("thread", [record], detail);
+  messages.update(document, timeline, "thread", detail);
+  assert.match(timeline.text, /Correction Sent/);
+  assert.equal(messages.list("thread").length, 1, "an older identical item is not the accepted input");
+  detail.thread.turns[0].items.push(user("canonical", "Correction"));
+  messages.update(document, timeline, "thread", detail);
+  assert.equal(messages.list("thread").length, 0);
+  messages.confirm("thread", [record], detail);
+  assert.equal(messages.list("thread").length, 0, "repeated SSE and snapshots cannot recreate the echo");
+});
+
+test("a fresh window restores acceptance, including images, and canonical-before-receipt never duplicates", () => {
+  const record = acceptance("image-request", "", {imageCount: 1});
+  const detail = detailWith(user("old", "Earlier"));
+  const messages = outgoing();
+  messages.settle("thread", {...detail, acceptedMessages: [record]});
+  assert.equal(messages.list("thread")[0].images, 1);
+  detail.thread.turns[0].items.push({id: "image", type: "userMessage", content: [{type: "image", url: "data:image/png;base64,abc"}]});
+  const reconnected = outgoing();
+  reconnected.settle("thread", {...detail, acceptedMessages: [record]});
+  assert.deepEqual(reconnected.list("thread"), []);
+});
+
+test("receipt identities reconcile repeated text, own echoes, and different turns independently", () => {
+  const messages = outgoing(), detail = detailWith(user("old", "Correction"));
+  const own = messages.add("thread", {text: "Correction", submissionId: "first", detail});
+  messages.confirm("thread", [acceptance("first"), acceptance("second")], detail);
+  assert.equal(messages.list("thread").length, 2);
+  assert.equal(messages.list("thread")[0], own);
+  detail.thread.turns.push({id: "other-turn", items: [user("unrelated", "Correction")]});
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 2);
+  detail.thread.turns[0].items.push(user("first-copy", "Correction"));
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 1);
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 1);
+  detail.thread.turns[0].items.push(user("second-copy", "Correction"));
+  messages.settle("thread", detail);
+  assert.equal(messages.list("thread").length, 0);
+});
+
+test("acceptance event routes to its conversation without changing provider history", () => {
+  const messages = outgoing(), timeline = new FakeElement("div"), detail = detailWith(user("old", "Earlier"));
+  const c = {state: {selected: "thread", timelineThread: "thread", detail, outgoing: messages,
+      conversations: new Map([["thread", {detail, revision: 0}]])}, document, $: () => timeline,
+    renderStatus() {}, scheduleDetail() { throw new Error("acceptance must not wait for a history read"); }};
+  vm.createContext(c);
+  vm.runInContext(source.slice(source.indexOf("function applyEvent("), source.indexOf("let listTimer,")), c);
+  c.applyEvent({method: "browser/messageAccepted", params: acceptance("first")});
+  assert.match(timeline.text, /Correction Sent/);
+  assert.equal(detail.thread.turns[0].items.length, 1);
+  c.applyEvent({method: "browser/messageAccepted", params: acceptance("other", "Different", {threadId: "other"})});
+  assert.doesNotMatch(timeline.text, /Different/);
+});
+
+test("receipt text remains literal and invalid or cross-thread projections are ignored", () => {
+  const messages = outgoing(), timeline = new FakeElement("div");
+  const detail = detailWith(user("old", "Earlier"));
+  messages.confirm("thread", [acceptance("other", "private", {threadId: "other"}),
+    acceptance("invalid", "invalid", {imageCount: -1}), acceptance("markup", "<img onerror='alert(1)'>")]);
+  messages.update(document, timeline, "thread", detail);
+  assert.equal(messages.list("thread").length, 1);
+  assert.equal(timeline.children[0].children[0].textContent, "<img onerror='alert(1)'>");
+  assert.equal(timeline.children[0].children[0].children.length, 0);
+});
+
+test("another window acceptance preserves a locally rejected draft", () => {
+  const messages = outgoing();
+  const failed = messages.add("thread", {text: "Not submitted", submissionId: "failed"});
+  messages.rejected(failed, "Rejected");
+  messages.confirm("thread", [acceptance("other-window")]);
+  assert.equal(messages.list("thread").length, 2);
+  assert.equal(messages.list("thread")[0], failed);
+  assert.equal(failed.status, "failed");
+});
+
 function composer({running = false} = {}) {
   const elements = new Map();
   const storage = new Map();
@@ -176,6 +261,20 @@ test("a rejected send is marked not sent and its text returns to the composer", 
   assert.match(c.$("timeline").text, /Ship the fix Not sent · Claude Code disconnected\./);
   assert.equal(c.$("message").value, "Ship the fix");
   assert.equal(c.state.sending.size, 0);
+});
+
+test("a committed acceptance event resolves a lost HTTP response without replaying", async () => {
+  const c = composer();
+  let requests = 0;
+  c.api = async (path, body) => {
+    requests++;
+    c.state.outgoing.confirm("one", [acceptance(body.requestId, body.message, {threadId: "one", afterItemId: null})]);
+    throw new Error("Response disconnected.");
+  };
+  await c.sendMessage();
+  assert.equal(requests, 1);
+  assert.match(c.$("timeline").text, /Ship the fix Sent/);
+  assert.equal(c.$("message").value, "");
 });
 
 test("queued and command input keep their own displays", async () => {

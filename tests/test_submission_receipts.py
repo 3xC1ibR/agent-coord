@@ -108,3 +108,17 @@ class SubmissionReceiptTests(unittest.TestCase):
             self.run_request(callback)
         with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
             self.run_request(lambda: self.fail("Effect replayed after receipt failure"))
+
+    def test_only_durable_provider_acceptance_for_visible_turns_is_restored(self):
+        accepted = {"message": "Run the check", "imageCount": 1, "turnId": "turn-1", "afterItemId": "older"}
+        result = self.run_request(lambda: {"turnId": "turn-1", "acceptedMessage": accepted})
+        self.assertEqual(result["acceptedMessage"], {**accepted, "threadId": "conversation", "requestId": "request-1"})
+        restarted = SubmissionReceipts(CoordinationStore(self.database))
+        self.assertEqual(restarted.accepted("conversation", {"turns": [{"id": "turn-1"}]}), [result["acceptedMessage"]])
+        self.assertEqual(restarted.accepted("conversation", {"turns": []}, active_turn="turn-1"), [result["acceptedMessage"]])
+        self.assertEqual(restarted.accepted("conversation", {"turns": [{"id": "other-turn"}]}), [])
+        self.assertEqual(restarted.accepted("other-thread", {"turns": [{"id": "turn-1"}]}), [])
+        for state in ("accepted", "uncertain", "rejected"):
+            with self.store._connection() as db:
+                db.execute("UPDATE browser_submission_receipts SET state=?", (state,))
+            self.assertEqual(restarted.accepted("conversation", {"turns": [{"id": "turn-1"}]}), [])

@@ -1128,6 +1128,7 @@ function retainConversation() {
   (state.conversationPositions ||= new Map()).set(state.selected, {scroll: entry.scroll, following: entry.following});
 }
 function sameConversation(first, second) {
+  if (first && JSON.stringify(first.acceptedMessages) !== JSON.stringify(second.acceptedMessages)) return false;
   if (first && first.transferReadSource !== second.transferReadSource) return false;
   if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
     JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
@@ -1929,24 +1930,48 @@ class OutgoingMessages {
     this.sequence = 0;
     this.transferStates = new Map();
     this.pendingTransferCounts = new Map();
+    this.acceptedRequests = new Map();
   }
 
   list(id) { return this.threads.get(id) || []; }
 
   // Dispatcher requests settle by their durable request ID; other messages
   // settle when a user message that was not already present carries the text.
-  add(id, {text, images = 0, requestId = null, submissionId = null, detail = null, transfer = false}) {
+  add(id, {text, images = 0, requestId = null, submissionId = null, detail = null, transfer = false, preserveFailures = false}) {
     const known = new Set();
     for (const turn of detail?.thread?.turns || []) {
       for (const item of turn.items || []) if (item.type === "userMessage") known.add(item.id);
     }
     const entry = {key: "outgoing-" + ++this.sequence, text, images, match: text.trim(),
       requestId, submissionId, known, status: "sending", error: "", transfer};
-    this.threads.set(id, [...this.list(id).filter(item => transfer || item.transfer || item.status !== "failed"), entry]);
+    this.threads.set(id, [...this.list(id).filter(item => preserveFailures || transfer || item.transfer || item.status !== "failed"), entry]);
     return entry;
   }
 
   accepted(entry) { if (!entry.transfer) entry.status = "sent"; }
+
+  // A completed composer receipt is an acknowledgement, not a provider item.
+  // Keep it separate from history until the canonical item follows its anchor.
+  confirm(id, records) {
+    if (!Array.isArray(records)) return false;
+    const seen = this.acceptedRequests.get(id) || new Set();
+    this.acceptedRequests.set(id, seen);
+    let changed = false;
+    for (const record of records) {
+      if (record?.threadId !== id || typeof record.requestId !== "string" || !record.requestId ||
+          typeof record.turnId !== "string" || !record.turnId || typeof record.message !== "string" ||
+          !Number.isInteger(record.imageCount) || record.imageCount < 0 ||
+          (record.afterItemId !== null && typeof record.afterItemId !== "string") || seen.has(record.requestId)) continue;
+      seen.add(record.requestId);
+      const entry = this.list(id).find(row => row.submissionId === record.requestId) ||
+        this.add(id, {text: record.message, images: record.imageCount, submissionId: record.requestId, preserveFailures: true});
+      entry.acceptance = record;
+      entry.needsHistoryBaseline = false;
+      entry.status = "sent";
+      changed = true;
+    }
+    return changed;
+  }
 
   // A native timeline item and a coordinator-transfer receipt have distinct
   // identities. Update local and remote copies of one intake by its request ID.
@@ -1998,10 +2023,15 @@ class OutgoingMessages {
   // The provider's copy also settles a message whose acceptance reply is still
   // in flight: its stream event can arrive first.
   settle(id, detail) {
+    this.confirm(id, detail?.acceptedMessages);
     const entries = this.list(id);
     if (!entries.length || !detail) return;
-    const messages = (detail.thread?.turns || []).flatMap(turn => turn.items || [])
-      .filter(item => item.type === "userMessage");
+    const positions = new Map();
+    const messages = (detail.thread?.turns || []).flatMap(turn => {
+      const items = (turn.items || []).filter(item => item.type === "userMessage");
+      positions.set(turn.id, new Map(items.map((item, index) => [item.id, index])));
+      return items.map(item => ({...item, turnId: turn.id}));
+    });
     const remaining = entries.filter(entry => {
       if (entry.needsHistoryBaseline) {
         // A cold window may already contain older identical messages. Never
@@ -2015,6 +2045,12 @@ class OutgoingMessages {
       if (entry.requestId) return !(detail.dispatchRequests || []).some(request => request.request_id === entry.requestId);
       const match = messages.find(item => {
         if (entry.known.has(item.id)) return false;
+        if (entry.acceptance) {
+          if (item.turnId !== entry.acceptance.turnId) return false;
+          const anchor = entry.acceptance.afterItemId;
+          const indices = positions.get(item.turnId);
+          if (anchor !== null && (!indices.has(anchor) || indices.get(item.id) <= indices.get(anchor))) return false;
+        }
         const images = (item.content || []).filter(part => ["image", "localImage"].includes(part.type)).length;
         if (images !== entry.images) return false;
         const raw = this.itemText({...item, content: (item.content || []).filter(part => part.type === "text")});
@@ -2024,7 +2060,7 @@ class OutgoingMessages {
       if (!match) return true;
       // Each provider message consumes one echo, including across repeated
       // snapshots. Two identical steers must not disappear with the first copy.
-      for (const pending of entries) pending.known.add(match.id);
+      for (const pending of entries) if (!pending.acceptance || pending.acceptance.turnId === match.turnId) pending.known.add(match.id);
       return false;
     });
     if (remaining.length) this.threads.set(id, remaining); else this.threads.delete(id);
@@ -2598,6 +2634,16 @@ function applyEvent(event) {
   if (event.method === "coordination/messageSent") { state.agentTreeController?.message(event.params); return; }
   if (event.method === "thread/closedWhenDone") { threadClosedWhenDone(event.params.threadId).catch(showError); return; }
   const cached = state.conversations?.get(event.params.threadId);
+  if (event.method === "browser/messageAccepted") {
+    const id = event.params.threadId;
+    const detail = cached?.detail || (state.selected === id ? state.detail : null);
+    if (state.outgoing?.confirm(id, [event.params])) {
+      if (cached) cached.revision++;
+      if (state.selected === id && state.timelineThread === id)
+        state.outgoing.update(document, $("timeline"), id, detail);
+    }
+    return;
+  }
   if (event.method === "thread/usage/updated") {
     if (cached) cached.streamedUsage = true;
     if (cached?.detail?.work_thread) cached.detail.work_thread.usage = event.params.usage;
@@ -3878,7 +3924,7 @@ async function sendMessage(mode = "send") {
     // Queued, reviewed, and command input have their own displays.
     echo = !text.trim().startsWith("/") && body.review == null && (dispatcher || mode !== "queue")
       ? state.outgoing?.add(id, {text, images: images.length, requestId: dispatcher ? body.requestId : null,
-        submissionId: state.config?.interactionContinuity ? body.requestId : null, detail: conversationEntry(id).detail || detail}) : null;
+        submissionId: body.requestId, detail: conversationEntry(id).detail || detail}) : null;
     if (echo) {
       if (id === state.selected && $("message").value === text) { $("message").value = ""; state.drafts.delete(id); }
       showOutgoing();
@@ -3889,8 +3935,9 @@ async function sendMessage(mode = "send") {
       result = await api(sessionPath(id) + (!dispatcher && mode === "queue" ? "/queue" : "/messages"), body);
     } catch (error) {
       // The authenticated stream can confirm durable intake before an HTTP response is lost.
-      if (!echo?.transferReceipt) throw error;
-      result = {transferSubmission: echo.transferReceipt};
+      if (echo?.acceptance) result = {acceptedMessage: echo.acceptance};
+      else if (echo?.transferReceipt) result = {transferSubmission: echo.transferReceipt};
+      else throw error;
     }
     if (result.transferSubmission) {
       const receipt = result.transferSubmission;
@@ -3898,7 +3945,10 @@ async function sendMessage(mode = "send") {
         throw new Error("Message receipt could not be confirmed.");
       state.outgoing.transfers(id, [receipt], conversationEntry(id).detail || detail);
       showOutgoing();
-    } else if (echo) { state.outgoing.accepted(echo); showOutgoing(); }
+    } else if (echo) {
+      if (result.acceptedMessage) state.outgoing.confirm(id, [result.acceptedMessage]);
+      state.outgoing.accepted(echo); showOutgoing();
+    }
     sessionStorage.removeItem("dispatch-request:" + id);
     state.reviewUI?.sent(id);
     dispatchReceived = !!result.dispatched;

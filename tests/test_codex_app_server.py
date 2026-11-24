@@ -1138,6 +1138,152 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertNotEqual(result["turn"]["id"], turn["id"])
         self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 2)
 
+    def test_ordinary_composer_handoff_uses_the_actually_rejected_turn(self):
+        thread_id = self.create()
+        original = self.sessions.send(thread_id, {"message": "Original task"})["turn"]["id"]
+        request = self.sessions.rpc.request
+        attempts = []
+
+        def complete_before_steer(method, params=None):
+            if method == "turn/steer":
+                attempts.append(params["expectedTurnId"])
+                self.complete_turn(thread_id)
+                raise CoordinationError("no active turn to steer")
+            return request(method, params)
+
+        body = {"message": "Correction", "requestId": "ordinary-completion-race",
+                "images": [{"url": "data:image/png;base64,iVBORw0KGgo=", "name": "reference.png"}]}
+        with patch.object(self.sessions.rpc, "request", side_effect=complete_before_steer):
+            result = self.sessions.submit(thread_id, body, transfer=True)
+            self.assertEqual(self.sessions.submit(thread_id, body, transfer=True), result)
+        self.assertEqual(attempts, [original])
+        self.assertNotEqual(result["turn"]["id"], original)
+        turns = self.sessions.rpc.threads[thread_id]["turns"]
+        self.assertEqual(len(turns), 2)
+        self.assertEqual(turns[-1]["items"][0]["content"], [
+            {"type": "text", "text": "Correction"}, {"type": "image", "url": body["images"][0]["url"]}])
+
+    def test_accepted_composer_visible_before_delayed_provider_item(self):
+        thread_id = self.create()
+        turn = self.sessions.send(thread_id, {"message": "Original task"})["turn"]["id"]
+        request = self.sessions.rpc.request
+        delayed = []
+
+        def accept_without_item(method, params=None):
+            if method == "turn/steer":
+                delayed.append({"method": "item/completed", "params": {"threadId": thread_id,
+                    "turnId": turn, "item": {"id": "delayed-user", "type": "userMessage", "content": params["input"]}}})
+                return {"turnId": turn}
+            return request(method, params)
+
+        body = {"message": "Correction", "requestId": "delayed-visibility", "expectedTurnId": turn}
+        cursor = self.sessions.sequence
+        with patch.object(self.sessions.rpc, "request", side_effect=accept_without_item):
+            result = self.sessions.submit(thread_id, body)
+        events = self.sessions.events_after(cursor, timeout=0)["events"]
+        accepted = [event for event in events if event["method"] == "browser/messageAccepted"]
+        self.assertEqual(len(accepted), 1, "provider acceptance must reach other windows while its item is withheld")
+        receipt = accepted[0]["params"]
+        self.assertEqual(receipt, result["acceptedMessage"])
+        self.assertEqual((receipt["threadId"], receipt["requestId"], receipt["turnId"], receipt["message"]),
+                         (thread_id, body["requestId"], turn, body["message"]))
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT state,result_json FROM browser_submission_receipts WHERE request_id=?",
+                             (body["requestId"],)).fetchone()
+        self.assertEqual(row["state"], "completed")
+        self.assertEqual(json.loads(row["result_json"])["acceptedMessage"], receipt)
+        snapshot = self.sessions.read(thread_id, snapshot=True)
+        self.assertEqual(snapshot["acceptedMessages"], [receipt], "reconnect must recover acceptance without provider history")
+        self.assertFalse(any(event["method"].startswith("item/") for event in events))
+        self.sessions.rpc.callback(delayed[0])
+        self.assertEqual(self.sessions.histories[thread_id]["turns"][-1]["items"][-1]["id"], "delayed-user")
+
+    def test_ordinary_composer_handoff_refuses_unproven_or_superseded_completion(self):
+        for outcome in ("interrupted", "failed", "stop_requested", "newer_running", "newer_completed", "unknown"):
+            with self.subTest(outcome=outcome):
+                thread_id = self.create()
+                original = self.sessions.send(thread_id, {"message": "Original task"})["turn"]["id"]
+                request = self.sessions.rpc.request
+                attempts = []
+
+                def reject(method, params=None):
+                    if method == "turn/steer":
+                        attempts.append(params["expectedTurnId"])
+                        if outcome == "stop_requested":
+                            self.store.threads.request_stop(thread_id, original)
+                        if outcome != "unknown":
+                            self.complete_turn(thread_id, outcome if outcome in {"interrupted", "failed"} else "completed")
+                        if outcome.startswith("newer_"):
+                            self.sessions.send(thread_id, {"message": "Another task"})
+                            if outcome == "newer_completed":
+                                self.complete_turn(thread_id)
+                        raise CoordinationError("no active turn to steer")
+                    return request(method, params)
+
+                with patch.object(self.sessions.rpc, "request", side_effect=reject), self.assertRaises(BrowserBusyError):
+                    self.sessions.submit(thread_id, {"message": "Rejected correction", "requestId": "rejected-" + outcome})
+                self.assertEqual(attempts, [original])
+                turns = self.sessions.rpc.threads[thread_id]["turns"]
+                self.assertEqual(len(turns), 2 if outcome.startswith("newer_") else 1)
+                self.assertFalse(any(item.get("content") == [{"type": "text", "text": "Rejected correction"}]
+                                     for turn in turns for item in turn["items"]))
+
+    def test_composer_acceptance_restores_before_the_turn_started_event(self):
+        thread_id = self.create()
+        request = self.sessions.rpc.request
+
+        def hold_start_event(method, params=None):
+            if method == "turn/start":
+                return {"turn": {"id": "delayed-start", "status": "inProgress", "items": []}}
+            return request(method, params)
+
+        with patch.object(self.sessions.rpc, "request", side_effect=hold_start_event):
+            result = self.sessions.submit(thread_id, {"message": "New input", "requestId": "start-receipt"})
+        snapshot = self.sessions.read(thread_id, snapshot=True)
+        self.assertEqual(snapshot["thread"]["turns"], [])
+        self.assertEqual(snapshot["acceptedMessages"], [result["acceptedMessage"]])
+
+    def test_composer_failed_receipt_commit_does_not_publish_acceptance(self):
+        thread_id = self.create()
+        self.sessions.send(thread_id, {"message": "Original task"})
+        with self.store._connection() as db:
+            db.execute("""CREATE TRIGGER reject_acceptance BEFORE UPDATE ON browser_submission_receipts
+                WHEN NEW.state='completed' BEGIN SELECT RAISE(FAIL, 'disk unavailable'); END""")
+        cursor = self.sessions.sequence
+        body = {"message": "Correction", "requestId": "receipt-failure"}
+        with self.assertRaisesRegex(CoordinationError, "receipt could not be saved"):
+            self.sessions.submit(thread_id, body)
+        with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
+            self.sessions.submit(thread_id, body)
+        self.assertFalse(any(event["method"] == "browser/messageAccepted"
+                             for event in self.sessions.events_after(cursor, timeout=0)["events"]))
+        self.assertEqual(self.sessions.read(thread_id, snapshot=True)["acceptedMessages"], [])
+
+    def test_ordinary_composer_uncertain_outcome_has_no_handoff_or_acceptance_event(self):
+        for error in ("Codex app-server disconnected.", "Request timed out.", "Unrecognized native response"):
+            with self.subTest(error=error):
+                thread_id = self.create()
+                self.sessions.send(thread_id, {"message": "Original task"})
+                request = self.sessions.rpc.request
+
+                def lose_response(method, params=None):
+                    result = request(method, params)
+                    if method == "turn/steer":
+                        self.complete_turn(thread_id)
+                        raise CoordinationError(error)
+                    return result
+
+                body = {"message": "Correction", "requestId": "uncertain"}
+                cursor = self.sessions.sequence
+                with patch.object(self.sessions.rpc, "request", side_effect=lose_response), self.assertRaises(CoordinationError):
+                    self.sessions.submit(thread_id, body)
+                with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
+                    self.sessions.submit(thread_id, body)
+                self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+                self.assertFalse(any(event["method"] == "browser/messageAccepted"
+                                     for event in self.sessions.events_after(cursor, timeout=0)["events"]))
+                self.assertEqual(self.sessions.read(thread_id, snapshot=True)["acceptedMessages"], [])
+
     def test_composer_handoff_requires_the_latest_successful_unstopped_turn(self):
         for outcome in ("interrupted", "failed", "stop_requested", "newer_running", "newer_completed", "unknown"):
             with self.subTest(outcome=outcome):
