@@ -256,7 +256,13 @@ class TranscriptStore:
                           beforeSeq=entries[0][1] if entries else None, totalTurns=row[3])
         if serialized:
             header = encode({key: value for key, value in result.items() if key != "turns"})[:-1]
-            return header + (b"," if header != b"{" else b"") + b'"turns":[' + b",".join(raw_turns) + b"]}"
+            body = header + (b"," if header != b"{" else b"") + b'"turns":[' + b",".join(raw_turns) + b"]}"
+            if serialized == "projection":
+                # Receipt projection needs visible identities, not item bodies.
+                # Both are from the same publication and SQLite read snapshot.
+                result["turns"] = [{"id": entry[2]} for entry in entries]
+                return result, body
+            return body
         if with_checkpoint:
             return {"generation": row[1], "checkpoint": row[7], "source_instance": row[8] if len(row) > 8 else None, "history": result}
         return result
@@ -275,6 +281,10 @@ class TranscriptStore:
         if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
             raise ValueError("Invalid transcript window")
         return self._read(thread_id, before_seq=before_seq, limit=limit, target_turn=turn_id, serialized=True)
+
+    def read_window_projection(self, thread_id):
+        """Return receipt identities and serialized window from one publication."""
+        return self._read(thread_id, limit=40, serialized="projection")
 
     def read_full(self, thread_id, *, require_active=True):
         return self._read(thread_id, full=True, require_active=require_active)

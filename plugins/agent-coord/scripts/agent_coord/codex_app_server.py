@@ -2601,13 +2601,15 @@ class BrowserSessions:
         public = self.reviews.public_history(thread_id, {"id": thread_id, "turns": [turn]})
         return public["turns"][0]
 
-    def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
+    def _read_external_snapshot(self, work_thread: dict, *, recent: bool, saved_history_reader=None) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
         self._authorize_history(thread_id)
         from .transcript_store import TranscriptStore
         transcripts = TranscriptStore(self.store)
-        thread = transcripts.read_window(thread_id) if recent else transcripts.read_full(thread_id)
+        thread = saved_history_reader(thread_id) if recent and saved_history_reader is not None else None
+        if thread is None:
+            thread = transcripts.read_window(thread_id) if recent else transcripts.read_full(thread_id)
         indexed = thread is not None
         if thread is None:
             thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
@@ -2631,7 +2633,8 @@ class BrowserSessions:
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
-    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False) -> dict:
+    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False,
+                       saved_history_reader=None) -> dict:
         """Open from saved history and received events, without provider admission.
 
         Full reads and sends reconcile native execution. Opening a window must
@@ -2675,15 +2678,18 @@ class BrowserSessions:
         needs_outcome = work_thread["turn_id"] and (work_thread["turn_active"] or not work_thread["turn_completion"])
         saved_window = thread is None and recent and not needs_outcome
         if thread is None:
-            thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
-                                  live_turn=active_turn)
+            thread = saved_history_reader(thread_id) if saved_window and saved_history_reader is not None else None
+            if thread is None:
+                thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
+                                      live_turn=active_turn)
             if thread is None:
                 saved_window = False
                 thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if unloaded and projection.unloaded_observation is not observation:
             # A commit or rollback overtook the database read. Recheck live
             # ownership and input once before returning the new history.
-            return self._read_snapshot(thread_id, recent=recent, synchronized=True)
+            return self._read_snapshot(thread_id, recent=recent, synchronized=True,
+                                       saved_history_reader=saved_history_reader)
         if not saved_window:
             if omitted_turns and needs_outcome and not any(
                     turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]):
