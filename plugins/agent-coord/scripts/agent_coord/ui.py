@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import lru_cache
 from http import HTTPStatus
@@ -32,7 +31,8 @@ from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
 from .thread_control import ThreadControlWorker
 from .app_control import AppControlWorker
-from .message_timeline import message_timeline, message_cursor, message_changes, message_sends
+from .message_timeline import message_timeline
+from .notification_broadcast import NotificationBroadcast
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
@@ -580,39 +580,20 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
-        def _coordination_events(self, completion_sequence, message_sequence, send_sequence):
-            completions = browser_sessions.completions_after(completion_sequence)
-            message_sequence, changes = message_changes(store, message_sequence, browser_sessions.cwd)
-            send_sequence, sends = message_sends(store, send_sequence, browser_sessions.cwd)
-            notifications = {
-                "completions": completions["events"], "completionSeq": completions["seq"],
-                "snoozes": browser_sessions.snooze_notifications(),
-                "approvals": browser_sessions.approval_notifications(),
-            }
-            return message_sequence, send_sequence, changes + sends, notifications
-
         def _stream_events(self, sequence, completion_sequence):
-            message_sequence = message_cursor(store)
-            send_sequence, _ = message_sends(store)
-            # Keep one poll in flight per connection. Only this handler writes
-            # frames and advances the cursors advertised to this client.
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rf-notifications") as reader:
-                poll = None
-                next_poll = 0.0
+            broadcaster = self.server.notification_broadcast
+            with broadcaster.subscribe(completion_sequence) as client:
                 while not browser_sessions.closed:
-                    if poll is None and time.monotonic() >= next_poll:
-                        next_poll = time.monotonic() + 1
-                        poll = reader.submit(self._coordination_events, completion_sequence, message_sequence, send_sequence)
                     batch = browser_sessions.events_after(sequence, timeout=1)
                     if browser_sessions.closed or not self._authorized():
                         return
                     sequence = batch["seq"]
-                    batch.update(completions=[], completionSeq=completion_sequence)
-                    if poll is not None and poll.done():
-                        message_sequence, send_sequence, changes, notifications = poll.result()
-                        poll = None
-                        batch["events"].extend(changes)
-                        batch.update(notifications)
+                    notifications = broadcaster.take(client)
+                    if notifications is None:
+                        batch.update(completions=[], completionSeq=completion_sequence)
+                    else:
+                        batch["events"].extend(notifications["events"])
+                        batch.update((key, value) for key, value in notifications.items() if key != "events")
                         completion_sequence = batch["completionSeq"]
                     self._event_batch(batch)
 
@@ -1439,6 +1420,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     coordination_metrics: CoordinationMetrics | None = None
 
     stoic_integration = None
+    notification_broadcast: NotificationBroadcast | None = None
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
@@ -1475,6 +1457,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 mailbox.put(None)
             self._idle_workers.clear()
         try:
+            if self.notification_broadcast is not None:
+                self.notification_broadcast.close()
             if self.stoic_integration is not None:
                 self.stoic_integration.close()
             if self.coordination_metrics is not None:
@@ -1547,6 +1531,7 @@ def make_ui_server(
         raise
     server.external_work = sessions.external_work
     server.browser_sessions = sessions
+    server.notification_broadcast = NotificationBroadcast(store, sessions)
     server.remote_access = remote
     server.web_push = push
     server.native_push = native
