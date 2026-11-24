@@ -1,4 +1,5 @@
 """Durable stdout replay through the production transport journal entrypoints."""
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import tempfile
@@ -112,3 +113,34 @@ class StreamJournalTests(unittest.TestCase):
         legacy.close()
         with self.assertRaisesRegex(TransportError, 'new transport generation'):
             Journal(self.directory, file_events=True)
+
+    def test_ten_concurrent_channels_replay_exactly_once_in_sequence_order(self):
+        journal = self.journal()
+        statements = []
+        journal.db.set_trace_callback(statements.append)
+        def produce(channel):
+            return [journal.append(channel, 'stdout', str(index)) for index in range(100)]
+        with ThreadPoolExecutor(max_workers=10) as workers:
+            channels = list(workers.map(produce, map(str, range(10))))
+        events = []
+        after = 0
+        while after < 1000:
+            batch = journal.events(after)
+            events.extend(batch)
+            after = batch[-1]['sequence']
+        self.assertEqual([event['sequence'] for event in events], list(range(1, 1001)))
+        for channel in range(10):
+            self.assertEqual([e['data'] for e in events if e['channel'] == str(channel)],
+                             list(map(str, range(100))))
+            self.assertEqual(channels[channel], sorted(channels[channel]))
+        self.assertEqual(statements, [])
+
+    def test_legacy_first_adoption_cost_remains_explicit(self):
+        legacy = Journal(self.directory / 'legacy-cost')
+        self.addCleanup(legacy.close)
+        statements = []
+        legacy.db.set_trace_callback(statements.append)
+        for index in range(100):
+            legacy.append('existing-owner', 'stdout', str(index))
+        self.assertEqual(sum(row.startswith('INSERT INTO events') for row in statements), 100)
+        self.assertEqual(legacy.bounds()['event_storage'], 'sqlite')

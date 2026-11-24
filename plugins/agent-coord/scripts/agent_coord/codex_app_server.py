@@ -1187,9 +1187,17 @@ class BrowserSessions:
                 existing.update(copy.deepcopy(item))
         item = next((i for i in turn["items"] if i["id"] == params.get("itemId")), None)
         if item and isinstance(params.get("delta"), str):
-            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput"}.get(method)
+            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput",
+                     "item/mcpToolCall/outputDelta": "visibleOutput"}.get(method)
             if field:
                 item[field] = (item.get(field) or "") + params["delta"]
+            elif method == "item/reasoning/summaryTextDelta":
+                index = params.get("summaryIndex", 0)
+                if type(index) is int and 0 <= index < 1024:
+                    summary = item.setdefault("summary", [])
+                    while len(summary) <= index:
+                        summary.append("")
+                    summary[index] += params["delta"]
         if method in {"turn/started", "turn/completed"}:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
         if method in {"item/completed", "turn/completed"}:
