@@ -112,6 +112,7 @@ jobs:
           npm ci --prefix demo --ignore-scripts --omit=dev --no-audit --no-fund
           demo/node_modules/.bin/playwright install --with-deps chromium
       - name: Build and verify the interface
+        id: interface_build
         run: |
           python3 scripts/build_web.py
           python3 scripts/check_design_tokens.py
@@ -127,6 +128,12 @@ jobs:
         run: |
           node scripts/validate_interface.mjs --source "$PWD" \
             --output "$RUNNER_TEMP/interface-acceptance" --check
+      - name: Record separate startup CPU samples after an acceptance failure
+        if: ${{ failure() && !cancelled() && steps.interface_build.outcome == 'success' }}
+        run: |
+          node scripts/validate_interface.mjs --source "$PWD" --mode performance \
+            --checks 'Renderer compile and boot' --boot-trace --startup-profile \
+            --output "$RUNNER_TEMP/interface-acceptance/startup-profile"
       - name: Retain interface measurements and screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
