@@ -39,6 +39,21 @@ class SearchStoreTests(unittest.TestCase):
         self.assertEqual(self.index.verify(records)['failures'], [])
         self.index.activate()
 
+    def test_search_files_containing_conversation_prose_are_private(self):
+        import stat
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'nested' / 'search.sqlite3'
+            index = SearchStore(path)
+            try:
+                with index.connection() as db:
+                    db.execute("INSERT INTO search_control VALUES ('example','value')")
+                    for file in (path, Path(str(path) + '-wal'), Path(str(path) + '-shm')):
+                        self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            finally:
+                index.close()
+
     def test_normal_search_unicode_identifiers_short_queries_role_and_scope(self):
         records = [self.record('a', 'Straße β API::get_user x%_ "quoted" 日本語'),
                    self.record('b', 'assistant-only API::get_user', role='assistant'),

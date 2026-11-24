@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import weakref
@@ -67,12 +68,16 @@ def _prepare(history):
 class SearchStore:
     def __init__(self, path, *, initialize=True):
         self.path = Path(path).resolve()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rf-search-index')
         self._closed = False
         self._futures = set()
         self._future_lock = threading.Lock()
         if initialize:
+            self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # The index contains transcript prose. SQLite derives new journal
+            # permissions from the database file mode at creation.
+            with os.fdopen(os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600), 'rb') as file:
+                os.fchmod(file.fileno(), 0o600)
             with self.connection() as db:
                 db.execute('PRAGMA journal_mode=WAL')
                 db.executescript(_SCHEMA)
