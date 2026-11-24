@@ -161,8 +161,22 @@ body.mobile-chat .mobile-thread-sheet .context-panel.agents-mode { height: 75dvh
   box-shadow: var(--shadow-lg);
 }
 .agent-breadcrumb-option { width: 100%; padding: var(--space-2); text-align: left; }
+.agent-breadcrumb-option .agent-breadcrumb-title { white-space: normal; overflow-wrap: anywhere; }
 .agent-breadcrumb-option[aria-current] { color: var(--ink); background: var(--hover-bg); }
 @media (pointer: coarse) {
   .agent-breadcrumb-switcher > summary, button.agent-breadcrumb-step, .agent-breadcrumb-option { min-height: var(--hit-target); }
   .agent-breadcrumb-switcher > summary { min-width: var(--hit-target); }
+}
+@media (max-width: 720px) {
+  .conversation-head:has(.agent-breadcrumb:not([hidden])) { position: relative; }
+  .conversation-head .agent-breadcrumb { position: static; width: 100%; }
+  .conversation-head .agent-breadcrumb-options { inset-inline: var(--space-3); width: auto; }
+  /* Each step after the root has a divider. Four steps occupy seven elements. */
+  .agent-breadcrumb-path:has(> :nth-child(7)) { flex: 1; }
+  .agent-breadcrumb-path:has(> :nth-child(7)) > :not(:first-child, :nth-child(2), :last-child) { display: none; }
+  .agent-breadcrumb-path:has(> :nth-child(7)) > .agent-breadcrumb-step:is(:first-child, :last-child) {
+    flex: 1 1 0;
+    padding-inline: var(--stroke-strong);
+  }
+  .agent-breadcrumb-path:has(> :nth-child(7)) > .agent-breadcrumb-divider:nth-child(2)::after { content: " … ›"; }
 }

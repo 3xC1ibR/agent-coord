@@ -68,6 +68,7 @@
   .asks-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .asks-view .ask-row button, .asks-view .ask-note, .asks-view .ask-snooze, .asks-view #close-asks { min-height: var(--hit-target); }
   .asks-view .ask-row .ask-thread, .asks-view .ask-row .ask-link { min-height: 0; }
+  .asks-view .ask-reply:has(.ask-reply-discuss) .ask-note { flex-basis: 100%; }
   .ask-later { margin-left: 0; }
 }
 /* The count on the navigation toggle, shown while the navigation and its entry are out of sight. */
