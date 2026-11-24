@@ -44,6 +44,32 @@ function setup() {
 const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const answer = (c, path, value) => c.requests.find(request => request.path === path).resolve(structuredClone(value));
 
+for (const failure of ["read acknowledgement", "inventory refresh"]) {
+  test(`a displayed conversation finishes opening after failed ${failure}`, async () => {
+    const c = setup(), detail = fixture("one"), errors = [];
+    c.state.sessions = [detail.work_thread];
+    c.state.drafts.set("one", "Retain this unfinished message");
+    c.showError = error => errors.push(error.message);
+    const original = c.api;
+    if (failure === "read acknowledgement") {
+      c.api = (path, body) => body?.seen
+        ? Promise.reject(new Error(failure)) : original(path, body);
+    } else c.refreshList = async () => { throw new Error(failure); };
+    let ready = false;
+    const opening = c.select("one", {focus: false}).then(() => { ready = true; });
+    await settle();
+    answer(c, "sessions/one", detail);
+    answer(c, "threads/one", detail.work_thread);
+    await opening;
+    assert.equal(ready, true, "startup must reach its navigation readiness continuation");
+    assert.equal(c.state.detail.work_thread.thread_id, "one");
+    assert.equal(c.$("message").value, "Retain this unfinished message");
+    assert.deepEqual(errors, [failure]);
+    assert.equal(c.state.detail.work_thread.seen_checkpoint_id, undefined,
+      "failed or unconfirmed acknowledgement must not be presented as committed");
+  });
+}
+
 test("a known app conversation reads its thread and session together", async () => {
   const c = setup(), detail = fixture("one");
   c.state.sessions = [detail.work_thread];

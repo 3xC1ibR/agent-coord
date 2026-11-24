@@ -1255,9 +1255,12 @@ async function select(id, {rollUp = false, dock = false, focus = true, stayInPro
   const checkpoint = displayed.checkpoint?.id || 0, completion = displayed.turn_completion?.id || 0;
   if (!dock && !state.detail?.deferReadAcknowledgment &&
       (checkpoint > (displayed.seen_checkpoint_id || 0) || completion > (displayed.seen_completion_id || 0))) {
-    await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion}, {headers: {Prefer: "return=minimal"}});
+    await api(threadPath(id), {seen: true, seen_checkpoint_id: checkpoint, seen_completion_id: completion},
+      {headers: {Prefer: "return=minimal"}}).catch(showError);
   }
-  if (refreshInventory) await refreshList();
+  // The conversation is already displayed. Ancillary failures remain visible,
+  // but must not abort startup before navigation and native restoration finish.
+  if (refreshInventory) await refreshList().catch(showError);
   if (state.selected !== id) return;
   if (state.detail?.work_thread.browser_session) {
     if (focus) (state.mobileChat?.matches && !dock ? $("timeline") : $("message")).focus({preventScroll: true});
