@@ -69,6 +69,24 @@ for (const engine of process.env.RIBBON_BROWSER ? [process.env.RIBBON_BROWSER] :
       assert.equal(recovered.rejected, true);
       assert.deepEqual(recovered.final, {text:"second submission", mentions:[], images:[]});
       assert.equal(recovered.remaining, 0);
+      const moved = await page.evaluate(async () => {
+        const store = ComposerDrafts.create({scope:"workspace"});
+        const other = ComposerDrafts.create({scope:"other window"});
+        const attachment = {name:"next.png", url:"data:image/png;base64,YQ=="};
+        await store.write("temporary", {text:"newer input", images:[attachment]});
+        await other.write("temporary", {text:"independent window"});
+        await store.write("created", {images:[]});
+        await store.move("temporary", "created");
+        await store.move("temporary", "created");
+        const draft = await store.read("created");
+        const source = await store.read("temporary");
+        await store.stage("created", "in-flight", {text:"old request", body:{message:"old request"}, path:"sessions/created/messages"});
+        await store.remove("created");
+        return {draft, source, retired:await store.read("created"), pending:(await store.pending("created")).map(row => row.requestId),
+          independent:(await other.read("temporary")).text};
+      });
+      assert.deepEqual(moved, {draft:{text:"newer input", mentions:[], images:[]}, source:null, retired:null,
+        pending:["in-flight"], independent:"independent window"});
     } finally {
       await browser?.close();
       await new Promise(resolve => server.close(resolve));

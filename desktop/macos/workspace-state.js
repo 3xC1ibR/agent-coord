@@ -83,7 +83,8 @@
     const storage = name => { try { return view[name]; } catch { return null; } };
     let pending = null, ready = false, restoring = false, restored = false, timer = null, last = "", interacted = false, dirtyAt = null, nextImage = 0;
     const imageIds = new Map();
-    let compatibilityStore, storageFailed = false;
+    let compatibilityStore, storageError;
+    const compatibilityWrites = new Set();
     const compatibilityImages = new Map(), changedComposers = new Set();
     const touched = new Set(), checkpointedComposers = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
     const currentState = () => { try { return getState(); } catch { return null; } };
@@ -91,7 +92,7 @@
     const currentNavigation = () => { try { return getNavigation(); } catch { return null; } };
     const currentDraftId = s => s?.selected === "new-session" ? s.newSessionDraft?.draftId || "new-session" : s?.selected;
     function composerStore() {
-      if (storageFailed) return null;
+      if (storageError) return null;
       if (view.agentCoordComposerDrafts) return view.agentCoordComposerDrafts;
       const scope = view.agentCoordDesktop?.windowId;
       if (scope && view.indexedDB && view.ComposerDrafts) {
@@ -99,10 +100,17 @@
       }
       return null;
     }
-    function storageFailure(error) { storageFailed = true; onError(error); changed(); }
-    function persistCompatibility(id, patch) {
-      if (!id || restoring || view.agentCoordComposerDrafts) return;
-      composerStore()?.write(id, patch).catch(storageFailure);
+    function storageFailure(error) { storageError = error; onError(error); changed(); }
+    function persistCompatibility(id, patch, explicitEdit = false) {
+      if (!id || restoring && !explicitEdit || view.agentCoordComposerDrafts) return;
+      const store = composerStore();
+      if (!store) return;
+      const write = store.write(id, patch);
+      compatibilityWrites.add(write);
+      write.then(() => compatibilityWrites.delete(write), error => {
+        compatibilityWrites.delete(write);
+        storageFailure(error);
+      });
     }
     function persistCompatibilityImages(s) {
       if (!s || restoring || view.agentCoordComposerDrafts || !composerStore()) return;
@@ -161,7 +169,7 @@
           if (id) { touched.add(id); if (s?.selected === "new-session") touched.add("new-session"); }
           if (id && event.target?.id === "message") {
             const text = event.target.value;
-            persistCompatibility(id, {text, mentions: s?.mentions?.snapshot(id, text) || []});
+            persistCompatibility(id, {text, mentions: s?.mentions?.snapshot(id, text) || []}, true);
             if (composerStore() && !checkpointedComposers.has(id)) {
               checkpointedComposers.add(id);
               // The first edit can immediately precede Quit. Save selection
@@ -336,6 +344,17 @@
         Promise.resolve(onSave?.(snapshot)).catch(error => { last = ""; onError(error); });
       } catch (error) { onError(error); }
     }
+
+    async function checkpoint() {
+      // Local writes and submission staging may be queued behind another
+      // IndexedDB transaction. Order the metadata behind those commits.
+      await view.agentCoordDrainComposerWrites?.();
+      while (compatibilityWrites.size) await Promise.all([...compatibilityWrites]);
+      if (storageError) throw storageError;
+      if (!ready || restoring || pending && !restored) return null;
+      if (!composerStore()) throw new Error("The window's local draft storage is unavailable.");
+      return capture({durable: true});
+    }
     async function restoreComposers(snapshot, store) {
       const texts = new Map(entries(snapshot.drafts)), attachments = new Map(entries(snapshot.images));
       const mentions = new Map(entries(snapshot.mentions));
@@ -507,7 +526,7 @@
     }
     bindDocument(doc);
     view.addEventListener("pagehide", flush);
-    return {preload, capture, restore, changed, storageChanged, bindDocument, flush,
+    return {preload, capture, restore, changed, storageChanged, bindDocument, flush, checkpoint,
       busy() {
         const s = currentState();
         return Boolean(s?.sending?.size || view.agentCoordSendWork?.sending ||

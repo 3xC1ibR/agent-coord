@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 /// Interface state only. The independent runtime continues to own all agents.
 struct RestoredWindow: Codable {
@@ -85,10 +86,19 @@ final class WindowRestorationStore {
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(state)
         guard data != previous else { return }
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try data.write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        let pending = directory.appendingPathComponent(".state-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: pending) }
+        try data.write(to: pending, options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pending.path)
+        // Rename is the final commit. Once the destination is replaced there
+        // are no additional fallible steps which can signal a false rollback.
+        let result = pending.path.withCString { source in
+            url.path.withCString { destination in Darwin.rename(source, destination) }
+        }
+        guard result == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         previous = data
     }
 

@@ -56,7 +56,6 @@ final class DesktopWindow {
     var incomingConversation: [String: Any]?
     var conversationReply: ((Any?, String?) -> Void)?
     var conversationTransferId: String?
-    var closeAfterConversationTransfer = false
     let files = FileBrowserController()
     let split = NSSplitViewController()
     var filesItem: NSSplitViewItem?
@@ -71,6 +70,7 @@ final class DesktopWindow {
     var workspaceJSON: String?
     var workspaceVersion = 0
     var restorationAttempted = false
+    var checkingReload = false
 
     init(window: NSWindow, webView: WKWebView, status: NSStackView, label: NSTextField,
          spinner: NSProgressIndicator, retry: NSButton, id: String = UUID().uuidString.lowercased()) {
@@ -87,7 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         weak var source: DesktopWindow?
         weak var target: DesktopWindow?
         let created: Bool
+        var originalRecords: [RestoredWindow]
         var finishing = false
+        var metadataEnqueued = false
     }
     var conversationTransfers: [String: ConversationTransfer] = [:]
     private var activations = 0
@@ -656,21 +658,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func saveWindowSet(_ completion: ((Error?) -> Void)? = nil) {
-        guard !quitting, !restoringWindows, conversationTransfers.isEmpty, let store = windowStore else { completion?(nil); return }
-        let records = windows.filter(\.restorable).map { item -> RestoredWindow in
-            let kind: RestoredWindow.Kind = item.isSettings ? .settings : item.isConversationWindow ? .conversation :
-                item.launchRoute.hasPrefix("/monitor") ? .monitor : .workspace
-            let screen = item.window.screen
-            return RestoredWindow(id: item.id, folderSlot: item.folderSlot, kind: kind, route: item.launchRoute,
-                frame: item.window.frame, screen: screen?.frame,
-                displayID: (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
-                minimized: item.window.isMiniaturized, workspaceJSON: item.workspaceJSON)
+    private func windowRecord(_ item: DesktopWindow) -> RestoredWindow {
+        let kind: RestoredWindow.Kind = item.isSettings ? .settings : item.isConversationWindow ? .conversation :
+            item.launchRoute.hasPrefix("/monitor") ? .monitor : .workspace
+        let screen = item.window.screen
+        return RestoredWindow(id: item.id, folderSlot: item.folderSlot, kind: kind, route: item.launchRoute,
+            frame: item.window.frame, screen: screen?.frame,
+            displayID: (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value,
+            minimized: item.window.isMiniaturized, workspaceJSON: item.workspaceJSON)
+    }
+
+    private func saveWindowSet(checkpoint: Bool = false, focusedWindow: String? = nil,
+                               completion: ((Error?) -> Void)? = nil) {
+        guard let store = windowStore else {
+            completion?(Backend.failure("The native window state store is unavailable.")); return
         }
-        let focused = current.flatMap { $0.restorable ? $0.id : nil }, nextSlot = nextFolderSlot
+        guard !restoringWindows, checkpoint || (!quitting && conversationTransfers.isEmpty) else {
+            completion?(Backend.failure("The native window set is still changing.")); return
+        }
+        var records = windows.filter(\.restorable).map(windowRecord)
+        for transfer in conversationTransfers.values where !transfer.metadataEnqueued {
+            // Keep the previous arrangement for any other uncommitted move.
+            records.removeAll { $0.id == transfer.target?.id || $0.id == transfer.source?.id }
+            records.append(contentsOf: transfer.originalRecords)
+        }
+        let saved = records
+        let focused = focusedWindow ?? current.flatMap { $0.restorable ? $0.id : nil }, nextSlot = nextFolderSlot
         windowPersistenceQueue.async {
             var failure: Error?
-            do { try store.save(windows: records, focusedWindow: focused, nextFolderSlot: nextSlot) }
+            do { try store.save(windows: saved, focusedWindow: focused, nextFolderSlot: nextSlot) }
             catch { failure = error; NSLog("Could not save Ribbon Field window state: %@", error.localizedDescription) }
             if let completion = completion {
                 let error = failure
@@ -679,9 +695,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    private func acceptWorkspaceState(_ state: [String: Any], for item: DesktopWindow, completion: (() -> Void)? = nil) {
+    private func acceptWorkspaceState(_ state: [String: Any], for item: DesktopWindow,
+                                      completion: ((Error?) -> Void)? = nil) {
         let durableState = state.filter { $0.key != "originTransfer" }
-        guard JSONSerialization.isValidJSONObject(durableState) else { completion?(); return }
+        guard JSONSerialization.isValidJSONObject(durableState) else {
+            completion?(Backend.failure("The native window checkpoint is invalid.")); return
+        }
         item.workspaceVersion += 1
         let version = item.workspaceVersion
         if let route = state["route"] as? String, WindowRestorationStore.validRoute(route), let url = URL(string: route) {
@@ -697,8 +716,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if firstSnapshot { self?.saveWindowSet() }
                     else { self?.scheduleWindowSave() }
                 }
-                completion?()
+                completion?(json == nil ? Backend.failure("The native window checkpoint could not be encoded.") : nil)
             }
+        }
+    }
+
+    private func checkpointWorkspaces(_ items: [DesktopWindow], freezeInput: Bool = false,
+                                      requireSnapshot: Bool = false, completion: @escaping (Error?) -> Void) {
+        let candidates = items.filter { item in
+            guard !item.isSettings, let url = item.webView.url, url.path == "/", let origin = item.documentOrigin
+            else { return false }
+            return isLocal(url, at: origin)
+        }
+        if requireSnapshot && candidates.count != items.count {
+            completion(Backend.failure("A window needed for the move is no longer available.")); return
+        }
+        let group = DispatchGroup()
+        var failure: Error?
+        var finished = false
+        func finish(_ error: Error?) {
+            guard !finished else { return }
+            finished = true
+            completion(error)
+        }
+        for item in candidates {
+            group.enter()
+            item.webView.callAsyncJavaScript("""
+                if (freezeInput) document.documentElement.inert = true;
+                return await window.agentCoordDesktop?.checkpointWindowState() ?? null;
+                """, arguments: ["freezeInput": freezeInput], in: nil, in: .page) { result in
+                    guard !finished else { group.leave(); return }
+                    switch result {
+                    case .success(let value):
+                        if let state = value as? [String: Any] {
+                            self.acceptWorkspaceState(state, for: item) { error in
+                                failure = failure ?? error
+                                group.leave()
+                            }
+                            return
+                        }
+                        if requireSnapshot || item.navigationReady && !item.restoringWorkspace {
+                            failure = failure ?? Backend.failure("A window did not return its local checkpoint.")
+                        }
+                    case .failure(let error):
+                        failure = failure ?? error
+                    }
+                    group.leave()
+                }
+        }
+        group.notify(queue: .main) { finish(failure) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            finish(Backend.failure("Ribbon Field is still saving local drafts. Try again."))
         }
     }
 
@@ -733,8 +801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { finish(false) }
     }
 
-    private func windowStateError(_ message: String) {
-        webView?.callAsyncJavaScript("const box = document.getElementById('error'); if (box) { box.querySelector('span').textContent = message; box.hidden = false; }",
+    private func windowStateError(_ message: String, in item: DesktopWindow? = nil) {
+        (item?.webView ?? webView)?.callAsyncJavaScript("const box = document.getElementById('error'); if (box) { box.querySelector('span').textContent = message; box.hidden = false; }",
             arguments: ["message": message], in: nil, in: .page) { _ in }
     }
 
@@ -751,13 +819,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func receiveConversation(_ payload: [String: Any], in target: DesktopWindow, from source: DesktopWindow, created: Bool,
                                      reply: @escaping (Any?, String?) -> Void) {
-        guard target.conversationTransferId == nil else { reply(nil, "This window is already receiving a tab."); return }
+        guard !quitting, !conversationTransfers.values.contains(where: {
+            $0.source === source || $0.target === source || $0.source === target || $0.target === target
+        }) else {
+            if created { target.window.close() }
+            reply(nil, "Finish the other window move first."); return
+        }
         let transferId = UUID().uuidString.lowercased()
-        conversationTransfers[transferId] = ConversationTransfer(source: source, target: target, created: created)
+        let previousTarget = !created && target.restorable ? [windowRecord(target)] : []
+        let previousSource = source.restorable ? [windowRecord(source)] : []
+        conversationTransfers[transferId] = ConversationTransfer(source: source, target: target, created: created,
+            originalRecords: previousSource + previousTarget)
         target.conversationTransferId = transferId
-        target.incomingConversation = payload
         target.conversationReply = reply
-        deliverConversation(to: target)
+        checkpointWorkspaces([source], requireSnapshot: true) { [weak self, weak target] error in
+            guard let self = self, let target = target, let reply = target.conversationReply,
+                  self.conversationTransfers[transferId] != nil else { return }
+            if let error = error {
+                target.conversationReply = nil
+                target.conversationTransferId = nil
+                self.conversationTransfers.removeValue(forKey: transferId)
+                if created { target.window.close() }
+                reply(nil, error.localizedDescription)
+                return
+            }
+            let latestSource = source.restorable ? [self.windowRecord(source)] : []
+            self.conversationTransfers[transferId]?.originalRecords = latestSource + previousTarget
+            target.incomingConversation = payload
+            self.deliverConversation(to: target)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak target] in
             guard let self = self, let target = target, let transfer = self.conversationTransfers[transferId], !transfer.finishing else { return }
             let reply = target.conversationReply
@@ -781,9 +871,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 target.window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
                 if self.conversationTransfers[transferId]?.source == nil {
-                    self.finishConversationTransfer(transferId, committed: true) { _, _ in }
+                    self.finishConversationTransfer(transferId, committed: true, reply: reply)
+                } else {
+                    reply(["transferId": transferId], nil)
                 }
-                reply(["transferId": transferId], nil)
             default:
                 self.finishConversationTransfer(transferId, committed: false) { _, _ in
                     reply(nil, "The conversation could not be moved. The original tab is still available.")
@@ -799,23 +890,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             reply(nil, "The destination window is no longer available."); return
         }
         conversationTransfers[transferId]?.finishing = true
-        target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.finish(transferId, committed)",
-            arguments: ["transferId": transferId, "committed": committed], in: nil, in: .page) { [weak self] result in
-            self?.conversationTransfers.removeValue(forKey: transferId)
-            self?.scheduleWindowSave()
-            target.conversationTransferId = nil
-            guard case .success(let value) = result, value as? Bool == true else {
-                transfer.source?.closeAfterConversationTransfer = false
-                if transfer.created { target.window.close() }
-                reply(nil, "The destination could not confirm the move. The original tab is being restored.")
-                return
+        func finalize(_ accepted: Bool, _ failure: String? = nil) {
+            target.webView.callAsyncJavaScript("return await window.agentCoordConversationTransfer.finish(transferId, committed)",
+                arguments: ["transferId": transferId, "committed": accepted], in: nil, in: .page) { result in
+                    if case .failure(let error) = result { NSLog("Could not finalize a Ribbon Field move: %@", error.localizedDescription) }
+                    self.conversationTransfers.removeValue(forKey: transferId)
+                    target.conversationTransferId = nil
+                    if !accepted && transfer.created { target.window.close() }
+                    self.scheduleWindowSave()
+                    reply(failure == nil ? true : nil, failure)
+                }
+        }
+        guard committed else { finalize(false); return }
+        let failure = "The destination could not save the move. The original tab is being restored."
+        target.webView.callAsyncJavaScript("""
+            const transfer = window.agentCoordConversationTransfer;
+            if (transfer?.prepareCommit) return await transfer.prepareCommit(transferId);
+            return !!transfer && !window.agentCoordComposerDrafts;
+            """,
+            arguments: ["transferId": transferId], in: nil, in: .page) { result in
+                guard !self.quitting, case .success(let value) = result, value as? Bool == true else {
+                    finalize(false, failure); return
+                }
+                let items = [transfer.source, target].compactMap { $0 }
+                self.checkpointWorkspaces(items, requireSnapshot: true) { error in
+                    guard error == nil, !self.quitting, self.conversationTransfers[transferId] != nil else {
+                        finalize(false, failure); return
+                    }
+                    self.conversationTransfers[transferId]?.metadataEnqueued = true
+                    self.saveWindowSet(checkpoint: true) { error in
+                        if error != nil {
+                            self.conversationTransfers[transferId]?.metadataEnqueued = false
+                            finalize(false, failure)
+                        } else {
+                            // Once the destination record is saved, it owns the
+                            // draft even if WebKit exits before its final reply.
+                            finalize(true)
+                        }
+                    }
+                }
             }
-            if !committed && transfer.created { target.window.close() }
-            if committed, let source = transfer.source, source.closeAfterConversationTransfer {
-                source.closeAfterConversationTransfer = false
-                source.window.performClose(nil)
-            } else { transfer.source?.closeAfterConversationTransfer = false }
-            reply(true, nil)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        !conversationTransfers.values.contains { transfer in
+            transfer.source?.window === sender || transfer.finishing && transfer.target?.window === sender
         }
     }
 
@@ -845,7 +964,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !quitting && !keptAsFinalWindow { item.restorable = false; saveWindowSet() }
         guard !keptAsFinalWindow else { return }
         for (transferId, transfer) in conversationTransfers where transfer.target === item {
-            transfer.source?.closeAfterConversationTransfer = false
             conversationTransfers.removeValue(forKey: transferId)
         }
         let reply = item.conversationReply
@@ -908,11 +1026,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if current?.commands.contains("workspace") == true { runCommand("workspace") }
         else if let url = serverURL, webView?.url?.path != "/" { webView.load(URLRequest(url: url)) }
     }
-    @objc private func reload() { if serverURL != nil { webView.reload() } else { startBackend() } }
+    private func checkpointAndNavigate(in item: DesktopWindow, navigate: @escaping () -> Void) {
+        guard !quitting, !item.checkingReload else { return }
+        item.checkingReload = true
+        func finish(_ error: Error?) {
+            item.checkingReload = false
+            guard !self.quitting, self.windows.contains(where: { $0 === item }) else { return }
+            if let error = error {
+                item.webView.evaluateJavaScript("document.documentElement.inert = false")
+                self.windowStateError("Could not save the window before reloading. " + error.localizedDescription, in: item)
+                return
+            }
+            if item.restoredWorkspace == nil, let json = item.workspaceJSON {
+                item.restoredWorkspace = json.data(using: .utf8).flatMap {
+                    (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+                }
+            }
+            item.restorationAttempted = false
+            navigate()
+        }
+        checkpointWorkspaces([item], freezeInput: true) { error in
+            if let error = error { finish(error) }
+            else { self.saveWindowSet(checkpoint: true, completion: finish) }
+        }
+    }
+
+    @objc private func reload() {
+        guard serverURL != nil else { startBackend(); return }
+        guard let item = current else { return }
+        checkpointAndNavigate(in: item) { item.webView.reload() }
+    }
     @objc private func retryLoad() {
-        if let url = serverURL {
-            showStatus("Opening Ribbon Field…", failed: false, in: current)
-            webView.load(URLRequest(url: current?.isSettings == true ? url.appendingPathComponent("settings") : url))
+        if let url = serverURL, let item = current {
+            checkpointAndNavigate(in: item) {
+                self.showStatus("Opening Ribbon Field…", failed: false, in: item)
+                item.webView.load(URLRequest(url: item.isSettings ? url.appendingPathComponent("settings") : url))
+            }
         } else { startBackend() }
     }
     // App links also create history outside a web-page gesture. WebKit's native
@@ -1082,7 +1231,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard navigationResponse.isForMainFrame, let item = item(for: webView),
               let replacement = item.replacement else { decisionHandler(.allow); return }
         guard let origin = item.nextOrigin, origin == replacement.origin, let url = navigationResponse.response.url,
-              isLocal(url, at: origin), canMoveWorkspace(item) else {
+              isLocal(url, at: origin), let response = navigationResponse.response as? HTTPURLResponse,
+              response.statusCode == 200, response.mimeType == "text/html", canMoveWorkspace(item) else {
             decisionHandler(.cancel)
             resumeOriginalDocument(in: item, navigation: replacement.navigation)
             return
@@ -1252,12 +1402,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 }
             } catch { replyHandler(nil, error.localizedDescription) }
         case "closeConversationWindow":
-            guard owner.isConversationWindow else { replyHandler(false, nil); return }
+            guard owner.isConversationWindow, !conversationTransfers.values.contains(where: { $0.source === owner })
+            else { replyHandler(false, nil); return }
             replyHandler(true, nil)
-            if conversationTransfers.values.contains(where: { $0.source === owner }) {
-                owner.closeAfterConversationTransfer = true
-                return
-            }
             DispatchQueue.main.async { owner.window.performClose(nil) }
         case "completeConversationTransfer":
             guard let transferId = body["transferId"] as? String,
@@ -1516,20 +1663,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if checkingQuit { return .terminateCancel }
         if quitting { return .terminateNow }
         guard backend != nil, updater != nil else { return .terminateNow }
-        if checkingQuit { return .terminateCancel }
         checkingQuit = true
         let authorize = {
             self.updater.canTerminateForUpdate { allowed in
                 if allowed {
-                    self.checkingQuit = false
-                    self.quitting = true
-                    for item in self.windows where !item.window.isMiniaturized { item.window.orderOut(nil) }
-                    self.backend.detach()
-                    // Release before Sparkle launches the replacement desktop.
-                    if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }
-                    NSApp.reply(toApplicationShouldTerminate: true)
+                    self.finishInterfaceQuit()
                 } else {
                     self.checkingQuit = false
                     self.explicitStop = false
@@ -1567,6 +1708,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         waitForMoves()
         return .terminateLater
+    }
+
+    private func finishInterfaceQuit() {
+        let focused = current
+        let visible = windows.filter { $0.window.isVisible && !$0.window.isMiniaturized }
+        quitting = true
+        visible.forEach { $0.window.orderOut(nil) }
+        func finish(_ error: Error?) {
+            self.checkingQuit = false
+            if let error = error {
+                self.quitting = false
+                self.explicitStop = false
+                visible.forEach { $0.window.orderFront(nil) }
+                focused?.window.makeKeyAndOrderFront(nil)
+                self.windowStateError("Could not finish saving local drafts. " + error.localizedDescription, in: focused)
+                NSApp.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            self.backend.detach()
+            // Release before Sparkle launches the replacement desktop.
+            if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        checkpointWorkspaces(windows.filter(\.restorable)) { error in
+            if let error = error { finish(error) }
+            else { self.saveWindowSet(checkpoint: true, focusedWindow: focused?.id, completion: finish) }
+        }
     }
 
     @objc private func confirmStopAndQuit() {

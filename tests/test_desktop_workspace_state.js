@@ -348,3 +348,39 @@ test("origin transfer waits for local sends and unfinished image reads", () => {
   s.attachments.drafts.set("child", [{name: "pending.png", url: null}]); assert.equal(f.helper.busy(), true);
   s.attachments.drafts.get("child")[0].url = "data:image/png;base64,YQ=="; assert.equal(f.helper.busy(), false);
 });
+
+test("native checkpoint awaits the local composer lane before returning lightweight window metadata", async () => {
+  const f = populated();
+  let release, settled = false;
+  f.window.agentCoordComposerDrafts = {};
+  f.window.agentCoordDrainComposerWrites = () => new Promise(resolve => { release = resolve; });
+  const checkpoint = f.helper.checkpoint().then(snapshot => { settled = true; return snapshot; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  release();
+  const snapshot = await checkpoint;
+  assert.ok(snapshot.composerIds.includes("child"));
+  assert.deepEqual(snapshot.images, []);
+  assert.deepEqual(snapshot.drafts, []);
+  assert.equal(snapshot.composer.selectionStart, 4);
+});
+
+test("native checkpoint drains retained-frontend writes and propagates storage failures", async () => {
+  const f = fixture(), s = f.boot();
+  let finish, settled = false;
+  f.window.agentCoordDesktop = {windowId: "window"};
+  f.window.indexedDB = {};
+  f.window.ComposerDrafts = {create: () => ({write: () => new Promise((_, reject) => { finish = reject; })})};
+  f.helper.ready();
+  s.selected = "child";
+  const field = f.nodes.get("message");
+  field.id = "message";
+  field.value = "type before quitting";
+  f.userEvent("input", field);
+  const checkpoint = f.helper.checkpoint().catch(error => { settled = true; throw error; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  finish(new Error("Disk write failed"));
+  await assert.rejects(checkpoint, /Disk write failed/);
+  assert.equal(f.failures.length, 1);
+});

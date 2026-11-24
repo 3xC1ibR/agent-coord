@@ -272,6 +272,7 @@
     },
     fileEditor: operation => send({action: "fileEditor", operation}),
     exportWindowState: () => workspaceState?.capture() ?? initialWindowState ?? null,
+    checkpointWindowState: () => workspaceState?.checkpoint() ?? Promise.resolve(null),
     windowStateBusy: () => workspaceState?.busy() || false,
     restoreWindowState: snapshot => workspaceState?.restore(snapshot) || Promise.resolve(false),
     navigationReady: () => {
@@ -313,18 +314,24 @@
     if (!payload) return;
     transferring = true;
     transfer.lock(drag.id, true);
+    let retired = false;
     send({action: "detachConversation", payload, x: event.clientX, y: event.clientY})
       .then(async moved => {
         if (!moved) return;
+        let committed = false;
         try {
           await transfer.release(drag.id, payload.sourceCwd ?? payload.cwd, payload, {retainDraft: true});
           if (moved.transferId) await send({action: "completeConversationTransfer", transferId: moved.transferId, committed: true});
-          transfer.discard?.(drag.id);
+          committed = true;
+          await transfer.discard?.(drag.id);
+          retired = true;
         } catch (error) {
           // Keep a recoverable source draft until native confirms the commit.
-          const recovery = transfer.capture(drag.id, {validate: false}) || payload;
-          await transfer.restore(recovery, {rollback: true});
-          if (moved.transferId) await send({action: "completeConversationTransfer", transferId: moved.transferId, committed: false}).catch(() => {});
+          if (!committed) {
+            const recovery = transfer.capture(drag.id, {validate: false}) || payload;
+            await transfer.restore(recovery, {rollback: true});
+            if (moved.transferId) await send({action: "completeConversationTransfer", transferId: moved.transferId, committed: false}).catch(() => {});
+          }
           throw error;
         }
       })
@@ -332,7 +339,7 @@
         transfer.lock(drag.id, false); transferring = false;
         if (closeAfterTransfer) {
           closeAfterTransfer = false;
-          if (transfer.empty()) send({action: "closeConversationWindow"}).catch(reportError);
+          if (retired && transfer.empty()) send({action: "closeConversationWindow"}).catch(reportError);
         }
       });
   }

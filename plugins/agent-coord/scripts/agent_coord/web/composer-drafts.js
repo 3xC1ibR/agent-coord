@@ -103,6 +103,36 @@
           });
         });
       },
+      move(sourceId, destinationId, replacement = {}) {
+        const source = keyFor(sourceId), destination = keyFor(destinationId);
+        if (sourceId === destinationId) return Promise.resolve();
+        return transact(composerStores, "readwrite", (store, read) => {
+          read([...requestsFor(store, source), ...requestsFor(store, destination)],
+            (sourceComposer, sourceImages, destinationComposer, destinationImages) => {
+              const composers = store("composers"), attachments = store("attachments");
+              const previous = destinationComposer ?? sourceComposer;
+              if (has(replacement, "text") || has(replacement, "mentions")) {
+                composers.put({
+                  text: has(replacement, "text") ? replacement.text : previous?.text ?? "",
+                  mentions: has(replacement, "mentions") ? replacement.mentions : previous?.mentions ?? [],
+                }, destination);
+              } else if (sourceComposer !== undefined && destinationComposer === undefined) {
+                composers.put(sourceComposer, destination);
+              }
+              if (has(replacement, "images")) setImages(store, destination, replacement.images);
+              else if (sourceImages !== undefined && destinationImages === undefined) setImages(store, destination, sourceImages);
+              composers.delete(source);
+              attachments.delete(source);
+            });
+        });
+      },
+      remove(id) {
+        const key = keyFor(id);
+        return transact(composerStores, "readwrite", store => {
+          store("composers").delete(key);
+          store("attachments").delete(key);
+        });
+      },
       // A saved desktop snapshot predates IndexedDB. Import once without
       // resurrecting anything explicitly removed from the current composer.
       seed(id, values) {
