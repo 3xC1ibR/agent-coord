@@ -391,8 +391,10 @@ class BrowserSessions:
             )""")
             ensure_history_schema(connection)
         self.navigation = NavigationStore(store)
+        from .session_creation_receipts import SessionCreationReceipts
         from .submission_receipts import SubmissionReceipts
         self.submissions = SubmissionReceipts(store)
+        self.creation_receipts = SessionCreationReceipts(self)
         self.queue = BrowserMessageQueue(self)
         self.rpc = rpc_factory(store, self._event)
         self.claude = claude_factory(store, self._event)
@@ -2531,6 +2533,9 @@ class BrowserSessions:
         record, associations = self._creation_settings(body)
         if on_validated is not None:
             on_validated(record)
+        return self._create_session(body, record, associations, on_created=on_created)
+
+    def _create_session(self, body, record, associations, *, on_created=None):
         repository, name, client, yolo = (record[key] for key in ("cwd", "name", "client", "yolo"))
         provider = self._provider(client)
         result = provider.request("thread/start", self._options(record))

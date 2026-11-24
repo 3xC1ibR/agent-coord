@@ -729,6 +729,7 @@ def _handler(
                                           **({} if self._remote_request() else {
                                               "conversationCacheScope": browser_sessions.conversation_open.cache_scope}),
                                           "ordinarySubmissionReceipts": 1,
+                                          "sessionCreationReceipts": 1,
                                           "quietSubmissions": 1,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
@@ -1460,7 +1461,9 @@ def _handler(
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 if len(route) == 3:
-                    self._json(HTTPStatus.CREATED, browser_sessions.create(body))
+                    created = (browser_sessions.creation_receipts.create(body) if "requestId" in body
+                               else browser_sessions.create(body))
+                    self._json(HTTPStatus.CREATED, created)
                     return
                 thread_id = unquote(route[3])
                 if len(route) == 4:
