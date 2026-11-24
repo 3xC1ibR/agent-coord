@@ -766,7 +766,11 @@ class BrowserSessions:
             # controlled shutdown is not an unexpected provider interruption.
             params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
-        public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
+        projection = getattr(self, "projection", None)
+        if projection is not None and getattr(projection.in_event, "streaming", False):
+            public, review_stage = projection.stream_public_event(method, params)
+        else:
+            public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
             if (method == "turn/completed" and self.active.get(thread_id)
@@ -1190,7 +1194,10 @@ class BrowserSessions:
             field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput",
                      "item/mcpToolCall/outputDelta": "visibleOutput"}.get(method)
             if field:
-                item[field] = (item.get(field) or "") + params["delta"]
+                previous = item.get(field)
+                if previous is None and field == "visibleOutput" and isinstance(item.get("result"), str):
+                    previous = item["result"]
+                item[field] = (previous or "") + params["delta"]
             elif method == "item/reasoning/summaryTextDelta":
                 index = params.get("summaryIndex", 0)
                 if type(index) is int and 0 <= index < 1024:

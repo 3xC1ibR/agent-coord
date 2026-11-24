@@ -20,6 +20,8 @@ import zlib
 
 from . import acp_state
 from .browser_persistence import capture_writes
+from . import stream_projection
+from .transcript_store import TranscriptStore
 from .provider_transport import Client, ProviderLaunchRejected, TransportError
 from .history_persistence import restore_projected_history, saved_turn_status
 from .store import CoordinationError
@@ -87,7 +89,12 @@ class ProcessHandle:
         return self.returncode
 
 
+class ChannelProjectionError(RuntimeError):
+    pass
+
+
 class CoordinatorProjection:
+    stream_delta_protocol = 1
     def __init__(self, sessions, client):
         self.sessions, self.store, self.client = sessions, sessions.store, client
         # Browser mirrors and Claude adapter state form one projection. Sharing
@@ -98,6 +105,14 @@ class CoordinatorProjection:
         for provider in acp_state.PROVIDER_FIELDS:
             getattr(sessions, provider).lock = sessions.lock
         self.cursor = 0
+        self.checkpoint_cursor = 0
+        self.quarantined = {}
+        self.stream_reviews = {}
+        self.stream_rows = deque(maxlen=1500)
+        self.stream_writes = []
+        self.stream_journal = TranscriptStore(self.store)
+        self.stream_metrics = {"events": 0, "lock_holds_ms": deque(maxlen=2048)}
+        self.last_checkpoint = time.monotonic()
         self.stopped = threading.Event()
         self.command_delivered = threading.Event()
         self.worker = None
@@ -140,7 +155,7 @@ class CoordinatorProjection:
         watchdog = {identity: {name: None if durable and name == "transcripts" else copy.deepcopy(value)
                                for name, value in observed.items()}
                     for identity, observed in sessions.watchdog.observed.items()}
-        return {"version": VERSION,
+        return {"version": VERSION, "quarantined": dict(self.quarantined),
             "browser": browser,
             "events": [] if durable else list(sessions.events),
             "claude": claude,
@@ -164,6 +179,7 @@ class CoordinatorProjection:
         if state["version"] != VERSION:
             raise TransportError("Coordinator projection version is incompatible.")
         sessions = self.sessions
+        self.quarantined = dict(state.get("quarantined", {}))
         acp_state.restore(sessions, state.get("acp", {}))
         self.rollback_history_versions.clear()
         for name, value in state["browser"].items():
@@ -230,6 +246,9 @@ class CoordinatorProjection:
                 self.sessions.events = events
                 self.sessions.sequence = events[-1]["seq"]
         self.cursor = row["cursor"]
+        self.checkpoint_cursor = self.cursor
+        self.stream_rows.clear()
+        self.stream_writes.clear()
         self.recover_commands(operations={"open"})
         with self.store.reading(), self.store._connection() as db:
             records = db.execute("""SELECT c.*, o.outcome AS launch_outcome FROM coordinator_channels c
@@ -312,6 +331,8 @@ class CoordinatorProjection:
 
     def prepare_checkpoint(self, *, inline=False):
         from .history_persistence import prepare_projected_history, stage_history
+        if not getattr(self.in_event, "active", False):
+            self.flush_stream()
         prepared = {identity: prepare_projected_history(self.sessions.histories[identity], previous=self.prepared_histories.get(identity))
                     for identity in self.sessions.dirty_histories if identity in self.sessions.histories}
         for identity, history in prepared.items():
@@ -429,7 +450,9 @@ class CoordinatorProjection:
         if not getattr(self.in_event, "active", False):
             return False
         sequence = self.sessions.sequence + len(self.in_event.publications) + 1
-        self.in_event.publications.append((sequence, json.dumps({"seq": sequence, **event})))
+        value = {"seq": sequence, **event}
+        self.in_event.publications.append(value if getattr(self.in_event, "streaming", False)
+                                          else (sequence, json.dumps(value)))
         return True
 
     @staticmethod
@@ -455,6 +478,8 @@ class CoordinatorProjection:
                 self.publish_histories(db, prepared)
                 self._save(db, encoded, self.cursor)
             self.remember_histories(prepared, completions, session_locked=True)
+            self.checkpoint_cursor = self.cursor
+            self.last_checkpoint = time.monotonic()
 
     def write(self, channel, message):
         self.write_registered(channel, lambda: message)
@@ -637,31 +662,161 @@ class CoordinatorProjection:
     def project(self, event):
         self.project_batch([event])
 
-    def project_batch(self, events):
-        if not events:
+    def _acknowledge(self):
+        floor = min([self.checkpoint_cursor] +
+                    [value["first_sequence"] - 1 for value in self.quarantined.values()])
+        self.client.call("acknowledge_events", cursor=self.cursor, retain_after=floor)
+
+    def flush_stream(self):
+        if self.cursor > self.checkpoint_cursor or self.stream_writes or self.stream_rows:
+            channel = next(iter(self.channels), None)
+            if channel is not None:
+                self._commit_through_reply([({"sequence": self.cursor, "channel": channel,
+                                              "stream": "checkpoint", "data": ""}, None)], checkpoint_only=True)
+
+    def _preload_stream_history(self, event, message):
+        # Recovery may have evicted the browser mirror. Fetch outside the browser
+        # lock and publish only if another reader has not already installed it.
+        if not isinstance(message, dict):
             return
-        decoded = []
+        params = message.get("params") or {}
+        if not isinstance(params, dict):
+            return
+        identity = self.channels.get(event["channel"], {}).get("thread_id") or params.get("threadId")
+        with self.lock:
+            needed = identity in self.sessions.loaded and identity not in self.sessions.histories
+        if needed:
+            from .history_persistence import read_history
+            from .timeline_clock import restore_timing
+            history = read_history(self.store, identity) or {"id": identity, "turns": []}
+            restore_timing(self.store, history)
+            with self.lock:
+                self.sessions.histories.setdefault(identity, history)
+
+    def _project_stream(self, event, message):
+        self._preload_stream_history(event, message)
+        with self.lock:
+            target = stream_projection.identify(self, event, message)
+        if target is None:
+            return False
+        identity = target[0]
+        review_key = (identity, target[1]["id"])
+        if review_key not in self.stream_reviews:
+            self.stream_reviews[review_key] = self.sessions.reviews.stage_for(identity, review_key[1], pending=True)
+            while len(self.stream_reviews) > 1024:
+                self.stream_reviews.pop(next(iter(self.stream_reviews)))
+        entry = self.channels[event["channel"]]
+        # Both recovery copies precede visible mutation. The retained transport
+        # floor stays at the last immutable checkpoint until all state publishes.
+        self.stream_journal.append_live(identity, {**event,
+            "source_instance": self.client.record["instance"], "epoch": self.client.epoch,
+            "pid": entry["process"].pid})
+        with self.lock:
+            started = time.perf_counter()
+            if event["sequence"] <= self.cursor:
+                return True
+            target = stream_projection.identify(self, event, message)
+            if target is None:
+                return False
+            undo = stream_projection.ledger(self.sessions, target, entry)
+            old_returncode = entry["process"].returncode
+            undo.capture(entry)
+            inventory = self.sessions.inventory_generation
+            try:
+                with capture_writes() as writes:
+                    self.in_event.active = self.in_event.streaming = True
+                    self.in_event.sequence = event["sequence"]
+                    self.in_event.command_index = 0
+                    self.in_event.publications = []
+                    self.in_event.commands = []
+                    self.in_event.completions = []
+                    self._dispatch(event, message, entry)
+                    if self.in_event.commands or self.in_event.completions:
+                        raise ValueError("A pure delta attempted a provider operation or completion")
+                rows = list(self.in_event.publications)
+                self.stream_writes.extend(writes)
+                self.stream_rows.extend(rows)
+                if rows:
+                    self.sessions.append_committed_events(rows)
+                self.cursor = event["sequence"]
+                self.stream_metrics["events"] += 1
+            except BaseException:
+                undo.restore()
+                entry["process"].returncode = old_returncode
+                self.sessions.inventory_generation = inventory
+                raise
+            finally:
+                self.in_event.active = self.in_event.streaming = False
+                self.stream_metrics["lock_holds_ms"].append((time.perf_counter() - started) * 1000)
+        return True
+
+    def stream_public_event(self, method, params):
+        step = self.stream_reviews.get((params.get("threadId"), params.get("turnId")))
+        if step is None:
+            return params, False
+        public = dict(params)
+        if method.startswith(("item/agentMessage/", "item/reasoning/")):
+            public.pop("delta", None)
+            public["reviewStage"] = step["stage"]
+        return public, True
+
+    def _dispatch(self, event, message, entry):
+        try:
+            consumed = False
+            if event["stream"] == "stderr" and entry.get("stderr_callback"):
+                entry["stderr_callback"](event["data"])
+            elif event["stream"] == "stdout" and entry.get("stdout_callback"):
+                consumed = entry["stdout_callback"](event["data"])
+            if event["stream"] == "stdout" and isinstance(message, dict) and not consumed:
+                entry["callback"](message)
+            elif event["stream"] == "eof":
+                entry["process"].returncode = 1
+                if entry["provider"] == "codex":
+                    entry["callback"]({"method": "bridge/disconnected", "params": {}})
+                elif entry["provider"] in acp_state.PROVIDER_FIELDS:
+                    entry["callback"]({"method": "disconnected", "params": {"error": "Provider transport closed."}})
+                else:
+                    entry["callback"]({"type": "disconnected", "error": "Provider transport closed."})
+        except (sqlite3.Error, OSError, TransportError):
+            raise
+        except Exception as error:
+            raise ChannelProjectionError(str(error)) from error
+
+    def _quarantine(self, event, error):
+        channel = event["channel"]
+        previous = self.quarantined.get(channel)
+        self.quarantined[channel] = {"first_sequence": previous["first_sequence"] if previous else event["sequence"],
+                                     "last_sequence": event["sequence"], "error": str(error)}
+        self.cursor = event["sequence"]
+        logging.getLogger(__name__).error("Provider channel %s quarantined at %s: %s", channel, self.cursor, error)
+
+    def project_batch(self, events):
         for event in events:
+            if event["sequence"] <= self.cursor:
+                continue
+            if event["channel"] in self.quarantined:
+                self._quarantine(event, self.quarantined[event["channel"]]["error"])
+                continue
             message = None
             if event["stream"] == "stdout":
                 try:
                     message = json.loads(event["data"])
                 except ValueError:
                     logging.getLogger(__name__).warning("Ignoring malformed provider frame at sequence %s", event["sequence"])
-            decoded.append((event, message))
-        while decoded:
-            decoded = self._commit_through_reply(decoded)
-            if decoded is None:
-                return  # The complete remainder was already committed.
-        # No candidate consumes events before its durable activation commit.
-        # Consequently this cursor is also the oldest restorable checkpoint;
-        # pre-commit rollback retains the source cursor and cannot lose frames.
-        with self.store._writer.measure_request("provider.acknowledge_events"):
-            self.client.call("acknowledge_events", cursor=self.cursor, retain_after=self.cursor)
+            try:
+                if not self._project_stream(event, message):
+                    self._commit_through_reply([(event, message)])
+            except (sqlite3.Error, OSError, TransportError):
+                raise  # Storage or ownership failure must not retire source evidence.
+            except ChannelProjectionError as error:
+                self._quarantine(event, error)
+        if events:
+            self._acknowledge()
 
-    def _commit_through_reply(self, decoded):
+    def _commit_through_reply(self, decoded, *, checkpoint_only=False):
         with self.lock, self.sessions.claude.lock, self.sessions.lock:
-            decoded = [(event, message) for event, message in decoded if event["sequence"] > self.cursor]
+            decoded = [(event, message) for event, message in decoded
+                       if event["sequence"] > self.cursor or checkpoint_only]
             if not decoded:
                 return
             affected = {message.get("params", {}).get("threadId") for _, message in decoded
@@ -684,6 +839,8 @@ class CoordinatorProjection:
                             excluded.add(params["threadId"])
                     self.unloaded_observation = {"excluded": excluded, "revisions": prior["turn_revisions"]}
                 with capture_writes() as writes:
+                    writes.extend(self.stream_writes)
+                    retained_rows = [(value["seq"], json.dumps(value)) for value in self.stream_rows]
                     self.in_event.active = True
                     self.in_event.publications = []
                     self.in_event.commands = []
@@ -696,21 +853,7 @@ class CoordinatorProjection:
                         self.in_event.command_index = 0
                         if entry.get("closed"):
                             continue
-                        consumed = False
-                        if event["stream"] == "stderr" and entry.get("stderr_callback"):
-                            entry["stderr_callback"](event["data"])
-                        elif event["stream"] == "stdout" and entry.get("stdout_callback"):
-                            consumed = entry["stdout_callback"](event["data"])
-                        if event["stream"] == "stdout" and isinstance(message, dict) and not consumed:
-                            entry["callback"](message)
-                        elif event["stream"] == "eof":
-                            entry["process"].returncode = 1
-                            if entry["provider"] == "codex":
-                                entry["callback"]({"method": "bridge/disconnected", "params": {}})
-                            elif entry["provider"] in acp_state.PROVIDER_FIELDS:
-                                entry["callback"]({"method": "disconnected", "params": {"error": "Provider transport closed."}})
-                            else:
-                                entry["callback"]({"type": "disconnected", "error": "Provider transport closed."})
+                        self._dispatch(event, message, entry)
                         # A native waiter becomes eligible only after its response
                         # commits. Later output must not delay or roll it back.
                         if self.in_event.completions:
@@ -742,9 +885,12 @@ class CoordinatorProjection:
                             self.publish_histories(db, prepared)
                             db.executemany("INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?,'pending',NULL)",
                                            self.in_event.commands)
-                            self._publish_rows(db, self.in_event.publications)
+                            self._publish_rows(db, retained_rows + self.in_event.publications)
                             self._save(db, encoded, event["sequence"])
-                self.cursor = event["sequence"]
+                self.cursor = self.checkpoint_cursor = event["sequence"]
+                self.last_checkpoint = time.monotonic()
+                self.stream_writes.clear()
+                self.stream_rows.clear()
                 if self.in_event.publications:
                     self.sessions.append_committed_events([json.loads(payload) for _, payload in self.in_event.publications])
                 self.remember_histories(prepared, published_completions, session_locked=True)
@@ -807,6 +953,9 @@ class CoordinatorProjection:
                 if events:
                     with self.store._writer.measure_request("provider.apply_events"):
                         self.project_batch(events)
+                if not events and time.monotonic() - self.last_checkpoint >= 5:
+                    self.flush_stream()
+                    self._acknowledge()
                 self.error = None
                 if not events and not response.get("event_wait"):
                     # An older retained owner polls. Wake its coordinator as
