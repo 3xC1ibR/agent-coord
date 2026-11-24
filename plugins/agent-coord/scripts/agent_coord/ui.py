@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
+from .history_response import read_snapshot_json
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
@@ -856,13 +857,10 @@ def _handler(
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
-                with store.reading():
-                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
-                    if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
-                        from .thread_control import ThreadControl
-                        work = result["work_thread"]
-                        work["close_when_done"] = ThreadControl(store).status(work["thread_id"])
-                self._json(HTTPStatus.OK, result)
+                body = read_snapshot_json(
+                    browser_sessions, unquote(route[9:]), recent=view == "recent",
+                    controls=self.headers.get("X-Agent-Coord-Thread-Controls") == "1")
+                self._send(HTTPStatus.OK, "application/json; charset=utf-8", body)
             elif route == "events":
                 try:
                     cursor = (self.headers.get("Last-Event-ID") or query.get("after", ["0"])[0]).split(":")
