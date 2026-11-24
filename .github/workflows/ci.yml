@@ -202,6 +202,11 @@ jobs:
         run: |
           python3 desktop/macos/smoke_test.py --origins-only \
             --app 'build/ci-smoke/Ribbon Field.app' --report build/ci/native-window-origins.json
+      - name: Verify retained windows and drafts across relaunches
+        run: |
+          python3 desktop/macos/window_restore_test.py \
+            --app 'build/ci-smoke/Ribbon Field.app' \
+            --report build/ci/window-restoration/summary.json
       - name: Install the workload browser
         run: |
           npm ci --prefix demo --ignore-scripts --omit=dev
@@ -220,5 +225,6 @@ jobs:
           path: |
             build/ci/generated-conversation-workload.json
             build/ci/native-window-origins.json
+            build/ci/window-restoration
             build/ci/generated-conversation-workload.sample.txt
           retention-days: 30
