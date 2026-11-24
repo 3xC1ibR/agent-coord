@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <script src="/theme.js"></script>
+  <script src="/theme.js" onerror="this.dataset.startupFailed = 'true'"></script>
   <meta name="theme-color" content="#121215">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -27,73 +27,73 @@
   <link rel="stylesheet" href="/working-set.css">
   <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/provider-usage.css">
-  <script src="/provider-usage.js" defer></script>
+  <link rel="preload" as="script" href="/provider-usage.js" data-startup>
   <link rel="stylesheet" href="/activity.css">
-  <script src="/activity.js" defer></script>
-  <script src="/activity-collector.js" defer></script>
+  <link rel="preload" as="script" href="/activity.js" data-startup>
+  <link rel="preload" as="script" href="/activity-collector.js" data-startup>
   <link rel="stylesheet" href="/conversation-search.css">
   <link rel="stylesheet" href="/speech.css">
-  <script src="/speech.js" defer></script>
-  <script src="/thread-groups.js" defer></script>
-  <script src="/atlas-layout.js" defer></script>
-  <script src="/atlas.js" defer></script>
-  <script src="/overview-layout.js" defer></script>
-  <script src="/working-set.js" defer></script>
-  <script src="/organization.js" defer></script>
-  <script src="/notifications.js" defer></script>
-  <script src="/push-notifications.js" defer></script>
-  <script src="/navigation.js" defer></script>
-  <script src="/markdown.js" defer></script>
-  <script src="/html-preview.js" defer></script>
+  <link rel="preload" as="script" href="/speech.js" data-startup>
+  <link rel="preload" as="script" href="/thread-groups.js" data-startup>
+  <link rel="preload" as="script" href="/atlas-layout.js" data-startup>
+  <link rel="preload" as="script" href="/atlas.js" data-startup>
+  <link rel="preload" as="script" href="/overview-layout.js" data-startup>
+  <link rel="preload" as="script" href="/working-set.js" data-startup>
+  <link rel="preload" as="script" href="/organization.js" data-startup>
+  <link rel="preload" as="script" href="/notifications.js" data-startup>
+  <link rel="preload" as="script" href="/push-notifications.js" data-startup>
+  <link rel="preload" as="script" href="/navigation.js" data-startup>
+  <link rel="preload" as="script" href="/markdown.js" data-startup>
+  <link rel="preload" as="script" href="/html-preview.js" data-startup>
   <link rel="stylesheet" href="/html-preview.css">
-  <script src="/openui.js" defer></script>
+  <link rel="preload" as="script" href="/openui.js" data-startup>
   <link rel="stylesheet" href="/openui.css">
-  <script src="/image-attachments.js" defer></script>
-  <script src="/slash-commands.js" defer></script>
-  <script src="/views.js" defer></script>
-  <script src="/view-drops.js" defer></script>
-  <script src="/folders.js" defer></script>
-  <script src="/thread-panes.js" defer></script>
-  <script src="/thread-tabs.js" defer></script>
-  <script src="/roll-up.js" defer></script>
-  <script src="/conversation-scroll.js" defer></script>
-  <script src="/response-actions.js" defer></script>
-  <script src="/mobile-chat.js" defer></script>
-  <script src="/model-picker.js" defer></script>
-  <script src="/permission-menu.js" defer></script>
-  <script src="/thread-usage.js" defer></script>
+  <link rel="preload" as="script" href="/image-attachments.js" data-startup>
+  <link rel="preload" as="script" href="/slash-commands.js" data-startup>
+  <link rel="preload" as="script" href="/views.js" data-startup>
+  <link rel="preload" as="script" href="/view-drops.js" data-startup>
+  <link rel="preload" as="script" href="/folders.js" data-startup>
+  <link rel="preload" as="script" href="/thread-panes.js" data-startup>
+  <link rel="preload" as="script" href="/thread-tabs.js" data-startup>
+  <link rel="preload" as="script" href="/roll-up.js" data-startup>
+  <link rel="preload" as="script" href="/conversation-scroll.js" data-startup>
+  <link rel="preload" as="script" href="/response-actions.js" data-startup>
+  <link rel="preload" as="script" href="/mobile-chat.js" data-startup>
+  <link rel="preload" as="script" href="/model-picker.js" data-startup>
+  <link rel="preload" as="script" href="/permission-menu.js" data-startup>
+  <link rel="preload" as="script" href="/thread-usage.js" data-startup>
   <link rel="stylesheet" href="/thread-mentions.css">
-  <script src="/thread-mentions.js" defer></script>
-  <script src="/schedules.js" defer></script>
-  <script src="/agent-messages.js" defer></script>
-  <script src="/conversation-search.js" defer></script>
-  <script src="/transient-notice.js" defer></script>
-  <script src="/thread-actions.js" defer></script>
-  <script src="/sidecars.js" defer></script>
+  <link rel="preload" as="script" href="/thread-mentions.js" data-startup>
+  <link rel="preload" as="script" href="/schedules.js" data-startup>
+  <link rel="preload" as="script" href="/agent-messages.js" data-startup>
+  <link rel="preload" as="script" href="/conversation-search.js" data-startup>
+  <link rel="preload" as="script" href="/transient-notice.js" data-startup>
+  <link rel="preload" as="script" href="/thread-actions.js" data-startup>
+  <link rel="preload" as="script" href="/sidecars.js" data-startup>
   <link rel="stylesheet" href="/sidecars.css">
-  <script src="/reviews.js" defer></script>
+  <link rel="preload" as="script" href="/reviews.js" data-startup>
   <link rel="stylesheet" href="/reviews.css">
-  <script src="/asks.js" defer></script>
+  <link rel="preload" as="script" href="/asks.js" data-startup>
   <link rel="stylesheet" href="/asks.css">
-  <script src="/dispatch.js" defer></script>
-  <script src="/send-work.js" defer></script>
+  <link rel="preload" as="script" href="/dispatch.js" data-startup>
+  <link rel="preload" as="script" href="/send-work.js" data-startup>
   <link rel="stylesheet" href="/send-work.css">
   <link rel="stylesheet" href="/jev.css">
-  <script src="/jev.js" defer></script>
+  <link rel="preload" as="script" href="/jev.js" data-startup>
   <link rel="stylesheet" href="/dispatch.css">
-  <script src="/dispatcher-workspace.js" defer></script>
+  <link rel="preload" as="script" href="/dispatcher-workspace.js" data-startup>
   <link rel="stylesheet" href="/dispatcher-workspace.css">
-  <script src="/scratchpad.js" defer></script>
-  <script src="/project-scratchpad.js" defer></script>
+  <link rel="preload" as="script" href="/scratchpad.js" data-startup>
+  <link rel="preload" as="script" href="/project-scratchpad.js" data-startup>
   <link rel="stylesheet" href="/project-scratchpad.css">
   <link rel="stylesheet" href="/context-lifecycle.css">
-  <script src="/context-lifecycle.js" defer></script>
+  <link rel="preload" as="script" href="/context-lifecycle.js" data-startup>
   <link rel="stylesheet" href="/agent-tree.css">
-  <script src="/agent-tree.js" defer></script>
-  <script src="/settings.js" defer></script>
-  <script src="/app.js" defer></script>
-  <script src="/thread-hover.js" defer></script>
-  <script src="/filter-menu.js" defer></script>
+  <link rel="preload" as="script" href="/agent-tree.js" data-startup>
+  <link rel="preload" as="script" href="/settings.js" data-startup>
+  <link rel="preload" as="script" href="/app.js" data-startup>
+  <link rel="preload" as="script" href="/thread-hover.js" data-startup>
+  <link rel="preload" as="script" href="/filter-menu.js" data-startup>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to workspace</a>
@@ -419,5 +419,58 @@
   </dialog>
   <div id="send-work-notice" role="status" aria-live="polite" hidden></div>
   <dialog id="html-preview-dialog" class="html-preview-dialog" aria-label="HTML output"><iframe id="html-preview-window" title="HTML output" referrerpolicy="no-referrer"></iframe></dialog>
+  <script id="workspace-startup">
+  (() => {
+    // Keep recovery in the document: an external loader can itself fail to load.
+    // Preloads retain parallel downloads; execution waits for each prerequisite.
+    const status = document.documentElement.dataset;
+    if (status.startup) return;
+    status.startup = "loading";
+    const sources = Array.from(document.querySelectorAll("script[data-startup-failed], link[data-startup]"),
+      asset => asset.src || asset.href);
+    const delays = [100, 200, 400, 800, 1600];
+    let index = 0, retryTimer;
+    const deadline = setTimeout(fail, 4000);
+    function fail() {
+      if (status.startup !== "loading") return;
+      status.startup = "failed";
+      clearTimeout(deadline);
+      clearTimeout(retryTimer);
+      const notice = document.getElementById("error");
+      notice.querySelector("span").textContent = "Could not load Ribbon Field. Check your connection.";
+      notice.hidden = false;
+    }
+    function load(attempt = 0) {
+      if (status.startup !== "loading") return;
+      if (index === sources.length) {
+        status.startup = "loaded";
+        clearTimeout(deadline);
+        return;
+      }
+      const script = document.createElement("script");
+      const url = new URL(sources[index]);
+      if (attempt) url.searchParams.set("startup_retry", attempt);
+      script.src = url.href;
+      let settled = false;
+      script.onload = () => {
+        if (settled) return;
+        settled = true;
+        index++;
+        load();
+      };
+      script.onerror = () => {
+        if (settled || status.startup !== "loading") return;
+        settled = true;
+        script.remove();
+        if (attempt === delays.length) fail();
+        else retryTimer = setTimeout(() => load(attempt + 1), delays[attempt]);
+      };
+      // Never retry a timeout or an execution error: the script may have run.
+      // Only a script-element load error proves reinsertion cannot initialize twice.
+      document.head.append(script);
+    }
+    load();
+  })();
+  </script>
 </body>
 </html>
