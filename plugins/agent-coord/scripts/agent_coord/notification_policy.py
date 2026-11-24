@@ -94,8 +94,13 @@ def available_owners(db, store):
     return set(json.loads(owners))
 
 
-def decide(thread, *, waiting=False, owners=()):
-    """Return a presentation policy; never acknowledge messages or completions."""
+def decide(thread, *, waiting=False, owners=(), provider_input=None):
+    """Return a presentation policy; never acknowledge messages or completions.
+
+    `waiting` is any live need for the user (provider input, a blocking ask or
+    a paused inbox); `provider_input` is the provider request alone and
+    defaults to `waiting`.
+    """
     incident = thread.get("stall_incident")
     if incident and incident.get("last_user_alert_at") is not None:
         return {"quiet": False, "notify": True, "owner_thread_id": thread["thread_id"], "needs_user": True}
@@ -106,6 +111,19 @@ def decide(thread, *, waiting=False, owners=()):
     if legacy_child:
         owner = thread.get("created_by_thread_id")
     internal = origin == "coordination" or legacy_child
+    supervised = thread.get("supervisor_thread_id") not in (None, thread["thread_id"])
+    if supervised and internal:
+        # An app agent's automatic work reaches the user only when it fails,
+        # stalls or needs provider input: the rule of WorkingSet.escalates in
+        # the web interface. Its questions, checkpoint requests and results go
+        # to its supervisor, and an escalation is its own item, never rolled
+        # into the parent. A turn the user started directly stays user-facing.
+        completion = thread.get("turn_completion")
+        stalled = thread.get("status") == "stalled" or (thread.get("turn_health") or {}).get("state") == "stalled"
+        surfaces = bool(waiting if provider_input is None else provider_input) or stalled or bool(
+            completion and completion["status"] == "failed")
+        return {"quiet": not surfaces, "notify": surfaces, "owner_thread_id": thread["thread_id"],
+                "needs_user": surfaces}
     checkpoint = thread.get("checkpoint") if not thread.get("checkpoint_stale") else None
     completion = thread.get("turn_completion")
     needs_user = bool(waiting or checkpoint and checkpoint["next_actor"] == "user" and checkpoint["next_action"])

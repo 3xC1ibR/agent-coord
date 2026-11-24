@@ -245,6 +245,8 @@ class WebPush:
         approvals = [event for event in self.sessions.approval_notifications(include_claimed=True)
                      if event["status"] != "stalled"]
         stalls = stall_notifications.notifications(self.store, include_claimed=True, cwd=self.sessions.cwd)
+        if hasattr(self.sessions, "label_app_agents"):
+            stalls = self.sessions.label_app_agents(stalls)
         snoozes = self.sessions.snooze_notifications(include_claimed=True)
         active_approvals = {"approval:" + item["request_key"] for item in approvals}
         active_snoozes = {"snooze:" + str(item["id"]) for item in snoozes}

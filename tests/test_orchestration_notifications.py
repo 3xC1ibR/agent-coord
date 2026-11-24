@@ -109,15 +109,22 @@ class OrchestrationNotificationTests(unittest.TestCase):
         self.checkpoint(child, actor="user")
         self.assertFalse(self.sessions.completion_notification_allowed(quiet))
 
-    def test_answering_child_before_delivery_cancels_its_old_escalation(self):
+    def test_child_user_request_goes_to_its_supervisor_not_the_user(self):
         child = self.child()
         self.wake(child)
         self.checkpoint(child, actor="user")
-        escalation = self.finish(child)
-        self.assertTrue(self.sessions.completion_notification_allowed(escalation))
+        completion = self.finish(child)
+        self.assertFalse(self.sessions.completion_notification_allowed(completion))
+        threads = {t["thread_id"]: t for t in self.sessions.list_work_threads()}
+        self.assertFalse(threads[child]["needs_attention"])
+        self.assertFalse(threads[self.parent]["needs_attention"])
+        self.assertNotIn("attention_items", threads[self.parent])
+        # A turn the user starts directly in the agent stays user-facing.
         self.send(child)
-        self.assertFalse(self.sessions.completion_notification_allowed(escalation))
-
+        self.checkpoint(child, actor="user")
+        direct = self.finish(child)
+        self.assertTrue(self.sessions.claim_notification(direct))
+        self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
     def test_dispatched_specialist_still_notifies(self):
         child = self.child(mode=None, reply=False)
         self.wake(child)
@@ -140,15 +147,17 @@ class OrchestrationNotificationTests(unittest.TestCase):
         self.assertTrue(self.sessions.claim_notification(delivered))
         self.assertTrue(self.sessions.work_thread(self.parent)["needs_attention"])
 
-    def test_explicit_child_user_need_survives_classifier_unavailability(self):
+    def test_child_blocking_ask_is_for_its_supervisor(self):
         child = self.child()
         self.wake(child)
-        self.checkpoint(child, actor="user")
-        completion = self.finish(child)
-        self.assertTrue(self.sessions.claim_notification(completion))
-        self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
-
-    def test_approvals_and_questions_stay_live_and_group_under_owner(self):
+        ask = self.store.asks.create(child, "Which target?", blocking=True, options=["Staging", "Production"])
+        self.assertNotIn("ask:" + str(ask["id"]), [e["request_key"] for e in self.sessions.approval_notifications()])
+        self.assertFalse(self.sessions.claim_approval_notification("ask:" + str(ask["id"])))
+        self.assertFalse(self.sessions.work_thread(child)["needs_attention"])
+        # The same ask from a top-level conversation reaches the user.
+        own = self.store.asks.create(self.parent, "Ship now?", blocking=True, options=["Yes", "No"])
+        self.assertIn("ask:" + str(own["id"]), [e["request_key"] for e in self.sessions.approval_notifications()])
+    def test_child_provider_input_surfaces_on_its_own_and_names_its_supervisor(self):
         children = [self.child(), self.child()]
         for i, child in enumerate(children):
             self.wake(child)
@@ -156,35 +165,45 @@ class OrchestrationNotificationTests(unittest.TestCase):
                                   "params": {"threadId": child}})
         events = self.sessions.approval_notifications()
         self.assertEqual({e["status"] for e in events}, {"approval", "question"})
+        self.assertEqual({e["title"] for e in events}, {"Specialist · App agent of Orchestrator"})
         threads = {t["thread_id"]: t for t in self.sessions.list_work_threads()}
-        self.assertEqual([t["thread_id"] for t in threads.values() if t["needs_attention"] and not t.get("attention_grouped_under")], [self.parent])
-        self.assertEqual({i["thread_id"] for i in threads[self.parent]["attention_items"]}, set(children))
-        self.assertFalse(threads[self.parent]["can_handle_response"])
+        self.assertEqual({t["thread_id"] for t in threads.values() if t["needs_attention"] and not t.get("attention_grouped_under")},
+                         set(children))
+        self.assertNotIn("attention_items", threads[self.parent])
+        self.assertFalse(threads[self.parent]["needs_attention"])
         for event in events:
             self.assertTrue(self.sessions.claim_approval_notification(event["request_key"]))
             self.assertFalse(self.sessions.claim_approval_notification(event["request_key"]))
         self.assertEqual(len(self.sessions.approval_notifications(include_claimed=True)), 2)
-
-    def test_closed_or_snoozed_parent_does_not_hide_child_need(self):
+    def test_child_stall_surfaces_on_its_own(self):
+        from unittest.mock import patch
         child = self.child()
         self.wake(child)
-        self.checkpoint(child, actor="user")
         self.finish(child)
+        stalled = ({}, False, True, {"state": "stalled", "turn_id": "stalled-turn"})
+        with patch.object(self.sessions, "_thread_runtime_state", return_value=stalled):
+            thread = self.sessions.work_thread(child)
+        self.assertEqual((thread["status"], thread["needs_attention"], thread["attention_owner_thread_id"]),
+                         ("stalled", True, child))
+
+    def test_closed_parent_does_not_hide_child_failure(self):
+        child = self.child()
+        self.wake(child)
+        self.finish(child, "failed")
         self.store.threads.update(self.parent, attention="archived")
         attention = [t for t in self.sessions.list_work_threads() if t["needs_attention"]]
         self.assertEqual([t["thread_id"] for t in attention], [child])
-
-    def test_recoverable_failure_goes_to_parent_and_stranded_failure_surfaces(self):
+    def test_child_failure_reaches_the_user_and_its_supervisor(self):
         child = self.child()
         self.wake(child)
         completion = self.finish(child, "failed")
-        self.assertFalse(self.sessions.claim_notification(completion))
+        events = self.sessions.completions_after(0)["events"]
+        self.assertEqual([(e["id"], e["title"]) for e in events], [(completion, "Specialist · App agent of Orchestrator")])
+        self.assertTrue(self.sessions.claim_notification(completion))
+        self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
+        self.assertEqual(self.sessions.work_thread(child)["attention_owner_thread_id"], child)
         reports = self.store.inbox(self.parent, mark_delivered=False)
         self.assertTrue(any("app_agent_failed" in m["body"] for m in reports))
-        self.sessions.inbox_wake.pause(self.parent, "The owner cannot continue")
-        self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
-        self.assertTrue(self.sessions.completion_notification_allowed(completion))
-
     def test_stale_terminal_owner_cannot_hide_a_failed_child(self):
         child = self.child()
         self.wake(child)
@@ -196,16 +215,20 @@ class OrchestrationNotificationTests(unittest.TestCase):
         self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
         self.assertTrue(self.sessions.completion_notification_allowed(completion))
 
-    def test_nested_orchestration_uses_root_owner(self):
+    def test_nested_agents_escalate_on_their_own_rows(self):
         child = self.child()
         grandchild = self.child(parent=child)
         self.wake(grandchild)
         self.checkpoint(grandchild, actor="user")
         self.finish(grandchild)
         threads = {t["thread_id"]: t for t in self.sessions.list_work_threads()}
-        self.assertEqual(threads[grandchild]["attention_grouped_under"], self.parent)
-        self.assertEqual(threads[self.parent]["attention_target_thread_id"], grandchild)
-
+        self.assertFalse(any(t["needs_attention"] for t in threads.values()))
+        self.sessions._event({"id": 7, "method": "item/commandExecution/requestApproval", "params": {"threadId": grandchild}})
+        threads = {t["thread_id"]: t for t in self.sessions.list_work_threads()}
+        self.assertTrue(threads[grandchild]["needs_attention"])
+        self.assertNotIn("attention_grouped_under", threads[grandchild])
+        self.assertFalse(threads[self.parent]["needs_attention"])
+        self.assertEqual([e["title"] for e in self.sessions.approval_notifications()], ["Specialist · App agent of Specialist"])
     def test_reused_specialist_tracks_current_orchestrator(self):
         self.checkpoint(self.parent, phase="orchestrating")
         specialist = self.sessions.create({"name": "Existing specialist"})["session"]["thread_id"]
@@ -240,18 +263,18 @@ class OrchestrationNotificationTests(unittest.TestCase):
         self.assertTrue(self.sessions.claim_notification(direct))
         self.assertTrue(self.sessions.work_thread(child)["needs_attention"])
 
-    def test_parent_restatement_does_not_duplicate_child_escalation_alert(self):
+    def test_supervisor_restates_a_child_need_to_the_user(self):
         child = self.child()
         self.wake(child)
         self.checkpoint(child, actor="user")
         child_completion = self.finish(child)
-        self.assertTrue(self.sessions.claim_notification(child_completion))
+        self.assertFalse(self.sessions.claim_notification(child_completion))
         self.store.send_message(sender_session_id=child, recipient_session_id=self.parent,
                                 body="User decision needed", reply_required=False)
         self.wake(self.parent)
         self.checkpoint(self.parent, phase="orchestrating", actor="user")
         parent_completion = self.finish(self.parent)
-        self.assertFalse(self.sessions.claim_notification(parent_completion))
+        self.assertTrue(self.sessions.claim_notification(parent_completion))
 
 
 if __name__ == "__main__":

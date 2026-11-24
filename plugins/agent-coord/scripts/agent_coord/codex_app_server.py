@@ -1343,6 +1343,7 @@ class BrowserSessions:
                            if event["attention"] != "archived" and matches_workspace(event["cwd"], self.cwd)
                            and not (event["snoozed_until"] and event["snoozed_until"] > self.store.clock())
                            and self.completion_notification_allowed(event["id"])]
+        self.label_app_agents(batch["events"])
         return batch
 
     def completion_notification_allowed(self, completion_id: int) -> bool:
@@ -1453,8 +1454,12 @@ class BrowserSessions:
                              and (include_claimed or not request.get("notification_claimed"))]
         # Open blocking asks share the approval alert path: one claim per ask,
         # labelled "Answer needed", scoped to this app's workspace like approvals.
-        for ask in self.store.asks.list(status="open", blocking=True):
-            if ask["notification_claimed"] and not include_claimed:
+        asks = [ask for ask in self.store.asks.list(status="open", blocking=True)
+                if include_claimed or not ask["notification_claimed"]]
+        # An app agent's question is for its supervisor, not the user.
+        supervised = self.app_agent_supervisors(ask["session_id"] for ask in asks)
+        for ask in asks:
+            if ask["session_id"] in supervised:
                 continue
             try:
                 thread = self.store.threads.get(ask["session_id"], history=False)
@@ -1466,7 +1471,7 @@ class BrowserSessions:
                                       "project_name": thread["project_name"], "repository_name": thread["repository_name"]})
         from .stall_notifications import notifications as stall_notifications
         notifications.extend(stall_notifications(self.store, include_claimed=include_claimed, cwd=self.cwd))
-        return notifications
+        return self.label_app_agents(notifications)
 
     def claim_approval_notification(self, key: str) -> bool:
         """Atomically claim a live approval across tabs without answering it."""
@@ -1481,7 +1486,7 @@ class BrowserSessions:
                 thread = self.store.threads.get(ask["session_id"], history=False)
             except (ValueError, CoordinationError):
                 return False
-            if thread["attention"] == "archived" or thread["snoozed"]:
+            if thread["attention"] == "archived" or thread["snoozed"] or self.app_agent_supervisors([ask["session_id"]]):
                 return False
             return self.store.asks.claim_notification(ask["id"])
         with self.lock:
@@ -1584,6 +1589,31 @@ class BrowserSessions:
         with self.inventory_lock:
             self.creators_cache = (generation, time.monotonic(), creators)
         return creators
+
+    def app_agent_supervisors(self, thread_ids) -> dict[str, str]:
+        """Supervisor titles of the app agents among thread_ids, for alert labels."""
+        from .supervision import display_fields, relations
+        ids = {tid for tid in thread_ids if isinstance(tid, str)}
+        if not ids:
+            return {}
+        creators = self._app_agent_creators(shared=True)
+        result = {}
+        with self.store.reading(), self.store._connection() as db:
+            related = relations(db)
+            for tid in ids:
+                supervisor = display_fields(tid, creators.get(tid), related)["supervisor_thread_id"]
+                if supervisor and supervisor != tid:
+                    row = db.execute("SELECT title FROM work_threads WHERE thread_id = ?", (supervisor,)).fetchone()
+                    result[tid] = row["title"] if row else "another agent"
+        return result
+
+    def label_app_agents(self, events: list[dict]) -> list[dict]:
+        """Name an app agent's supervisor in its alert title."""
+        supervisors = self.app_agent_supervisors(event.get("thread_id") for event in events)
+        for event in events:
+            if event.get("thread_id") in supervisors and "title" in event:
+                event["title"] = f"{event['title']} · App agent of {supervisors[event['thread_id']]}"
+        return events
 
     def _thread_runtime_state(self, thread_id):
         with self.lock:
@@ -1721,8 +1751,9 @@ class BrowserSessions:
                           attention_key=f"wake:{thread_id}:{wake_pause['paused_at'] or wake_pause['error']}",
                           attention_since=wake_pause["paused_at"] or thread["updated_at"], can_handle_response=False)
         thread.update(wake_fields(wake_pause))
-        policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners)
         thread["turn_health"] = health
+        policy = notification_policy.decide(thread, waiting=bool(waiting) or blocked_on_ask or blocked_wake, owners=owners,
+                                            provider_input=bool(waiting))
         if health and health["state"] == "stalled" and not waiting:
             thread.update(status="stalled", response_state="action", needs_attention=thread["attention"] != "archived",
                           attention_reason="blocked", attention_key=f"stall:{health['turn_id']}",

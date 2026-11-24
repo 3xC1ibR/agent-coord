@@ -1592,12 +1592,16 @@ alert; manually interrupted turns do not.
 Orchestration results are quiet: internal agent turns, successful child results,
 and an orchestrator waiting for its agents do not produce alerts or routine
 Attention entries. The orchestrator's delivered result, dispatched conversations,
-and direct user follow-ups retain normal visibility. A concrete user need still
-surfaces, including an approval, question, or fresh checkpoint naming the user as
-the next actor. Child needs share an Attention card under their available
-orchestrator, with links to each actual request. Filtering out the parent keeps
-the child's request accessible. Recoverable child failures go to the orchestrator;
-failures surface when that owner cannot continue. Message delivery, completion
+and direct user follow-ups retain normal visibility. For an agent with a
+supervisor, its automatic work reaches the user only when it fails, stalls, or
+needs provider input such as a permission approval. Its questions, blocking asks
+and checkpoints naming the user go to its supervisor, which can restate them.
+An escalation is its own Attention item and alert, titled "<agent> · App agent of
+<supervisor>". It is never folded into the parent. Failures also notify the
+supervisor. A conversation without a supervisor still surfaces a concrete user
+need: an approval, question, or fresh checkpoint naming the user as the next
+actor. A quiet thread (see external work) reports only failures, stalls and those
+user needs. Message delivery, completion
 subscriptions, history, and saved thread placement are independent of this policy.
 
 Codex command, file-change, and permission approval requests also produce a
