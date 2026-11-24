@@ -32,7 +32,7 @@ class ThreadTabsTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="conversation-tabs"', page)
-                    self.assertIn(b'src="/thread-tabs.js?v=', page)
+                    self.assertIn(b'rel="preload" as="script" href="/thread-tabs.js?v=', page)
                     self.assertIn(b'href="/thread-tabs.css?v=', page)
                 for path in ["/thread-tabs.js", "/thread-tabs.css"]:
                     with urllib.request.urlopen(base + path) as response:

@@ -179,7 +179,7 @@ class BrowserImageHTTPTests(unittest.TestCase):
     def test_image_assets_and_csp_allow_only_local_image_previews(self):
         status, html, headers = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn('src="/image-attachments.js?v=', html)
+        self.assertIn('rel="preload" as="script" href="/image-attachments.js?v=', html)
         self.assertIn('href="/image-attachments.css?v=', html)
         self.assertIn("img-src 'self' data:", headers["Content-Security-Policy"])
         self.assertEqual(self.request("/image-attachments.js")[0], 200)
