@@ -1,8 +1,8 @@
 "use strict";
 
 class SendWorkPalette {
-  constructor({document, view = window, api, workspace, threads, openThread, storage}) {
-    Object.assign(this, {document, view, api, workspace, threads, openThread, storage});
+  constructor({document, view = window, api, workspace, projectId, threads, openThread, storage}) {
+    Object.assign(this, {document, view, api, workspace, projectId, threads, openThread, storage});
     this.$ = id => document.getElementById("send-work-" + id);
     this.dialog = this.$("dialog"); this.input = this.$("input"); this.list = this.$("results");
     this.content = this.$("content"); this.dock = this.$("dock"); this.overviewBar = this.$("overview-bar");
@@ -76,17 +76,20 @@ class SendWorkPalette {
     this.cwd = cwd; this.input.value = saved?.message || ""; this.locked = saved?.locked || null;
     this.draft = saved?.draft || this.defaultSettings();
     this.closeProfile(); this.cancelSuggestions();
-    this.$("logo").title = "Dispatcher" + (cwd ? " in " + cwd : "");
-    this.dialog.setAttribute("aria-label", "Dispatcher" + (cwd ? " in " + cwd : ""));
-    this.input.title = cwd ? "Dispatch work in " + cwd : "Choose a project";
+    this.$("logo").title = "Send work" + (cwd ? " in " + cwd : "");
+    this.dialog.setAttribute("aria-label", "Send work");
+    this.dock.setAttribute("aria-label", "Send work");
+    this.input.title = cwd ? "Send work in " + cwd : "Choose a workspace";
   }
   syncOverview() {
     const cwd = this.workspace();
-    const changed = this.cwd !== cwd;
+    const group = this.projectId?.();
+    const changed = this.cwd !== cwd || this.group !== group;
+    this.group = group;
     this.setWorkspace(cwd);
     this.overviewBar.hidden = !this.overview || this.overview.hidden;
     this.$("pin").disabled = !cwd;
-    this.$("pin").textContent = this.pinned ? "Hide dispatcher" : "Show dispatcher";
+    this.$("pin").textContent = "Send work";
     this.$("pin").setAttribute("aria-pressed", String(this.pinned));
     const docked = this.pinned && !this.overviewBar.hidden && !!cwd;
     if (docked && this.dialog.open) { this.returnFocus = null; this.dialog.close(); }
@@ -317,9 +320,10 @@ class SendWorkPalette {
   cancelSuggestions() {
     ++this.generation; this.view.clearTimeout(this.timer); this.controller?.abort();
   }
-  static matches(threads, cwd, query) {
+  static matches(threads, workspace, query) {
     const words = query.toLocaleLowerCase().replace(/\bredeploy\b/g, "deploy").match(/[\p{L}\p{N}]+/gu) || [];
-    return threads.filter(t => t.browser_session && !t.dispatcher && (t.cwd || t.project_cwd) === cwd)
+    const belongs = typeof module !== "undefined" ? require("./folders.js").inProject : inProject;
+    return threads.filter(t => t.browser_session && !t.dispatcher && belongs(t, workspace))
       .map(t => {
         const title = (t.title || "").toLocaleLowerCase(), summary = t.checkpoint?.summary || "";
         const text = (summary + " " + (t.original_request || "")).toLocaleLowerCase();
@@ -330,14 +334,15 @@ class SendWorkPalette {
       .sort((a, b) => b.score - a.score || b.updated - a.updated).slice(0, 6);
   }
   choices(candidates) {
-    return [...candidates, {id: "new", kind: "new", title: "New conversation", summary: "Start in this project"},
+    return [...candidates, {id: "new", kind: "new", title: "New conversation", summary: "Start in this workspace"},
       {id: "dispatcher", kind: "dispatcher", title: "Ask dispatcher", summary: "Let it work out where this belongs"}];
   }
   changed() {
     this.cancelSuggestions(); this.error.hidden = true;
     this.input.style.height = "auto";
     this.input.style.height = Math.min(180, this.input.scrollHeight) + "px";
-    this.rows = this.choices(SendWorkPalette.matches(this.threads(), this.cwd, this.input.value));
+    this.group = this.projectId?.();
+    this.rows = this.choices(SendWorkPalette.matches(this.threads(), {cwd: this.cwd, project_id: this.group}, this.input.value));
     if (this.locked && !this.rows.some(r => r.id === this.locked.id)) this.rows.unshift(this.locked);
     this.active = this.locked ? this.rows.findIndex(r => r.id === this.locked.id) : 0;
     this.hint.textContent = ""; this.hint.hidden = true; this.render();
@@ -413,10 +418,14 @@ class SendWorkPalette {
     this.locked = row; this.cancelSuggestions(); this.sending = true; this.error.hidden = true; this.render();
     const destination = row.kind === "thread" ? {kind: "thread", id: row.id} : {kind: row.kind};
     const cwd = this.cwd, body = {cwd, message: this.input.value, destination};
+    const member = row.kind === "thread" && this.group &&
+      this.threads().find(thread => thread.thread_id === row.id && thread.project_id === this.group);
+    const membership = member && member.cwd !== cwd ? {project_id: this.group} : {};
     if (row.kind === "new") body.settings = {...this.draft};
     try {
+      // The group is authorization context. A retry of the same input and destination uses the same receipt.
       const requestId = DispatchUI.requestKey(this.storage, "send-work:" + cwd, body);
-      const result = await this.api("send-work/send", {...body, requestId});
+      const result = await this.api("send-work/send", {...body, ...membership, requestId});
       this.storage.removeItem("dispatch-request:send-work:" + cwd);
       this.drafts.delete(cwd);
       this.sending = false;

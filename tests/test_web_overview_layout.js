@@ -21,8 +21,12 @@ function setup({saved, narrow = false, blocked = false, brokenStorage = false} =
   const trigger = new Element(); doc.body.append(trigger);
   return {ui, doc, events, calls, values, media, trigger};
 }
-test('Cards defaults, invalid preferences, explicit Atlas choice, and reload', () => {
-  assert.equal(setup().ui.mode, 'cards'); assert.equal(setup({saved:'unknown'}).ui.mode, 'cards');
+test('List defaults, migrates saved Cards, and remembers explicit choices', () => {
+  assert.equal(setup().ui.mode, 'list'); assert.equal(setup({saved:'unknown'}).ui.mode, 'list');
+  const old = setup({saved:'cards'});
+  assert.equal(old.ui.mode, 'list');
+  assert.equal(old.values.get(old.ui.key), 'list');
+  assert.equal(old.ui.choose('cards'), false);
   const c = setup(); assert.equal(c.ui.choose('atlas'), true); assert.equal(c.ui.mode, 'atlas');
   assert.equal(c.values.get(c.ui.key), 'atlas'); assert.deepEqual(c.calls, [['atlas', {navigate:true}]]);
   assert.equal(setup({saved:'atlas'}).ui.mode, 'atlas');
@@ -37,39 +41,39 @@ test('the menu exposes checked radio choices and keyboard navigation with Escape
   assert.equal(c.ui.menu, null); assert.equal(c.doc.activeElement, c.trigger); assert.equal(c.calls.length, 0);
 });
 test('selection switches immediately, closes the menu and marks the remembered choice', () => {
-  const c = setup(); c.ui.open(c.trigger); c.ui.menu.children[1].onclick();
+  const c = setup(); c.ui.open(c.trigger); c.ui.menu.children[2].onclick();
   assert.equal(c.ui.menu, null); assert.equal(c.ui.mode, 'atlas');
-  c.ui.open(c.trigger); assert.equal(c.ui.menu.children[1].attrs['aria-checked'], 'true');
-  c.ui.menu.children[0].onclick(); assert.equal(c.ui.mode, 'cards');
+  c.ui.open(c.trigger); assert.equal(c.ui.menu.children[2].attrs['aria-checked'], 'true');
+  c.ui.menu.children[0].onclick(); assert.equal(c.ui.mode, 'list');
 });
 test('outside clicks and scrolling dismiss without changing the preference', () => {
   const c = setup({saved:'atlas'}); c.ui.open(c.trigger);
   c.events['doc:pointerdown']({target:c.doc.body}); assert.equal(c.ui.menu, null);
   c.ui.open(c.trigger); c.events.scroll(); assert.equal(c.ui.menu, null); assert.equal(c.ui.mode, 'atlas'); assert.equal(c.calls.length,0);
 });
-test('desktop preference survives phone fallback, and blocked drafts prevent switching', () => {
-  const c = setup({saved:'atlas',narrow:true}); assert.equal(c.ui.mode,'cards');
-  c.ui.open(c.trigger); assert.equal(c.ui.menu.children[1].disabled,true); assert.equal(c.ui.choose('atlas'),false);
+test('desktop Atlas preference survives the narrow List fallback and layout selection is independent of drafts', () => {
+  const c = setup({saved:'atlas',narrow:true}); assert.equal(c.ui.mode,'list');
+  c.ui.open(c.trigger); assert.equal(c.ui.menu.children[2].disabled,true); assert.equal(c.ui.choose('atlas'),false);
   c.media.matches = false; c.media.changed(); assert.equal(c.ui.mode,'atlas'); assert.deepEqual(c.calls,[['atlas',{navigate:false}]]);
-  const blocked = setup({blocked:true}); blocked.ui.open(blocked.trigger); assert.equal(blocked.ui.menu,undefined); assert.equal(blocked.ui.choose('atlas'),false);
+  const blocked = setup({blocked:true}); blocked.ui.open(blocked.trigger); assert.ok(blocked.ui.menu); assert.equal(blocked.ui.choose('atlas'),true);
 });
 test('unavailable storage does not prevent switching', () => {
-  const c = setup({brokenStorage:true}); assert.equal(c.ui.mode,'cards'); c.ui.choose('atlas'); assert.equal(c.ui.mode,'atlas');
+  const c = setup({brokenStorage:true}); assert.equal(c.ui.mode,'list'); c.ui.choose('atlas'); assert.equal(c.ui.mode,'atlas');
 });
-test('Focus is a remembered third layout available on desktop and phones', () => {
+test('Focus is available on desktop and phones', () => {
   const c = setup(); c.ui.open(c.trigger);
-  assert.equal(c.ui.menu.children[2].dataset.layout, 'working-set');
-  c.ui.menu.children[2].onclick(); assert.equal(c.ui.mode, 'working-set');
+  assert.deepEqual(c.ui.menu.children.map(button => button.dataset.layout), ['list', 'working-set', 'atlas']);
+  c.ui.menu.children[1].onclick(); assert.equal(c.ui.mode, 'working-set');
   assert.equal(c.values.get(c.ui.key), 'working-set');
   assert.equal(setup({saved:'working-set'}).ui.mode, 'working-set');
   const phone = setup({saved:'working-set', narrow:true}); assert.equal(phone.ui.mode, 'working-set');
-  phone.ui.open(phone.trigger); assert.equal(phone.ui.menu.children[2].disabled, false);
-  phone.ui.choose('cards'); assert.equal(phone.ui.mode, 'cards');
+  phone.ui.open(phone.trigger); assert.equal(phone.ui.menu.children[1].disabled, false);
+  phone.ui.choose('list'); assert.equal(phone.ui.mode, 'list');
   phone.ui.choose('working-set'); assert.equal(phone.ui.mode, 'working-set');
 });
-test('List is a remembered fourth layout available on desktop and phones', () => {
-  const c = setup(); c.ui.open(c.trigger);
-  assert.equal(c.ui.menu.children[3].dataset.layout, 'list'); assert.equal(c.ui.menu.children[3].disabled, false);
-  c.ui.menu.children[3].onclick(); assert.equal(c.ui.mode, 'list'); assert.equal(c.values.get(c.ui.key), 'list');
+test('List is available on desktop and phones', () => {
+  const c = setup({saved:'working-set'}); c.ui.open(c.trigger);
+  assert.equal(c.ui.menu.children[0].dataset.layout, 'list'); assert.equal(c.ui.menu.children[0].disabled, false);
+  c.ui.menu.children[0].onclick(); assert.equal(c.ui.mode, 'list'); assert.equal(c.values.get(c.ui.key), 'list');
   assert.equal(setup({saved:'list', narrow:true}).ui.mode, 'list');
 });

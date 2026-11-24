@@ -140,13 +140,26 @@ test("a failed resolution keeps the row and what was typed", async () => {
   assert.equal(control(row, "Decline").disabled, false);
 });
 
+test("composite open fills this conversation's ask and history sections without a second read", async () => {
+  const {ui, rows, history, reads} = setup([elsewhere], {resolved: []});
+  await ui.refresh();
+  const before = reads().length;
+  ui.hydrateThread("thread-1", [decision, {...request, status: "resolved", resolution: "answered",
+    answer: "Use the limited key", resolved_at: "2026-11-22T10:00:00+00:00"}]);
+  await ui.showThread("thread-1");
+  assert.deepEqual(rows("open").map(item => item.dataset.id), ["1"]);
+  assert.match(history.text, /Use the limited key/);
+  assert.equal(reads().length, before);
+  assert.deepEqual(ui.items.map(ask => ask.id).sort(), [1, 5]);
+});
+
 test("a reply from the conversation's strip is sent as the user's message and marks the ask", async () => {
   const {ui, state, rows, posts} = setup([request, elsewhere], {resolved: []});
   await ui.refresh();
   await ui.showThread("thread-1");
   const row = rows("open")[0], field = row.byClass("ask-note")[0];
   field.value = "what do you need for stripe?";
-  row.byTag("form")[0].onsubmit({preventDefault() {}});
+  field.onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   await settle();
   assert.deepEqual(posts(), [{path: "sessions/thread-1/messages", body: {
     message: 'Re ask #2 "Provide a Stripe test key" (still open): what do you need for stripe?', requestId: "request-1"}}]);
@@ -158,51 +171,46 @@ test("a reply from the conversation's strip is sent as the user's message and ma
   assert.deepEqual(ui.viewer.replyOf(request).text, "what do you need for stripe?");
 });
 
-test("Quote in message names the ask in the conversation's draft without losing what is there", async () => {
+test("an empty discussion names the ask in the conversation draft without losing what is there", async () => {
   const {ui, state, draft, rows, control, posts} = setup([request, elsewhere], {resolved: []});
   await ui.refresh();
   await ui.showThread("thread-1");
   const row = rows("open")[0], field = row.byClass("ask-note")[0];
   draft.value = "Half a thought";
-  field.value = "which key?";
-  control(row, "Quote in message").onclick();
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.deepEqual(state.opened, ["thread-1"]);
-  assert.equal(draft.value, 'Half a thought\n\nRe ask #2 "Provide a Stripe test key" (still open): which key?');
+  assert.equal(draft.value, 'Half a thought\n\nRe ask #2 "Provide a Stripe test key" (still open): ');
   assert.equal(draft.focused, true);
   assert.deepEqual(draft.selection, [draft.value.length, draft.value.length]);
   assert.equal(field.value, "");
   assert.equal(posts().length, 0, "nothing is sent until the user sends the message");
-  assert.equal(control(row, "Reply in conversation"), undefined, "the conversation is already open");
   // Asking again does not repeat a reference the draft already has.
   draft.value = 'Re ask #2 "Provide a Stripe test key" (still open): ';
-  control(row, "Quote in message").onclick();
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.equal(draft.value, 'Re ask #2 "Provide a Stripe test key" (still open): ');
 });
 
-test("Reply in conversation from the Queue closes it and opens the asking conversation", async () => {
+test("an empty discussion from Queue closes it and opens the asking conversation", async () => {
   const {ui, $, state, draft, control} = setup([request, elsewhere], {resolved: []});
   await $("open-asks-view").onclick({preventDefault() {}});
   assert.equal($("asks-dialog").open, true);
   const row = $("asks-list").byClass("ask-row").find(node => node.dataset.id === "5");
-  control(row, "Reply in conversation").onclick();
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.equal($("asks-dialog").open, false);
   assert.deepEqual(state.opened, ["thread-2"]);
   assert.equal(draft.value, 'Re ask #5 "Add payout details" (still open): ');
 });
 
-test("a conversation whose draft cannot take text is opened and the typed text stays with the ask", async () => {
+test("an empty discussion still opens a conversation whose draft cannot take text", async () => {
   const {ui, state, draft, rows, control} = setup([request], {resolved: [], composer: false});
   await ui.refresh();
   await ui.showThread("thread-1");
-  const field = rows("open")[0].byClass("ask-note")[0];
-  field.value = "which key?";
-  control(rows("open")[0], "Quote in message").onclick();
+  control(rows("open")[0], "Discuss in thread").onclick();
   await settle();
   assert.deepEqual(state.opened, ["thread-1"]);
-  assert.equal(field.value, "which key?");
   assert.equal(draft.value, "");
 });
 

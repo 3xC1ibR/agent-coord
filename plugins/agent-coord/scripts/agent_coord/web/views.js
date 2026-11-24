@@ -98,7 +98,7 @@ const threadViews = (() => {
 })();
 
 class SavedViews {
-  constructor({document, api, onSwitch, onRefresh, onError, notify, storage, preferences, scope = "", getLayout = () => "cards"}) {
+  constructor({document, api, onSwitch, onRefresh, onError, notify, storage, preferences, scope = "", getLayout = () => "list"}) {
     this.doc = document; this.api = api; this.onSwitch = onSwitch; this.onError = onError;
     this.getLayout = getLayout;
     this.onRefresh = onRefresh;
@@ -305,7 +305,6 @@ class SavedViews {
   apply(value) {
     const f = threadViews.filters(value.filters);
     if (this.current().kind === "group") f.project = this.current().projectId;
-    if (this.cwd !== undefined) f.repository = "";
     for (const field of ["repository", "project"]) {
       const control = this.$(field);
       // Preserve a saved ID while choices load, or if its association disappears.
@@ -555,7 +554,7 @@ class SavedViews {
     const saved = this.items.filter(view => !this.local(view));
     this.$("view-move-left").disabled = saved.indexOf(this.current()) <= 0 || this.busy;
     this.$("view-move-right").disabled = this.current() === saved.at(-1) || this.busy;
-    this.$("back-home").textContent = this.cwd ? this.cwd.split("/").filter(Boolean).pop() || "/" : this.cwd === "" ? "Open project" : this.current().name;
+    this.$("back-home").textContent = this.cwd ? this.cwd.split("/").filter(Boolean).pop() || "/" : this.cwd === "" ? "Open workspace" : this.current().name;
     this.$("back-home").title = this.cwd || "";
     this.$("add-view").disabled = this.cwd === "";
     this.$("add-group").disabled = this.cwd === "";
@@ -658,7 +657,7 @@ class SavedViews {
       value: mode === "duplicate" ? {filters: view.filters, group_by: view.group_by} : this.read()};
     this.$("view-dialog-title").textContent = mode === "group-rename" ? "Rename group" : mode === "rename" ? "Rename saved filters" : mode === "duplicate" ? "Duplicate saved filters" : "Save filters";
     this.$("view-dialog-description").textContent = mode === "group-rename" ? "Change the name wherever this group appears."
-      : mode === "rename" ? "Give these saved filters a new name." : "Save these filters and display settings in this project.";
+      : mode === "rename" ? "Give these saved filters a new name." : "Save these filters and display settings in this workspace.";
     this.$("view-name").value = ["rename", "group-rename"].includes(mode) ? view.name : mode === "duplicate" ? view.name + " copy" : "";
     this.$("save-view").textContent = ["rename", "group-rename"].includes(mode) ? "Rename" : "Save filters";
     this.$("view-error").hidden = true;

@@ -48,11 +48,11 @@ test("blocked deployment outranks requested review, healthy rollout, findings, a
   assert.equal(reason(items[0]).label, "✓ Done");
 });
 
-test("attention uses newest event before classification, with priority only breaking ties", () => {
+test("attention uses severity before recency", () => {
   const items = [thread("old-blocker", "deployment", {needs_attention: true, attention_reason: "blocked", attention_since: 10}),
     thread("new-findings", "investigation", {needs_attention: true, attention_reason: "findings", attention_since: 30}),
     thread("new-review", "validation", {needs_attention: true, attention_reason: "review", attention_since: 30})];
-  assert.deepEqual(ids(groupThreads(items).priority), ["new-review", "new-findings", "old-blocker"]);
+  assert.deepEqual(ids(groupThreads(items).priority), ["old-blocker", "new-review", "new-findings"]);
 });
 
 test("dismissing findings and success restores the same stage while required actions remain", () => {
@@ -79,7 +79,7 @@ test("stage peers sort by recent activity while attention retains its priority o
   for (const t of [older, newer]) { t.response_state = "reply"; t.attention_since = 5; }
   assert.deepEqual(ids(groupThreads([newer, older]).priority), ["older", "newer"]);
   newer.pinned = true;
-  assert.deepEqual(ids(groupThreads([newer, older]).priority), ["older", "newer"]);
+  assert.deepEqual(ids(groupThreads([newer, older]).priority), ["newer", "older"]);
 });
 
 test("every stage sorts running first then latest activity, regardless of pin or creation time", () => {
