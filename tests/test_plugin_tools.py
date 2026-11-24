@@ -32,12 +32,20 @@ class PluginToolsTests(unittest.TestCase):
         process.wait(timeout=5)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            try:
-                os.killpg(process.pid, 0)
-            except ProcessLookupError:
+            # Darwin can reject a signal-zero probe after native code exits.
+            # Inspect runnable members rather than treating EPERM as exit or
+            # requiring orphaned zombies to be reaped by the system first.
+            members = subprocess.run(
+                ["ps", "-axo", "pid=,pgid=,stat="], check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            running = [int(pid) for line in members.stdout.splitlines()
+                       for pid, group, status in [line.split()]
+                       if int(group) == process.pid and not status.startswith("Z")]
+            if not running:
                 return
             time.sleep(.02)
-        raise AssertionError(f"Native fixture process group {process.pid} did not exit")
+        raise AssertionError(f"Native fixture process group {process.pid} did not exit: {running}")
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -416,3 +424,56 @@ class PluginToolsTests(unittest.TestCase):
                 tools.install_codex("personal", codex_home=self.root)
         self.assertEqual((cache / "hook").read_text(), "old")
         self.assertEqual(config.read_text(), "original\n")
+
+
+@unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
+class NativeProcessCleanupTests(unittest.TestCase):
+    def start_process(self):
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                   start_new_session=True)
+        self.addCleanup(self.stop_process, process)
+        return process
+
+    @staticmethod
+    def stop_process(process):
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+    def test_signal_zero_permission_error_does_not_mask_verified_exit(self):
+        process = self.start_process()
+        unrelated = self.start_process()
+        original = os.killpg
+
+        def send(group, signum):
+            if signum == 0:
+                raise PermissionError("Darwin rejected the signal-zero probe")
+            return original(group, signum)
+
+        with patch.object(os, "killpg", side_effect=send):
+            PluginToolsTests.stop_native_process_group(process)
+        self.assertIsNotNone(process.poll())
+        self.assertIsNone(unrelated.poll(), "cleanup must preserve another process group")
+
+    def test_surviving_group_fails_even_when_leader_wait_reports_exit(self):
+        process = self.start_process()
+        from types import SimpleNamespace
+        exited_leader = SimpleNamespace(pid=process.pid, wait=lambda timeout: 0)
+        with patch.object(os, "killpg"), patch.object(time, "monotonic", side_effect=[0, 1, 6]), \
+                patch.object(time, "sleep"):
+            with self.assertRaisesRegex(AssertionError, str(process.pid)):
+                PluginToolsTests.stop_native_process_group(exited_leader)
+        self.assertIsNone(process.poll(), "the fixture must actually have a surviving member")
+
+    def test_failed_process_inventory_does_not_claim_cleanup(self):
+        process = self.start_process()
+        original = subprocess.run
+
+        def inspect(*args, **kwargs):
+            if args[0] == ["ps", "-axo", "pid=,pgid=,stat="]:
+                raise subprocess.CalledProcessError(1, args[0])
+            return original(*args, **kwargs)
+
+        with patch.object(subprocess, "run", side_effect=inspect):
+            with self.assertRaises(subprocess.CalledProcessError):
+                PluginToolsTests.stop_native_process_group(process)
