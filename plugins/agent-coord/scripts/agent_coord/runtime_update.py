@@ -67,10 +67,14 @@ def snapshot(database, directory, update):
     temporary.unlink(missing_ok=True)
     # Snapshot only after the predecessor exits, while the supervisor holds
     # the owner lock and the candidate is barred from opening the database.
-    # A busy checkpoint cannot prove that the main file contains the WAL.
+    # A pinned reader can prevent truncation even after every committed page
+    # has reached the main file. Use a nonwaiting checkpoint and clone only
+    # when SQLite confirms that all WAL pages are in that file.
     with closing(sqlite3.connect(database, timeout=.05)) as source:
-        busy, frames, copied = source.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        cloned = not busy and frames == copied and clone_file(database, temporary)
+        cloned = False
+        if sys.platform == "darwin":
+            busy, frames, copied = source.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            cloned = not busy and frames == copied and clone_file(database, temporary)
         if not cloned:
             check_capacity(database, directory)
             with closing(sqlite3.connect(temporary)) as target:
