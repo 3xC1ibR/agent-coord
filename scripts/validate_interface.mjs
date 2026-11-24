@@ -172,6 +172,17 @@ async function waitOverview(page, minimum = 0) {
   }, minimum);
 }
 
+async function visiblePaneTimeline(page, thread, {required = true} = {}) {
+  const section = `#thread-panes section.conversation-pane-frame[data-thread-id="${thread.id}"]`;
+  const iframe = `#thread-panes iframe[src*="#${thread.id}"]`;
+  if (required) await shown(page, `${section}, ${iframe}`);
+  const frame = page.locator(iframe);
+  const pane = page.locator(section);
+  if (await frame.isVisible()) return frame.contentFrame().locator("#timeline");
+  if (await pane.isVisible()) return pane.locator("[data-pane-timeline]");
+  return null;
+}
+
 async function captureSurface(page, fixture, surface, mobile) {
   let expected = surface;
   const {state, threads} = fixture;
@@ -199,16 +210,34 @@ async function captureSurface(page, fixture, surface, mobile) {
       }
       break;
     }
-    case "dispatcher":
+    case "dispatcher": {
       await browserOpen(page, fixture, state === "empty" ? fixture.vacant : fixture.workspace,
         {dispatcher: threads.dispatcher});
-      if (mobile) {
+      if (state === "empty") {
         await shown(page, "body.dispatcher-workspace #dispatcher-empty");
-        await page.locator("#dispatcher-mobile-conversation").click();
-        await shown(page, "#dispatcher-body #message");
-        expected = "dispatcher-mobile-chat";
-      } else await shown(page, "#dispatcher-workspace");
+        assert.equal(await page.locator("#dispatcher-workspace .dispatch-work-item").count(), 0);
+        if (mobile) {
+          await page.locator("#dispatcher-mobile-conversation").click();
+          await shown(page, "#dispatcher-body #message");
+          expected = "dispatcher-mobile-empty-chat";
+        }
+      } else {
+        const target = threads[fixture.dispatcherTarget];
+        const entry = page.locator(`#dispatcher-workspace button.dispatch-work-item[data-dispatch-thread="${target.id}"]`);
+        const label = state === "streaming" ? "Working" : "Needs your answer";
+        await expectContains(entry, target.title);
+        await expectContains(entry.locator(".dispatch-item-state"), label);
+        if (state === "long-error") await expectContains(page.locator("#dispatcher-workspace .dispatch-work-item"), "Routing failed");
+        if (mobile) expected = "dispatcher-mobile-activity";
+        else {
+          const timeline = await visiblePaneTimeline(page, target);
+          assert(timeline, `Dispatcher did not open the routed conversation ${target.title}.`);
+          await expectContains(timeline, state === "streaming" ? "Streaming inspection update" : target.latest);
+          if (state === "long-error") await expectContains(timeline, "Cutoff length exceeds the stated inspection limit.");
+        }
+      }
       break;
+    }
     case "conversation":
       await openConversation(page, fixture,
         threads[state === "empty" ? "empty-conversation" : state === "long-error" ? "failed" : "supervisor"],
@@ -227,29 +256,39 @@ async function captureSurface(page, fixture, surface, mobile) {
         await expectContains(page.locator("#timeline"), "Cutoff length exceeds the stated inspection limit.");
       }
       break;
-    case "tiled":
+    case "tiled": {
       await openTiling(page, fixture, fixture.pair, mobile ? 1 : 2);
       if (mobile) {
         const visiblePanes = await page.locator("#thread-panes .conversation-pane-frame:visible").count();
         if (visiblePanes === 1) expected = "single-visible-slot";
       }
+      let verified = 0;
       for (const key of ["pair-0", "pair-1"]) {
         const thread = threads[key];
-        if (state === "empty") continue;
-        const iframe = page.locator(`#thread-panes iframe[src*="#${thread.id}"]`);
-        if (await iframe.isVisible()) {
-          await expectContains(iframe.contentFrame().locator("#timeline article.message"), thread.latest);
-        } else {
-          const pane = page.locator(`#thread-panes section.conversation-pane-frame[data-thread-id="${thread.id}"]`);
-          if (mobile && !await pane.isVisible()) continue;
-          await expectContains(pane.locator("[data-pane-timeline] article.message"), thread.latest);
+        const timeline = await visiblePaneTimeline(page, thread, {required: !mobile});
+        if (!timeline) continue;
+        if (state === "empty") await expectContains(timeline, "This is the beginning of your session");
+        else if (key === "pair-0" && state === "streaming") await expectContains(timeline, "Streaming inspection update");
+        else await expectContains(timeline.locator("article.message"), thread.latest);
+        if (key === "pair-0" && state === "long-error") {
+          await expectContains(timeline, "Cutoff length exceeds the stated inspection limit.");
         }
+        verified++;
       }
+      assert(verified >= (mobile ? 1 : 2), "The expected tiled transcripts were not visible.");
       break;
+    }
     case "queue":
       await browserOpen(page, fixture);
       await waitOverview(page);
       await openQueue(page);
+      if (state === "empty") {
+        assert.equal(await page.locator("#asks-list .ask-row").count(), 0);
+        await expectContains(page.locator("#asks-list"), "Nothing needs you");
+      } else {
+        const ask = state === "streaming" ? fixture.asks.streaming : fixture.asks.blocking;
+        await shown(page, `#asks-list .ask-row[data-id="${ask}"]`);
+      }
       if (state === "long-error") {
         await page.route(/\/api\/browser\/asks\/\d+$/, route => route.continue({headers: {
           ...route.request().headers(), "X-Interface-Fixture-Ask-Error": "1",
@@ -470,6 +509,30 @@ async function mobileLayout(page, fixture) {
     assert(view[key].width >= 44 && view[key].height >= 44, JSON.stringify(view));
   }
   return view;
+}
+
+async function mobileTiledComposers(page, fixture) {
+  await openTiling(page, fixture, fixture.pair, 2);
+  const forms = page.locator("#thread-panes [data-pane-composer]:visible");
+  await forms.first().getByRole("button", {name: "Send message"}).waitFor({state: "visible"});
+  const geometry = await forms.evaluateAll(composers => composers.map(form => {
+    const rect = selector => {
+      const {width, height, top} = form.querySelector(selector).getBoundingClientRect();
+      return {width, height, top};
+    };
+    return {layout: getComputedStyle(form).display, attach: rect('button[aria-label="Attach image"]'),
+      send: rect('button[type="submit"]'), font: getComputedStyle(form.querySelector("textarea")).fontSize};
+  }));
+  assert.equal(geometry.length, 2);
+  for (const composer of geometry) {
+    assert.equal(composer.layout, "grid", JSON.stringify(composer));
+    assert.equal(composer.font, "16px", JSON.stringify(composer));
+    for (const {width, height} of [composer.attach, composer.send]) {
+      assert(width >= 44 && width <= 48 && height >= 44, JSON.stringify(composer));
+    }
+    assert(Math.abs(composer.attach.top - composer.send.top) < 2, JSON.stringify(composer));
+  }
+  return geometry;
 }
 
 async function familyNavigation(page, fixture) {
@@ -990,6 +1053,9 @@ async function interactions(browser, fixture, report) {
   await recordCheck(report, "mobile composer, geometry and header controls",
     () => withPage(browser, page => mobileLayout(page, fixture),
       {viewport: {width: 390, height: 844}, hasTouch: true, colorScheme: "dark"}));
+  await recordCheck(report, "mobile tiled composer keeps compact touch controls",
+    () => withPage(browser, page => mobileTiledComposers(page, fixture),
+      {viewport: {width: 390, height: 844}, hasTouch: true, colorScheme: "dark"}));
   await recordCheck(report, "uncategorized reply clears when read", () =>
     desktop(page => attentionReceipts(page, fixture, "supervisor", true, "reply")));
   await recordCheck(report, "routine update clears when read", () =>
@@ -1385,6 +1451,8 @@ async function performanceChecks(browser, fixture, report) {
       results.enter = {samples: [], method: "Trusted browser keydown to the first rendered-layout user article intersecting the viewport. The next rendering opportunity is reported independently in each sample."};
       await enterSamples(page, fixture, sends, results.enter.samples);
       const summary = results.enter.summary = percentiles(results.enter.samples.map(result => result.domMs));
+      results.enter.renderingOpportunitySummary = percentiles(
+        results.enter.samples.map(result => result.afterRenderingOpportunityMs));
       assert(summary.maximum < 16, JSON.stringify(summary));
       return summary;
     }));

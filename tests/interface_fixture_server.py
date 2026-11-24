@@ -21,6 +21,10 @@ STATES = ("default", "empty", "streaming", "long-error", "interactions")
 ANCHOR = 1795526100  # Fixed clock for capture labels and stored transcript dates.
 ASK_TITLE = "Which inspection interval should the maintenance guide recommend?"
 OTHER_ASK_TITLE = "What limits should the sample certificate record?"
+STREAM_TEXT = "Streaming inspection update · comparing the second assembly."
+FAILED_TEXT = "The fixture rejected the recorded measurement."
+FAILED_REASON = "Cutoff length exceeds the stated inspection limit."
+DISPATCH_ERROR = "Routing failed because the assigned lot has no qualified inspection station."
 OPENUI = """```openui
 root = Tabs([summary, readings])
 summary = TabItem("summary", "Summary", [TextContent("Three assemblies passed inspection.")])
@@ -93,7 +97,7 @@ def seed(root, workspace, sessions, state):
         store.threads.finish_turn(thread, turn_id=turn, status=status, occurred_at=anchor - age)
 
     def streaming(thread):
-        turn = make_turn(thread, 999, "Streaming inspection update · comparing the second assembly.",
+        turn = make_turn(thread, 999, STREAM_TEXT,
                          anchor=anchor, status="inProgress", request="Compare the diameter readings as they arrive.")
         turn.pop("completedAt")
         sessions.rpc.threads[thread]["turns"].append(turn)
@@ -102,12 +106,30 @@ def seed(root, workspace, sessions, state):
                                                             "item": turn["items"][-1]}})
         return {"thread": thread, "turn": turn["id"], "item": turn["items"][-1]["id"]}
 
+    def append_failed_turn(key):
+        original = sessions.rpc.threads[catalog[key]["id"]]
+        catalog[key]["latest"] = FAILED_TEXT
+        failed_turn = make_turn(original["id"], 999, (FAILED_TEXT + " ") * 38, anchor=anchor,
+                                status="failed", request="Review the long inspection record.")
+        failed_turn["error"] = {"message": FAILED_REASON}
+        original["turns"].append(failed_turn)
+        sessions._remember_thread(original)
+
+    def dispatch_receipt(dispatcher, key, state, message, *, target=None, error=None):
+        # Record completed fixture outcomes without waking the dispatch/routing worker.
+        with store._connection() as db:
+            row = db.execute("""INSERT INTO dispatch_requests
+                (dispatcher_id,request_id,body_json,cwd,state,created_at) VALUES (?,?,?,?,?,?)""",
+                (dispatcher, key, json.dumps({"message": message, "images": []}), str(workspace), state, anchor - 480))
+            sessions.dispatch.transition(db, row.lastrowid, state, target_id=target, error=error)
+
     def ask(thread, title, *, blocking=False, **fields):
         return store.asks.create(thread, title, blocking=blocking,
                                  context="The assembly report is ready. The inspection guide can use the current limits.",
                                  **fields)["id"]
 
     stream = None
+    dispatcher_target = None
     project_id = None
     asks = {}
     if state != "empty":
@@ -180,18 +202,19 @@ def seed(root, workspace, sessions, state):
         })
         if state == "streaming":
             stream = streaming(supervisor)
+            asks["streaming"] = ask(supervisor, "Which live reading should the inspection record retain?")
         if state == "long-error":
-            original = sessions.rpc.threads[failed]
-            latest = "The fixture rejected the recorded measurement."
-            catalog["failed"]["latest"] = latest
-            failed_turn = make_turn(failed, 999, (latest + " ") * 38,
-                                    anchor=anchor, status="failed", request="Review the long inspection record.")
-            failed_turn["error"] = {"message": "Cutoff length exceeds the stated inspection limit."}
-            original["turns"].append(failed_turn)
-            sessions._remember_thread(original)
+            append_failed_turn("failed")
             ask(failed, "Which signed tolerance correction should be carried forward into the "
                 "manufacturing release, maintenance guide and calibration certificate?", blocking=True,
                 options=["Hold for drawing revision", "Apply the existing engineering waiver"])
+            dispatch_receipt(dispatcher, "inspection-routing-failure", "failed",
+                             "Assign the inspected material to a qualified station.", error=DISPATCH_ERROR)
+        dispatcher_target = {"default": "blocking", "streaming": "supervisor", "long-error": "failed"}.get(state)
+        if dispatcher_target:
+            dispatch_receipt(dispatcher, "inspection-routing-accepted", "accepted",
+                             "Route the inspection request to its responsible conversation.",
+                             target=catalog[dispatcher_target]["id"])
     add("empty-conversation", "Receiving inspection", directory=vacant, history=0)
     if state == "empty":
         dispatcher = add("dispatcher", "Receiving dispatcher", directory=vacant, history=0, domain="operations")
@@ -201,6 +224,9 @@ def seed(root, workspace, sessions, state):
                      directory=pair, history=0 if state == "empty" else 4)
         if index == 0 and state == "streaming":
             streaming(thread)
+        if index == 0 and state == "long-error":
+            append_failed_turn("pair-0")
+            completion(thread, "failed", 30)
     if state == "interactions":
         for index in range(6):
             add(f"pane-{index}", f"Assembly station {index + 1}", directory=six, history=12)
@@ -208,7 +234,7 @@ def seed(root, workspace, sessions, state):
         raise RuntimeError("The fixture did not persist its conversation histories.")
     return {"state": state, "workspace": str(workspace), "vacant": str(vacant), "pair": str(pair),
             "six": str(six), "threads": catalog, "asks": asks, "stream": stream, "anchor": anchor,
-            "project": project_id}
+            "project": project_id, "dispatcherTarget": dispatcher_target}
 
 
 def fixture_handler(parent, sessions, fixture, stop):
