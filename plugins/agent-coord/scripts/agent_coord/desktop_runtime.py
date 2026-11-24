@@ -409,19 +409,11 @@ def uninterrupted_readiness(sessions):
     return reasons
 
 
-def waiting_on_unretained_work(blocked):
-    """Identify work that must stay answerable on this coordinator."""
-    unsupported = [reason for reason in blocked if reason.startswith("active unsupported provider: ")
-                   or reason == "Muse background workflows"]
-    return bool(unsupported) and all(reason == "admitted operations" or reason in unsupported for reason in blocked)
+def unbrokered_work(sessions):
+    """Describe provider work whose native process cannot survive this backend.
 
-
-def unsupported_work(sessions):
-    """Separate interruptible provider turns from work only the user can settle.
-
-    A pending approval or question is never withdrawn for an update, and no
-    native evidence shows that resuming a Muse session restores a background
-    workflow. Both keep an explicit update waiting with admission open.
+    Existing coordinator-owned turns, approvals and workflows keep the source
+    serving. Only proven retained-transport ownership permits their adoption.
     """
     turns, waiting = [], []
     with sessions.lock:
@@ -801,7 +793,7 @@ class Runtime:
                 "protocol": PROTOCOL_VERSION, "schema": SCHEMA_VERSION, "pid": os.getpid(),
                 "payload": str(self.payload), "client_requests": 1, "runtime_updates": 1,
                 "runtime_update_prompts": 1, "uninterrupted_updates": 1,
-                "transfer_admission_probe": 1, "stable_origin": 1}
+                "unbrokered_provider_wait": 1, "transfer_admission_probe": 1, "stable_origin": 1}
 
     def edge_route(self, *, ready=True):
         from . import runtime_edge
@@ -895,14 +887,12 @@ class Runtime:
     def prepare_handover(self):
         """Drain an authorized update without waiting for an accidental idle gap.
 
-        The caller holds the runtime mutex. Unsupported providers remain
-        answerable; supported native turns belong to the surviving transport.
+        The caller holds the runtime mutex. Unbrokered provider work remains
+        answerable; retained native turns belong to the surviving transport.
         """
         from . import runtime_edge, runtime_update
         sessions = self.server.browser_sessions
         blocked = uninterrupted_readiness(sessions)
-        if self.update_requested and waiting_on_unretained_work(blocked):
-            return self.wait_for_unretained_work(sessions)
         if (blocked and blocked != ["admitted operations"] and self.update_requested
                 and self.update_requested.get("interrupted_unsupported")):
             self.fail_update(sessions, "The update could not proceed after pausing conversations ("
@@ -910,16 +900,12 @@ class Runtime:
                              "conversations continue now.", blocked=blocked)
             return False
         if blocked and (not self.update_requested or blocked != ["admitted operations"]):
-            # A previously admitted operation can start an unsupported provider
-            # during the drain. Reopen so that work can finish or be answered.
+            # Previously admitted work can reveal an unbrokered native process
+            # during draining. Keep admission open for its completion or answer.
             if self.update_drain_started is not None:
-                self.update_requested = runtime_update.write(self.directory, self.update_requested,
-                    phase="accepted", admission_drain_seconds=time.monotonic() - self.update_drain_started)
-                self.update_drain_started = None
-                sessions.admission.resume()
-                self.reopen_edge()
-                sessions.queue.wake()
-                sessions.dispatch.wake()
+                self.reopen_drain(sessions)
+            if self.update_requested:
+                self.wait_for_provider_work(sessions, blocked)
             return False
         self.fence_edge()
         sessions.admission.pause()
@@ -953,18 +939,18 @@ class Runtime:
             return False
         return True
 
-    def wait_for_unretained_work(self, sessions):
+    def wait_for_provider_work(self, sessions, blocked):
         """Keep legacy coordinator-owned processes alive until their work ends.
 
         Build 98 launched ACP pipes inside the coordinator. They cannot be
         claimed merely by attaching a PID. Retained channels bypass this path;
         unbrokered work keeps the source serving, including approval answers.
         """
-        turns, waiting = unsupported_work(sessions)
-        self.reopen_drain(sessions)
-        self.note_update(phase="accepted", unsupported=turns + waiting,
+        turns, waiting = unbrokered_work(sessions)
+        detail = conversation_labels(sessions, turns + waiting) if turns or waiting else "; ".join(blocked)
+        self.note_update(phase="accepted", blocked=blocked, unsupported=turns + waiting,
             notice="Waiting for existing provider work to finish before its first retained-transport update: "
-                   + conversation_labels(sessions, turns + waiting) + ". Running work remains available.")
+                   + detail + ". Running work remains available.")
         return False
 
     def validate_candidate(self, candidate, *, capacity):
