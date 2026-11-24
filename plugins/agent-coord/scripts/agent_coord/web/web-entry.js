@@ -53,6 +53,7 @@ import "./composer-drafts.js";
 import "./conversation-cache.js";
 import "./conversation-viewport.js";
 import "./outgoing-messages.js";
+import "./conversation-creation.js";
 import "./conversation-pane.js";
 import "./app.js";
 import "./thread-hover.js";

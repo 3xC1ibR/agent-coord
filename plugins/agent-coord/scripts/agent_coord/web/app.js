@@ -3610,6 +3610,8 @@ async function newSession() {
   state.timelineThread = null;
   replaceTimelineContent(node("p", "Choose a model and send a message to start.", "empty"));
   state.timelineScroll?.reset();
+  const intent = state.creationIntents?.get(state.newSessionDraft.draftId);
+  if (intent) showCreationIntent(state.newSessionDraft.draftId, intent);
   $("requests").replaceChildren(); delete $("requests").dataset.signature;
   $("thread-context").hidden = true;
   renderTitle(); renderQueuedMessages(); renderStatus();
@@ -3642,11 +3644,20 @@ async function sendSessionDraft(text, images, mentions = [], quiet = false) {
       : "Permissions: default — approval prompts enabled. Use /yolo to enable full machine access.";
     input.value = ""; state.drafts.delete("new-session");
     state.mentions?.sent(draft.draftId || "new-session", text, mentions);
+    if (state.durableDrafts) {
+      const id = draft.draftId || "new-session";
+      await writeComposerRecord(id, () => state.durableDrafts.write(id, {text: "", mentions: []}), "text");
+    }
     renderStatus();
     return;
   }
   const cwd = state.projectCwd || draft.session.cwd, draftId = draft.draftId || "new-session";
   const ordinary = !command.startsWith("/") && !state.reviewUI?.settings?.has(draftId);
+  if (ordinary && !draft.createdId && state.durableDrafts) {
+    const settings = {...draft.session};
+    if (settings.permission_mode) delete settings.yolo;
+    return startCreation(draftId, settings, text, images, mentions, quiet);
+  }
   const requestId = ordinary ? crypto.randomUUID() : null;
   if (ordinary) {
     const versions = state.draftVersions ||= new Map();
@@ -5305,6 +5316,7 @@ async function boot() {
   navigation.remember();
   window.agentCoordConversationTransfer = setupConversationTransfer({state, document, select, goHome, renderStatus});
   await historyNavigation.ready(navigation);
+  recoverWorkspaceOutbox().catch(showError);
   window.agentCoordDesktop?.navigationReady();
   if (state.config.remote) await notifications.ready();
   // Checkpoints written by terminal agents arrive through the shared database.

@@ -44,7 +44,7 @@ test("a restored submission reserves its original position before new Enter, whi
   assert.deepEqual(f.effects, ["independent"]);
   const mounting = f.context.discoverComposerSubmissions("one");
   f.discovery.resolve([{requestId: "old", text: "old", images: [], mentions: [],
-    path: "sessions/one/queue", body: {requestId: "old"}}]);
+    path: "sessions/one/queue", body: {requestId: "old", client_message_id: "old"}}]);
   await mounting;
   await tick();
   first.reject(Object.assign(new Error("Ambiguous"), {status: 409, code: "submission_outcome_unknown"}));
@@ -147,26 +147,6 @@ test("the actual final cache record is bounded even when a transformed response 
   assert.ok(Cache.retainedBytes(compact) >= Buffer.byteLength(JSON.stringify(compact)));
 });
 
-test("a restored project draft moves atomically to the new thread after another project becomes current", async () => {
-  const creating = deferred(), input = {value: "first", ownerDocument: {}}, noop = () => {};
-  const draft = {draftId: "new-session:/work", session: {cwd: "/work"}, work_thread: {browser_session: true}};
-  const moves = [], state = {newSessionDraft: draft, selected: "new-session", projectCwd: "/work",
-    drafts: new Map(), projectDrafts: new Map(), attachments: {snapshot: () => [], move: noop},
-    outgoing: {node: noop}, durableDrafts: {move: async (...args) => moves.push(args)}};
-  const context = vm.createContext({state, document: {}, $: () => input, crypto: {randomUUID: () => "request"},
-    replaceTimelineContent: noop, api: () => creating.promise, savedViews: null, conversationEntry: () => ({}),
-    sessionPath: id => "sessions/" + id, sessionStorage: {removeItem: noop}, isSessionDraft: () => false,
-    refreshList: async () => {}, showError: noop, renderStatus: noop});
-  vm.runInContext(source + "\n" + section(app, "async function sendSessionDraft(", '$("new-session").onclick'), context);
-  context.submitComposerMessage = options => {const stage = Promise.resolve(); options.onStage(stage); return stage;};
-  const sending = context.sendSessionDraft("first", []);
-  state.projectDrafts.set("/work", {detail: draft, text: "follow-up"});
-  state.newSessionDraft = null; state.projectCwd = "/next"; state.selected = null;
-  creating.resolve({session: {thread_id: "created"}});
-  await sending;
-  assert.deepEqual(JSON.parse(JSON.stringify(moves)), [["new-session:/work", "created", {text: "follow-up", images: [], mentions: []}]]);
-});
-
 test("window-scoped composer identities survive reload while concurrently duplicated windows obtain their own lease", async () => {
   const f = environment(), locks = new Set();
   let next = 0;
@@ -189,4 +169,133 @@ test("window-scoped composer identities survive reload while concurrently duplic
   assert.equal(await f.context.composerWindowScope(reloaded.view), id);
   assert.equal(await f.context.composerWindowScope({agentCoordDesktop: {windowId: "native"}}), "native");
   reloaded.close(); duplicate.close();
+});
+
+const creationSource = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/conversation-creation.js"), "utf8");
+function creationStore() {
+  const drafts = new Map(), journal = new Map();
+  const key = (id, requestId) => JSON.stringify([id, requestId]);
+  return {drafts, journal,
+    async stage(id, requestId, row) {
+      journal.set(key(id, requestId), {id, row});
+      if (drafts.get(id)?.text === row.text) drafts.set(id, {text: "", images: [], mentions: []});
+    },
+    async pending(id) {return [...journal.values()].filter(entry => entry.id === id).map(entry => entry.row);},
+    async pendingThreadIds() {return [...new Set([...journal.values()].map(entry => entry.id))];},
+    async read(id) {return drafts.get(id);},
+    async write(id, patch) {drafts.set(id, {...drafts.get(id), ...patch});},
+    async acknowledge(id, requestId) {journal.delete(key(id, requestId));},
+    async promoteCreation(projectId, creationId, threadId, message) {
+      const creation = journal.get(key(projectId, creationId));
+      if (!creation) return null;
+      const row = {...creation.row, ...message};
+      journal.delete(key(projectId, creationId));
+      journal.set(key(threadId, row.requestId), {id: threadId, row});
+      drafts.set(threadId, drafts.get(projectId)); drafts.delete(projectId); return row;
+    }};
+}
+function creationWindow(store, api, capable = true) {
+  const f = environment(), noop = () => {};
+  const projectId = "new-session:/work", draft = {draftId: projectId, session: {cwd: "/work", client: "codex"}, work_thread: {browser_session: true}};
+  Object.assign(f.state, {selected: "new-session", newSessionDraft: draft, projectCwd: "/work", projectDrafts: new Map(),
+    durableDrafts: store, attachments: {snapshot: () => [], move: noop}, mentions: {sent: noop}, sourceWindowId: "origin"});
+  f.state.config.sessionCreationReceipts = capable ? 1 : 0;
+  f.state.outgoing.node = (document, row) => row;
+  Object.assign(f.context, {crypto: {randomUUID: (() => {let sequence = 0; return () => "key-" + (++sequence);})()},
+    document: {}, api, replaceTimelineContent: row => {f.lastEcho = row;}, composerDraftId: () => projectId,
+    savedViews: null, conversationEntry: () => ({}), sessionPath: id => "sessions/" + id,
+    refreshList: async () => {}, refreshDetail: async () => {}, isSessionDraft: () => true, select: async id => {f.state.selected = id;}});
+  vm.runInContext(creationSource + "\n" + section(app, "async function sendSessionDraft(", '$("new-session").onclick'), f.context);
+  f.input.ownerDocument = {};
+  return {...f, projectId, draft};
+}
+
+test("creation and first-message response losses recover separate immutable IDs and preserve the later project edit", async () => {
+  const store = creationStore(), requests = [], effects = new Set(), failCreate = deferred();
+  let loseCreate = true, loseMessage = true;
+  const api = async (path, body) => {
+    requests.push([path, body.requestId]); effects.add(path + body.requestId);
+    if (path === "sessions") {
+      if (loseCreate) {loseCreate = false; return failCreate.promise;}
+      return {session: {thread_id: "created"}, thread: {turns: []}};
+    }
+    if (loseMessage) {loseMessage = false; throw Object.assign(new Error("Lost message response"), {status: 502});}
+    return {};
+  };
+  const first = creationWindow(store, api);
+  first.input.value = "first";
+  await store.write(first.projectId, {text: "first", images: [], mentions: []});
+  const start = first.context.sendSessionDraft("first", []);
+  assert.equal(first.input.value, "");
+  await first.context.drainComposerWrites();
+  assert.equal((await store.pending(first.projectId))[0].text, "first");
+  await first.context.writeComposerRecord(first.projectId, () => store.write(first.projectId, {text: "second"}));
+  first.state.projectDrafts.set("/work", {detail: first.draft, text: "second"});
+  first.state.selected = null; first.state.newSessionDraft = null; first.state.projectCwd = "/other";
+  failCreate.reject(Object.assign(new Error("Response lost"), {status: 502}));
+  await assert.rejects(start, {status: 502});
+  const second = creationWindow(store, api);
+  second.state.selected = null; second.state.newSessionDraft = null; second.state.projectCwd = "/other";
+  await second.context.recoverWorkspaceOutbox();
+  for (let i = 0; i < 6; i++) await tick();
+  assert.equal((await store.pending(first.projectId)).length, 0);
+  assert.equal((await store.pending("created"))[0].text, "first");
+  assert.equal((await store.read("created")).text, "second");
+  const third = creationWindow(store, api);
+  await third.context.recoverWorkspaceOutbox();
+  await tick();
+  assert.equal((await store.pending("created")).length, 0);
+  assert.deepEqual(requests.map(pair => pair[0]), ["sessions", "sessions", "sessions/created/messages", "sessions/created/messages"]);
+  assert.equal(requests[0][1], requests[1][1]);
+  assert.equal(requests[2][1], requests[3][1]);
+  assert.notEqual(requests[0][1], requests[2][1]);
+  assert.equal(effects.size, 2);
+});
+
+test("a predecessor's unresolved session creation stays journaled after upgrade without a second provider call", async () => {
+  const store = creationStore(), calls = [];
+  const api = async (path, body) => {calls.push(body); throw Object.assign(new Error("Lost"), {status: 502});};
+  const first = creationWindow(store, api, false);
+  first.input.value = "first";
+  await assert.rejects(first.context.sendSessionDraft("first", []), {status: 502});
+  assert.equal(Object.hasOwn(calls[0], "requestId"), false);
+  const reopened = creationWindow(store, api, true);
+  await reopened.context.recoverWorkspaceOutbox();
+  await tick();
+  assert.equal(calls.length, 1);
+  assert.equal((await store.pending(first.projectId)).length, 1);
+  assert.equal(reopened.state.creationIntents.get(first.projectId).status, "uncertain");
+});
+
+test("second Enter cannot overtake a prior echo whose discovery failed before its stage committed", async () => {
+  const f = environment(), gate = deferred(), recorded = [];
+  let reads = 0;
+  f.state.durableDrafts.pending = async () => {
+    if (!reads++) throw Error("Unavailable");
+    return recorded.slice();
+  };
+  f.state.durableDrafts.stage = async (id, key, row) => {await gate.promise; recorded.push(row);};
+  await assert.rejects(f.send("one", "first"), /Unavailable/);
+  const second = f.send("one", "second");
+  await tick();
+  assert.equal(f.effects.length, 0);
+  gate.resolve(); await second;
+  assert.deepEqual(f.effects, ["first", "second"]);
+});
+
+test("a browser without locks grants its scope only to the document following its own pagehide", async () => {
+  const f = environment();
+  let sequence = 0;
+  function open(seed) {
+    const events = new Map(), store = new Map(seed), view = {navigator: {}, crypto: {randomUUID: () => String(++sequence)},
+      addEventListener: (name, handler) => events.set(name, handler),
+      sessionStorage: {getItem: key => store.get(key), setItem: (key, value) => store.set(key, value), removeItem: key => store.delete(key)}};
+    return {store, events, view};
+  }
+  const first = open(), id = await f.context.composerWindowScope(first.view);
+  const duplicate = open(first.store);
+  assert.notEqual(await f.context.composerWindowScope(duplicate.view), id);
+  first.events.get("pagehide")();
+  const reload = open(first.store);
+  assert.equal(await f.context.composerWindowScope(reload.view), id);
 });

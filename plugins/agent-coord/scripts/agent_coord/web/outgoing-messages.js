@@ -69,28 +69,16 @@ async function composerWindowScope(view) {
     });
     while (!await occupy(id)) id = allocate();
   } else {
-    // Storage events also work on WebKit versions without Web Locks. Probe
-    // only a previously stored ID; a fresh window never waits for a timeout.
-    const probe = allocate(), key = storageKey + "-probe";
-    let occupied = false;
-    const receive = event => {
-      if (event.key !== key || !event.newValue) return;
-      const [operation, scope, sender] = event.newValue.split("|");
-      if (scope !== id) return;
-      if (operation === "held" && sender === probe) occupied = true;
-      if (operation === "probe" && sender !== probe)
-        view.localStorage.setItem(key, ["held", id, sender].join("|"));
-    };
-    view.addEventListener("storage", receive);
-    if (previous) {
-      try {
-        view.localStorage.setItem(key, ["probe", id, probe].join("|"));
-        await new Promise(resolve => view.setTimeout(resolve, 40));
-        if (occupied) id = allocate();
-      } catch {
-        if (view.performance.getEntriesByType("navigation")[0]?.type !== "reload") id = allocate();
-      }
-    }
+    // An active tab never exposes a reusable ID for a clone. The departing
+    // document grants its own successor a one-use handoff during navigation.
+    // A throttled background tab cannot accidentally grant ownership by silence.
+    const handoff = storageKey + "-handoff";
+    try {
+      if (!previous || view.sessionStorage.getItem(handoff) !== previous) id = allocate();
+      view.sessionStorage.removeItem(handoff);
+      view.addEventListener("pagehide", () => view.sessionStorage.setItem(handoff, id));
+      view.addEventListener("pageshow", () => view.sessionStorage.removeItem(handoff));
+    } catch { id = allocate(); }
   }
   try { view.sessionStorage.setItem(storageKey, id); } catch { /* Document-scoped storage. */ }
   return id;
@@ -110,7 +98,10 @@ function writeComposerRecord(id, write, field = "draft") {
 }
 
 async function drainComposerWrites() {
-  while (state.composerWrites?.size) await Promise.all(state.composerWrites.values());
+  while (state.composerWrites?.size) {
+    for (const proceed of state.composerPaints || []) proceed();
+    await Promise.all(state.composerWrites.values());
+  }
   const failed = state.composerWriteFailures?.values().next().value;
   if (failed) throw failed;
   return true;
@@ -118,8 +109,11 @@ async function drainComposerWrites() {
 
 function afterComposerPaint() {
   return new Promise(resolve => {
-    const timer = setTimeout(resolve, 100);
-    if (!document.hidden) requestAnimationFrame(() => setTimeout(() => { clearTimeout(timer); resolve(); }, 0));
+    const paints = state.composerPaints ||= new Set();
+    function finish() { clearTimeout(timer); paints.delete(finish); resolve(); }
+    const timer = setTimeout(finish, 100);
+    paints.add(finish);
+    if (!document.hidden) requestAnimationFrame(() => setTimeout(finish, 0));
   });
 }
 
@@ -161,7 +155,10 @@ function discoverComposerSubmissions(id) {
   const discoveries = state.outboxDiscoveries ||= new Map();
   if (discoveries.has(id)) return discoveries.get(id);
   const discovery = state.durableDrafts.pending(id).then(pending => {
+    const live = state.discoveringSubmissions?.get(id);
     for (const row of pending) {
+      if (live?.has(row.requestId)) continue;
+      if (row.path === "sessions" && row.body?.creationIntent) { restoreCreationIntent(id, row); continue; }
       const echo = state.outgoing.list(id).find(item => item.submissionId === row.requestId) ||
         state.outgoing.add(id, {text: row.text, images: row.images.length, submissionId: row.requestId});
       if (echo.acceptance || echo.transferReceipt) {
@@ -173,10 +170,16 @@ function discoverComposerSubmissions(id) {
       state.submissionQueue.reserve(id, row.requestId);
       if (echo.awaitingDiscovery) continue;
       echo.status = "uncertain";
-      if (state.config.ordinarySubmissionReceipts === 1 || echo.discoveryFailed) {
+      if (state.config.ordinarySubmissionReceipts === 1 && row.body?.client_message_id === row.requestId || echo.discoveryFailed) {
         echo.retry = () => deliverComposerSubmission(id, row, echo).catch(showError);
         echo.retry();
       }
+    }
+    // Local Enter events can precede the journal commit as well as its read.
+    // Put the entire live suffix behind restored rows in its original order.
+    for (const {row, echo, staged} of live?.values() || []) {
+      state.submissionQueue.reserve(id, row.requestId);
+      if (echo.discoveryFailed && !echo.awaitingDiscovery) deliverComposerSubmission(id, row, echo, staged).catch(showError);
     }
     updateOutgoing(id);
   }).catch(error => { discoveries.delete(id); throw error; });
@@ -209,6 +212,9 @@ function submissionOutcomeUnknown(error) {
 }
 
 async function deliverComposerSubmission(id, row, echo, staged) {
+  const live = state.discoveringSubmissions?.get(id);
+  live?.delete(row.requestId);
+  if (live && !live.size) state.discoveringSubmissions.delete(id);
   return state.submissionQueue.submit(id, row.requestId, async () => {
     if (echo.deliveryResult) return echo.deliveryResult;
     let posted = false, accepted = false;
@@ -280,6 +286,10 @@ function submitComposerMessage({id, requestId = crypto.randomUUID(), text, image
     if (large) await firstPaint;
     return state.durableDrafts?.stage(id, requestId, row);
   }, requestId);
+  const discovering = state.discoveringSubmissions ||= new Map();
+  let live = discovering.get(id);
+  if (!live) discovering.set(id, live = new Map());
+  live.set(requestId, {row, echo, staged});
   onStage?.(staged);
   staged?.catch(() => {}); // The queue observes the failure when this write reaches its turn.
   state.clearingSubmission = id;
