@@ -2533,11 +2533,15 @@ class BrowserSessions:
     def _authorize_history(self, thread_id):
         """Use overview visibility without provider access or a browser row."""
         with self.store.reading(), self.store._connection() as db:
-            row = db.execute("""SELECT s.cwd FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
-                WHERE t.thread_id=? AND NOT EXISTS (SELECT 1 FROM delegations d
+            browser = has_table(db, "browser_sessions")
+            fields = "s.cwd, b.thread_id, b.cwd" if browser else "s.cwd, NULL, NULL"
+            join = "LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id" if browser else ""
+            row = db.execute(f"""SELECT {fields} FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
+                {join} WHERE t.thread_id=? AND NOT EXISTS (SELECT 1 FROM delegations d
                 JOIN work_threads parent ON parent.thread_id=d.parent_session_id WHERE d.child_session_id=t.thread_id)""",
                 (thread_id,)).fetchone()
-        if row is None or not matches_workspace(row[0], self.cwd):
+        if (row is None or not matches_workspace(row[0], self.cwd)
+                or (row[1] is not None and not matches_workspace(row[2], self.cwd))):
             raise CoordinationError("Work thread not found in this workspace.")
 
     def read_history_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):

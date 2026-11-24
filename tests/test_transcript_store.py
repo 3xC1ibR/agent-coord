@@ -164,7 +164,22 @@ class TranscriptStoreTests(unittest.TestCase):
         self.assertEqual(browser.read_history_window("thread", turn_id="20", limit=5)["turns"][-1]["id"], "20")
         self.assertEqual(browser.read_history_turn("thread", "20"), self.history["turns"][20])
         self.assertIsNone(browser.read_history_window("thread", turn_id="missing"))
-        browser.cwd = str(self.store.database_path.parent / "elsewhere")
+        outside = str(self.store.database_path.parent / "elsewhere")
+        with self.store._connection() as db:
+            db.execute("CREATE TABLE browser_sessions(thread_id TEXT PRIMARY KEY, cwd TEXT)")
+            db.execute("INSERT INTO browser_sessions VALUES ('thread', ?)", (outside,))
+        with self.assertRaises(CoordinationError):
+            browser.read_history_window("thread")
+        with self.assertRaises(CoordinationError):
+            browser.read_history_turn("thread", "20")
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_sessions SET cwd=?", (browser.cwd,))
+            db.execute("UPDATE sessions SET cwd=? WHERE session_id='thread'", (outside,))
+        with self.assertRaises(CoordinationError):
+            browser.read_history_window("thread")
+        with self.assertRaises(CoordinationError):
+            browser.read_history_turn("thread", "20")
+        browser.cwd = outside
         with self.assertRaises(CoordinationError):
             browser.read_history_window("thread")
         with self.assertRaises(CoordinationError):
