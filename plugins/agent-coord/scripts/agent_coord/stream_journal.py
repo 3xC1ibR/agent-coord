@@ -60,11 +60,11 @@ class StreamJournal:
                     self.sequence = sequence
                     self.records.append((sequence, path, offset, len(line), event['size']))
                     self.event_bytes += event['size']
+        if self.acknowledged > self.sequence:
+            raise ValueError('Stream journal acknowledgement exceeds durable tail')
         if files:
             self.path = files[-1]
             self.fd = os.open(self.path, os.O_RDWR)
-        if self.acknowledged > self.sequence:
-            raise ValueError('Stream journal acknowledgement exceeds durable tail')
 
     def _sync_directory(self):
         fd = os.open(self.directory, os.O_RDONLY)

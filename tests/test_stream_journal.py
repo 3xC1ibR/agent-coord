@@ -17,7 +17,13 @@ class StreamJournalTests(unittest.TestCase):
 
     def journal(self):
         journal = Journal(self.directory, file_events=True)
-        self.addCleanup(journal.close)
+        self.addCleanup(lambda: journal.close() if journal.db is not None else None)
+        original_close = journal.close
+        def close_once():
+            if journal.db is not None:
+                original_close()
+                journal.db = None
+        journal.close = close_once
         return journal
 
     def test_transport_deltas_and_acknowledgement_never_write_sqlite(self):
@@ -89,3 +95,20 @@ class StreamJournalTests(unittest.TestCase):
         reopened = Journal(self.directory / 'legacy')
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.events(0)[0]['data'], 'old event')
+
+    def test_reopen_detects_spool_without_a_caller_flag(self):
+        journal = self.journal()
+        journal.append('channel', 'stdout', 'retained')
+        journal.close()
+        reopened = Journal(self.directory)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.events(0)[0]['data'], 'retained')
+        self.assertEqual(reopened.bounds()['event_storage'], 'file')
+
+    def test_cannot_convert_a_pruned_legacy_sequence_space(self):
+        legacy = Journal(self.directory)
+        legacy.append('channel', 'stdout', 'retained')
+        legacy.acknowledge_events(1, retain_after=1)
+        legacy.close()
+        with self.assertRaisesRegex(TransportError, 'new transport generation'):
+            Journal(self.directory, file_events=True)

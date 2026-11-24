@@ -212,7 +212,7 @@ def retire_dead_owner(directory, record, before_retire):
 class Journal:
     """Single-owner WAL; command intent precedes every irreversible pipe write."""
 
-    def __init__(self, directory, *, file_events=False):
+    def __init__(self, directory, *, file_events=None):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.directory, 0o700)
@@ -261,10 +261,17 @@ class Journal:
         self.event_bytes = self.db.execute("SELECT COALESCE(SUM(size),0) FROM events").fetchone()[0]
         self.receipt_count = self.db.execute("SELECT count(*) FROM commands").fetchone()[0]
         from .stream_journal import StreamJournal
-        self.spool = StreamJournal(self.directory / "events") if file_events else None
-        if self.spool is not None:
-            if self.event_bytes:
+        spool_directory = self.directory / "events"
+        use_spool = file_events is True or spool_directory.exists()
+        try:
+            prior_sequence = self.db.execute("SELECT seq FROM sqlite_sequence WHERE name='events'").fetchone()
+            if use_spool and prior_sequence and prior_sequence[0]:
                 raise TransportError("File event spool requires a new transport generation.")
+            self.spool = StreamJournal(spool_directory) if use_spool else None
+        except BaseException:
+            self.db.close()
+            raise
+        if self.spool is not None:
             self.event_bytes = self.spool.event_bytes
 
     def sequence(self):
@@ -279,7 +286,7 @@ class Journal:
             bounds = ({"acknowledged": self.spool.acknowledged, "retained_after": self.spool.retained_after}
                       if self.spool is not None else
                       dict(self.db.execute("SELECT acknowledged,retained_after FROM journal_bounds").fetchone()))
-            return {**bounds,
+            return {**bounds, "event_storage": "file" if self.spool is not None else "sqlite",
                     "event_bytes": self.event_bytes, "event_limit_bytes": MAX_JOURNAL_BYTES,
                     "receipt_count": self.receipt_count, "receipt_limit": MAX_RECEIPTS}
 
@@ -784,7 +791,7 @@ class Owner:
         server.timeout = .2
         record = {"url": f"http://127.0.0.1:{server.server_port}/", "token": self.token,
                   "instance": self.instance, "protocol": PROTOCOL, "pid": os.getpid(),
-                  "boot_id": self.boot_id, "journal_generation": self.instance}
+                  "boot_id": self.boot_id, "journal_generation": self.instance, "event_storage": "file"}
         atomic_record(self.directory / "owner.json", record)
         try:
             while not self.stopping.is_set():
