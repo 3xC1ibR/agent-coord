@@ -82,6 +82,96 @@ class PluginToolsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 tools.marketplace_name(path)
 
+    def development_homes(self):
+        codex = self.root / "codex"
+        claude = self.root / "claude"
+        codex_cache = codex / "plugins/cache/personal/agent-coord"
+        claude_cache = claude / "plugins/cache/agent-coord/agent-coord"
+        old_claude = claude_cache / "0.1.0"
+        old_claude.mkdir(parents=True)
+        registry = claude / "plugins/installed_plugins.json"
+        registry.write_text(json.dumps({"version": 2, "plugins": {
+            "agent-coord@agent-coord": [{"scope": "user", "version": "0.1.0", "installPath": str(old_claude)}],
+            "another@catalog": [{"scope": "project"}]}}))
+        previous = codex_cache / "0.1.0+codex.1"
+        (previous / ".codex-plugin").mkdir(parents=True)
+        (previous / ".codex-plugin/plugin.json").write_text('{"name":"agent-coord","version":"0.1.0+codex.1"}')
+        (previous / "scripts/web").mkdir(parents=True)
+        hook = previous / "scripts/hook"
+        hook.write_text("#!/bin/sh\nprintf 'original hook'\n")
+        hook.chmod(0o755)
+        (previous / "scripts/web/openui.js").write_text("original assets")
+        return {"codex_home": codex, "claude_home": claude, "share": self.root / "shared"}, previous, registry
+
+    def test_dev_link_shares_live_assets_without_rewriting_source_or_pinned_code(self):
+        homes, previous, registry = self.development_homes()
+        manifest = self.plugin / ".codex-plugin/plugin.json"
+        source_manifest = manifest.read_bytes()
+        second = previous.with_name("0.1.0+codex.2")
+        shutil.copytree(previous, second)
+        (second / "scripts/hook").write_text("#!/bin/sh\nprintf 'second hook'\n")
+        old_directory = previous.stat().st_ino
+        original_config = json.loads(registry.read_bytes())
+        result = tools.dev_link(self.plugin, prune=True, **homes)
+        self.assertEqual(result["prunedCodexDirectories"], 2)
+        self.assertGreater(result["deduplicatedBytes"], 0)
+        self.assertEqual(manifest.read_bytes(), source_manifest)
+        self.assertTrue(previous.is_symlink())
+        self.assertEqual(old_directory, previous.stat().st_ino)
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+        self.assertEqual(subprocess.check_output([second / "scripts/hook"]), b"second hook")
+        self.assertTrue((previous / "scripts/web/openui.js").samefile(second / "scripts/web/openui.js"))
+        self.assertEqual((previous / "scripts/web/openui.js").read_text(), "original assets")
+        updated = json.loads(registry.read_bytes())
+        self.assertEqual(updated["plugins"]["another@catalog"], original_config["plugins"]["another@catalog"])
+        self.assertEqual(updated["plugins"]["agent-coord@agent-coord"][0]["installPath"], result["claude"])
+        self.assertTrue(Path(original_config["plugins"]["agent-coord@agent-coord"][0]["installPath"]).is_dir())
+        source = self.plugin / "skills/agent-coordination/SKILL.md"
+        source.write_text(source.read_text() + "\nUpdated development text.\n")
+        assets = Path("scripts/agent_coord/web/vendor/openui/openui-bundle.min.js")
+        for key in ("codex", "claude"):
+            cache = Path(result[key])
+            self.assertFalse((cache / ".codex-plugin").is_symlink())
+            self.assertFalse((cache / ".codex-plugin/plugin.json").is_symlink())
+            self.assertTrue((cache / assets).samefile(self.plugin / assets))
+            self.assertEqual((cache / source.relative_to(self.plugin)).read_text(), source.read_text())
+            self.assertGreater(tools.verify(self.plugin, cache), 10)
+        retry = tools.dev_link(self.plugin, prune=True, **homes)
+        self.assertEqual(retry["version"], result["version"])
+        self.assertEqual(retry["prunedCodexDirectories"], 0)
+
+    @unittest.skipUnless(shutil.which("codex"), "requires the Codex CLI")
+    def test_codex_app_server_discovers_development_skills(self):
+        from test_browser_providers import CoordinationStore
+        from agent_coord.codex_app_server import CodexRPC
+
+        homes, _, _ = self.development_homes()
+        tools.dev_link(self.plugin, **homes)
+        home = homes["codex_home"]
+        (home / "config.toml").write_text(
+            '[marketplaces.personal]\nsource_type = "local"\nsource = ' + json.dumps(str(ROOT)) +
+            '\n[plugins."agent-coord@personal"]\nenabled = true\n')
+        with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            rpc = CodexRPC(CoordinationStore(self.root / "test.sqlite3"), lambda *args: None)
+            try:
+                result = rpc.request("skills/list", {"cwds": [str(self.root)], "forceReload": True})
+            finally:
+                rpc.close()
+        skills = {skill["name"]: Path(skill["path"]).resolve() for group in result["data"]
+                  for skill in group["skills"] if skill["enabled"]}
+        for skill in (self.plugin / "skills").iterdir():
+            self.assertEqual(skills["agent-coord:" + skill.name], (skill / "SKILL.md").resolve())
+
+    def test_interrupted_cache_exchange_keeps_pinned_hook_and_can_resume(self):
+        homes, previous, _ = self.development_homes()
+        with patch.object(tools, "_exchange_paths", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                tools.dev_link(self.plugin, prune=True, **homes)
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+        result = tools.dev_link(self.plugin, prune=True, **homes)
+        self.assertEqual(result["prunedCodexDirectories"], 1)
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+
     def test_install_never_exposes_pinned_paths_to_installer_pruning(self):
         cache = self.root / "plugins/cache/personal/agent-coord"
         old = cache / "old-version"

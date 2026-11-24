@@ -7,14 +7,18 @@ Client installation and Claude's strict validator remain part of the workflow.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+from stat import S_ISREG
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -161,12 +165,183 @@ def install_codex(marketplace: str, *, codex_home: Path | None = None) -> dict:
             return receipt
 
 
+def _exchange_paths(left: Path, right: Path) -> None:
+    """Exchange a pinned directory and its forwarding link without a lookup gap."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    names = (os.fsencode(left), os.fsencode(right))
+    if sys.platform == "darwin":
+        result = libc.renamex_np(*names, 2)  # RENAME_SWAP
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        result = libc.renameat2(-100, names[0], -100, names[1], 2)  # RENAME_EXCHANGE
+    else:
+        raise ValueError("Atomic exchange is unavailable. Run dev-link without --prune.")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(left))
+
+
+def _prune_cached_versions(cache: Path, development: Path, retained: Path) -> dict:
+    """Keep every original directory inode and path usable by existing processes."""
+    retained.mkdir(parents=True, exist_ok=True)
+    moved = shared_bytes = 0
+    identical = {}
+    for version in sorted(cache.iterdir()):
+        if version == development or not VERSION.fullmatch(version.name):
+            continue
+        archive = retained / version.name
+        if version.is_symlink():
+            if version.readlink() != archive or not archive.is_dir():
+                continue
+        else:
+            if not version.is_dir():
+                continue
+            manifest = version / ".codex-plugin/plugin.json"
+            if not manifest.is_file() or read_object(manifest).get("name") != "agent-coord":
+                continue
+            # The exchange puts the original tree exactly where this link points.
+            # A process killed on either side leaves the version fully usable.
+            if not archive.is_symlink():
+                archive.symlink_to(archive, target_is_directory=True)
+            if archive.readlink() != archive:
+                raise ValueError(f"Unexpected retained version path: {archive}")
+            _exchange_paths(archive, version)
+            moved += 1
+        # Published versions are immutable. Share identical file data while
+        # retaining each version's file modes, timestamps, manifest and imports.
+        with tempfile.TemporaryDirectory(dir=retained) as scratch:
+            link = Path(scratch, "file")
+            for directory, directories, files in os.walk(archive):
+                directories[:] = [name for name in directories if name != "__pycache__"]
+                for name in files:
+                    path = Path(directory, name)
+                    status = path.lstat()
+                    if not S_ISREG(status.st_mode) or name.endswith(".pyc"):
+                        continue
+                    key = (status.st_size, status.st_mode, status.st_uid, status.st_gid, status.st_mtime_ns,
+                           hashlib.sha256(path.read_bytes()).digest())
+                    original = identical.setdefault(key, path)
+                    if original == path or original.samefile(path):
+                        continue
+                    os.link(original, link)
+                    os.replace(link, path)
+                    shared_bytes += status.st_size
+    return {"prunedCodexDirectories": moved, "deduplicatedBytes": shared_bytes}
+
+
+def _write_development_shim(plugin: Path, current: Path, target: Path) -> None:
+    for path in plugin.iterdir():
+        entry = target / path.name
+        if path.name in {"scripts", "skills"}:
+            if not os.path.lexists(entry):
+                entry.symlink_to(current / path.name, target_is_directory=True)
+            elif not entry.is_symlink() or entry.readlink() != current / path.name:
+                raise ValueError(f"Unmanaged component in development installation: {entry}")
+            continue
+        # Codex skips a cached plugin with an external symlink for its manifest.
+        # Keep client metadata and hook registrations as ordinary files.
+        for source in path.rglob("*") if path.is_dir() else (path,):
+            if not source.is_file():
+                continue
+            destination = target / source.relative_to(plugin)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.is_file() and destination.read_bytes() == source.read_bytes():
+                continue
+            with tempfile.TemporaryDirectory(dir=target) as scratch:
+                copy = Path(scratch, "metadata")
+                shutil.copy2(source, copy)
+                os.replace(copy, destination)
+
+
+def _publish_development_shim(plugin: Path, current: Path, target: Path) -> None:
+    scripts = target / "scripts"
+    if target.is_dir() and scripts.is_symlink() and scripts.readlink() == current / "scripts":
+        _write_development_shim(plugin, current, target)
+        return
+    if os.path.lexists(target):
+        raise ValueError(f"Development version collides with an existing cache: {target}")
+    with tempfile.TemporaryDirectory(dir=target.parent) as name:
+        staging = Path(name, "plugin")
+        staging.mkdir()
+        _write_development_shim(plugin, current, staging)
+        os.rename(staging, target)
+
+
+def dev_link(plugin: Path, *, prune=False, codex_home=None, claude_home=None, share=None) -> dict:
+    """Switch new client sessions to the checkout. Preserve all previous paths."""
+    plugin = plugin.resolve()
+    validate(plugin)
+    codex_home = Path(codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
+    claude_home = Path(claude_home or os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).expanduser().resolve()
+    share = Path(share or Path.home() / ".local/share/agent-coord").expanduser().resolve()
+    current = share / "current"
+    marketplace = marketplace_name(ROOT / ".agents/plugins/marketplace.json")
+    codex_cache = codex_home / "plugins/cache" / marketplace / "agent-coord"
+    claude_cache = claude_home / "plugins/cache/agent-coord/agent-coord"
+    if not codex_cache.is_dir() or not claude_cache.is_dir():
+        raise ValueError("Install the Agent Coord marketplace plugin in both clients before running dev-link.")
+    share.mkdir(parents=True, exist_ok=True)
+    # Share the Codex installation lock with the immutable release installer.
+    with (codex_home / ".agent-coord-plugin-install.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        registry = claude_home / "plugins/installed_plugins.json"
+        before = registry.read_bytes()
+        data = json.loads(before)
+        if data.get("version") != 2:
+            raise ValueError("Unrecognized Claude plugin registry format.")
+        rows = [row for row in data["plugins"].get("agent-coord@agent-coord", []) if row["scope"] == "user"]
+        if len(rows) != 1 or not VERSION.fullmatch(rows[0]["version"]):
+            raise ValueError("Expected a user installation of agent-coord@agent-coord.")
+        row = rows[0]
+        previous = claude_cache / row["version"]
+        if Path(row["installPath"]).resolve() != previous.resolve() or not previous.is_dir():
+            raise ValueError("Unexpected Claude plugin installation path.")
+        installed = [p for p in codex_cache.iterdir() if VERSION.fullmatch(p.name) and p.is_dir()]
+        if not installed:
+            raise ValueError("Codex has no installed Agent Coord version.")
+        if current.exists() and not current.is_symlink():
+            raise ValueError(f"Unmanaged development pointer: {current}")
+        with tempfile.TemporaryDirectory(dir=share) as temporary:
+            pointer = Path(temporary, "current")
+            pointer.symlink_to(plugin, target_is_directory=True)
+            os.replace(pointer, current)
+        base = VERSION.fullmatch(read_object(plugin / ".codex-plugin/plugin.json")["version"]).group(1)
+        # A subsequent immutable installation supersedes a development version.
+        # Reuse the shim only while it is the newest installation for this base.
+        candidates = [path for path in installed if VERSION.fullmatch(path.name).group(1) == base]
+        latest = max(candidates, key=lambda path: int(path.name.partition("+codex.")[2] or 0), default=None)
+        scripts = latest / "scripts" if latest else None
+        if scripts and not latest.is_symlink() and scripts.is_symlink() and scripts.readlink() == current / "scripts":
+            version = latest.name
+        else:
+            version = base + "+codex." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        codex = codex_cache / version
+        claude = claude_cache / version
+        _publish_development_shim(plugin, current, codex)
+        _publish_development_shim(plugin, current, claude)
+        if row["version"] != version:
+            row.update(version=version, installPath=str(claude),
+                       lastUpdated=datetime.now(timezone.utc).isoformat())
+            with tempfile.TemporaryDirectory(dir=registry.parent) as name:
+                updated = Path(name, "installed_plugins.json")
+                updated.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                updated.chmod(registry.stat().st_mode & 0o777)
+                if registry.read_bytes() != before:
+                    raise ValueError("Claude plugin configuration changed; retry dev-link.")
+                os.replace(updated, registry)
+        result = {"current": str(current), "version": version, "codex": str(codex), "claude": str(claude)}
+        if prune:
+            result.update(_prune_cached_versions(codex_cache, codex, share / "retained" / marketplace))
+        return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plugin", type=Path, default=PLUGIN)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     commands.add_parser("cachebuster")
+    development = commands.add_parser("dev-link", help="Use one checkout for local Codex and Claude development")
+    development.add_argument("--prune", action="store_true", help="Compact old Codex versions, preserving pinned paths")
     install = commands.add_parser("install-codex")
     install.add_argument("marketplace")
     marketplace = commands.add_parser("marketplace-name")
@@ -179,6 +354,8 @@ def main() -> None:
             print(marketplace_name(args.marketplace_path))
         elif args.command == "install-codex":
             print(json.dumps(install_codex(args.marketplace), indent=2))
+        elif args.command == "dev-link":
+            print(json.dumps(dev_link(args.plugin, prune=args.prune), indent=2))
         elif args.command == "cachebuster":
             print(cachebuster(args.plugin))
         elif args.command == "verify":

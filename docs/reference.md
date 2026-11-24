@@ -2198,10 +2198,39 @@ activate app lifecycle recording in an already-running backend.
 
 ## Refresh installed plugins after changes
 
-Run this workflow after a change under `plugins/agent-coord/`, including a
-change to a skill, hook, script, or manifest. Initial marketplace installation
-is not part of the update loop. Do not hand-edit `marketplace.json`, Codex
-configuration, or the cachebuster suffix.
+For local development on an existing Codex and Claude installation, run the
+validation commands in **Develop and validate**, then run these commands from
+the checkout:
+
+```bash
+python3 scripts/plugin_tools.py dev-link --prune
+"$HOME/.local/share/agent-coord/current/scripts/agent-coord" install-cli
+codex plugin list --marketplace personal --json
+claude plugin list --json
+```
+
+The installer prints the selected development version and both cache paths.
+Check that both clients report this version. Start fresh Codex and Claude
+sessions to exercise updated skill discovery and hook registrations. Each
+development cache reads scripts, skills and the bundled OpenUI assets through
+`~/.local/share/agent-coord/current`. Future source edits take effect at those
+paths immediately. Rerun `dev-link` after changing client manifests or hook registrations.
+The committed manifests retain their existing versions.
+
+Previously installed versions remain usable by sessions that loaded them. The
+optional `--prune` exchanges old Codex cache directories for links to their
+original contents in `~/.local/share/agent-coord/retained` and shares storage
+for identical files. Existing paths, working directories and version-specific
+code continue to work throughout the exchange. This operation requires a
+filesystem with atomic directory exchange on macOS or Linux and the cache
+and retained directory on the same volume. The installed desktop backend continues to own live requests until its
+ordinary backend update.
+
+### Install an immutable plugin snapshot
+
+Use a versioned installation when clients should load packaged snapshots.
+Initial marketplace installation is separate. Keep `marketplace.json`, client
+configuration and the cachebuster suffix under the installer’s control.
 
 First, run the validation commands in **Develop and validate**. Then run these
 commands from the repository root:
