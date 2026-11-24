@@ -26,40 +26,66 @@ not the legacy one-time interruption below. Public publication remains a
 separate outcome; an installed app or a passing CI run alone does not establish
 published customer updates.
 
-## Keeping local conversations available during a full-database upgrade
+## Stable local origin during coordinator replacement
 
-The macOS interface can stage an interaction gateway from the retained signed
-candidate while the original coordinator still serves. Its loopback origin stays
-stable while the old supervisor closes its listeners and copies the rollback
-database. The original coordinator remains the sole owner of provider processes,
-approvals, scheduling and the live database. The gateway reads committed
-conversation snapshots and identifies them as saved. During the handover, search
-reports its bounded coverage. An action that requires the coordinator returns
-an explicit refusal if the coordinator cannot receive it.
+The interface uses `--runtime-stable-origin` to attach to the permanent loopback
+edge. The edge retains the browser origin and credential while the authenticated
+serving coordinator changes. It forwards the ordinary UI routes, bundled assets,
+conversation opens and event streams without maintaining a second conversation
+projection. The native shell observes its private health endpoint and keeps the
+same window URL across coordinator generations.
 
-An explicit backend update binds the original coordinator instance, candidate
-payload and update request ID. While the interface is attached to an older coordinator, the gateway acknowledges
-eligible ordinary messages after committing the original request and expected turn
-to its private intake. It forwards staged messages to the original owner one at
-a time. Preparation stops new legacy deliveries and waits for already dispatched
-work to reach a canonical outcome. The listener remains available throughout
-this wait. After the switch, independent conversations drain concurrently in
-receipt order within each conversation. The normal
-provider receipt on the authenticated receiving coordinator determines delivery.
-The gateway can reissue the same ordinary transfer only to a receiver that
-reserves the same request before any provider operation. An ambiguous native
-outcome stays visible for reconciliation. Rollback to an older receiver permits
-a single delivery attempt. Stop Work and Quit and pending approvals retain their
-existing authority.
+The receiving coordinator owns ordinary composer acceptance and its canonical
+submission receipts. The edge may wait briefly for a fenced route to reopen;
+it does not acknowledge a new message by writing a separate intake database.
+A lost reply does not authorize repeating a provider operation. Existing request
+identity and receipt checks continue to determine whether work was accepted.
 
-Use the retained candidate helper with `--runtime-interaction-continuity` for both
-staging and activation. The native interface selects that path automatically.
-Compare the independent interaction URL and the serving coordinator URL, then
-verify both on the exact signed candidate under continuous opens, sends and
-streaming. A successful backup or a successful standalone candidate run leaves
-the upgrade test outstanding. Inspect `interaction_settled` and the committed
-payload before returning the interface to the coordinator. Retire the settled
-listener through its authenticated control and retain its original receipts.
+The historical `--runtime-interaction-continuity` option selects this stable-edge
+path for a new attachment. The successor does not create an interaction gateway.
+Once the native shell binds the stable origin, a later status cannot send it back
+to a predecessor gateway or reload it solely because the coordinator PID changed.
+
+A running runtime advertising `unbrokered_provider_wait: 1` retains supported
+Codex, Claude, Kimi, Muse and Antigravity channels. Work still owned by an older
+coordinator reaches its natural idle boundary before adoption. The native update
+disclosure uses that running capability; earlier signed-98 explicit-interruption
+and pre-98 restart disclosures retain their own behavior.
+
+### Existing predecessor intake and first adoption
+
+An already recorded predecessor gateway can still own accepted messages or an
+unfinished authorization. The successor delegates observation and recovery to
+that service's exact retained, manifest-verified payload. It does not select a
+new gateway target, replace its source instance or discard its receipt database.
+Keep every retained payload referenced by an active gateway or replacement
+record. Missing identity, changed source bytes or an unavailable retained helper
+fails closed and leaves the original intake available for recovery.
+
+The predecessor's original contract remains in force: an explicit backend update
+binds the original coordinator instance, candidate payload and update request ID.
+Eligible ordinary messages are acknowledged only after the original request and
+expected turn commit to private intake. Preparation stops new legacy deliveries
+and waits for dispatched work to reach a canonical outcome. After the switch,
+independent conversations drain concurrently in receipt order within each
+conversation. The normal provider receipt on the authenticated receiving
+coordinator determines delivery. Reissuing the same transfer requires a receiver
+that reserves that request before any provider operation; ambiguous native work
+remains visible for reconciliation. An older receiver permits only a single
+attempt. Stop Work and Quit and pending approvals retain their authority.
+
+While this old intake remains unsettled, keep its original origin, request and
+authorization. Do not publish another successor around it. Recovery uses the
+recorded retained signed helper and its original target. Only authenticated
+`interaction_settled` confirmation permits retirement; archive the service's
+original directory and receipt bytes before proceeding through the stable edge.
+The first adoption may therefore require one origin switch after old intake
+settles. Ordinary stable-origin updates do not take that compatibility path.
+
+Historical gateway source and behavioral tests are retained under
+`tests/fixtures/runtime_gateway_predecessor/`; they are excluded from product
+payloads. Exact affected-build and signed-predecessor qualification still uses
+the independent retained signed package.
 
 ## Inbox recovery after a runtime exit
 
@@ -739,8 +765,9 @@ Launch the signed application with `--observe-window-origins /absolute/path/nati
 to enable a read-only Unix socket in a new, user-owned directory with mode `0700`.
 Each connection returns the window IDs, top-level loopback origins and navigation readiness
 sampled from WebKit. Match the socket peer PID to the signed running application, compare
-every window with the staged gateway before activation, then repeat against the committed
-backend. The native smoke test exercises this observation on two windows with independent
+every window with the stable edge before activation, then repeat after the committed
+backend takes over without changing that origin. An existing predecessor gateway may
+switch to the stable edge once, only after its accepted intake has settled. The native smoke test exercises this observation on two windows with independent
 drafts. Run it with `python3 desktop/macos/smoke_test.py --origins-only --app 'Ribbon Field.app'`.
 
 Validation uses isolated databases, runtime directories, and fake providers before
