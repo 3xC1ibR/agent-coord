@@ -81,7 +81,11 @@ def observe_window_moves(app, address, report, deadline):
     last = None
     windows_gone = None
     observer = WindowServerObserver()
-    final_origin = address.parent / "observed-127.0.0.1"
+    directory = address.parent
+    endpoint_file = directory / "origin-endpoints.json"
+    staged_origin = directory / "observed-staged-origin"
+    final_origin = directory / "observed-original-origin"
+    endpoints = None
     while time.monotonic() < deadline:
         if final_origin.exists():
             if report.is_file():
@@ -109,10 +113,13 @@ def observe_window_moves(app, address, report, deadline):
                 last = rows
                 observations.add(rows)
                 origins = {origin for _, origin in rows}
-                if len(origins) == 1:
-                    host = urlsplit(next(iter(origins))).hostname
-                    if host == "localhost" or host == "127.0.0.1" and (address.parent / "observed-localhost").exists():
-                        (address.parent / ("observed-" + host)).touch()
+                if endpoints is None and endpoint_file.is_file():
+                    endpoints = json.loads(endpoint_file.read_bytes())
+                if endpoints and len({identifier for identifier, _ in rows}) == 2:
+                    if origins == {endpoints["staged"]}:
+                        staged_origin.touch()
+                    elif origins == {endpoints["original"]} and staged_origin.exists():
+                        final_origin.touch()
         time.sleep(.025)
     return observations, windows_gone
 
@@ -345,8 +352,12 @@ def main() -> int:
     if args.origins_only:
         result["quit_windows_gone_milliseconds"] = quit_time
         result["quit_window_server_remaining"] = 0
-        port = urlsplit(result["url"]).port
-        expected = {f"http://{host}:{port}/" for host in ("localhost", "127.0.0.1")}
+        expected = set(result["window_origins"].values())
+        if len(expected) != 2 or result["url"] not in expected or any(
+            urlsplit(origin).scheme != "http" or urlsplit(origin).hostname not in {"localhost", "127.0.0.1"}
+            for origin in expected
+        ):
+            raise RuntimeError("Invalid private origins in the native smoke report")
         matching = {}
         for rows in observed:
             ids = tuple(identifier for identifier, _ in rows)

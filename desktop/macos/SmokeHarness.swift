@@ -543,16 +543,38 @@ extension AppDelegate {
     }
 
     @MainActor private func smokeOriginChange(_ item: DesktopWindow) async throws {
-        guard let direct = serverURL, var alternate = URLComponents(url: direct, resolvingAgainstBaseURL: false),
-              direct.host == "127.0.0.1", let directory = smoke.directory else {
+        guard let direct = serverURL, direct.host == "127.0.0.1", let directory = smoke.directory else {
             throw Backend.failure("Missing private loopback runtime for origin change.")
         }
-        // Same disposable coordinator, two distinct WebKit origins. The production
-        // ready handler is responsible for navigation on both sides of the switch.
-        alternate.host = "localhost"
-        guard let staged = alternate.url else { throw Backend.failure("Invalid smoke origin.") }
+        let discovery = directory.appendingPathComponent(".state.sqlite3.runtime/discovery.json")
+        let record = try JSONSerialization.jsonObject(with: Data(contentsOf: discovery)) as? [String: Any]
+        guard let address = record?["url"] as? String, let coordinator = URL(string: address),
+              let port = coordinator.port, address == "http://127.0.0.1:\(port)/" else {
+            throw Backend.failure("Invalid origin from the private coordinator discovery record.")
+        }
+        // The stable edge admits only its exact Host. Use its upstream
+        // coordinator as a distinct genuine origin. Before stable edges,
+        // both loopback hostnames are valid on the direct coordinator port.
+        let staged = coordinator == direct ? URL(string: "http://localhost:\(port)/")! : coordinator
+        let endpoints = ["original": direct.absoluteString, "staged": staged.absoluteString]
+        smoke.results["window_origins"] = endpoints
+        for (label, endpoint) in [("original", direct), ("staged", staged)] {
+            var request = URLRequest(url: endpoint)
+            request.timeoutInterval = 3
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let html = response.mimeType == "text/html" && data.range(of: Data("id=\"message\"".utf8)) != nil
+            smoke.results["origin_change_" + label + "_http"] =
+                ["status": status, "workspace_document": html, "mime_type": response.mimeType ?? "",
+                 "error_body": html ? "" : String(decoding: data.prefix(256), as: UTF8.self)]
+            try smokeCheck("origin_change_" + label + "_delivers_workspace", status == 200 && html)
+        }
         let arguments = CommandLine.arguments
         let flag = arguments.firstIndex(of: "--smoke-observe-origins")
+        if flag != nil {
+            try JSONSerialization.data(withJSONObject: endpoints).write(
+                to: directory.appendingPathComponent("origin-endpoints.json"), options: .atomic)
+        }
         let saved = flag.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
         func workspaceSettled(_ window: DesktopWindow) -> Bool {
             window.navigationReady && !window.restoringWorkspace && !window.navigating &&
@@ -598,8 +620,15 @@ extension AppDelegate {
         func documentState(_ window: DesktopWindow, _ endpoint: URL, text: String) async -> [String: Any]? {
             try? await smokeJS("""
                 const field = document.querySelector('#message');
+                const scope = window.agentCoordDesktop?.windowId;
+                const store = window.agentCoordComposerDrafts || (scope && window.ComposerDrafts?.create({scope}));
+                const journal = store && await store.read(id).catch(() => null);
                 return {origin: location.origin === origin, thread: typeof state === 'object' && state.selected === id,
                   draft: field?.value === text, selection: field?.selectionStart === 2 && field?.selectionEnd === 8,
+                  durableDraft: journal?.text === text, startup: document.documentElement.dataset.startup || '',
+                  contentType: document.contentType, connection: document.querySelector('#connection')?.dataset.state || '',
+                  error: document.querySelector('#error:not([hidden]) span')?.textContent?.trim().slice(0, 256) ||
+                    (!field ? document.body?.textContent?.trim().slice(0, 256) || '' : ''),
                   sending: typeof state === 'object' ? state.sending?.size || 0 : 0,
                   openDialog: !!document.querySelector('dialog[open]')};
                 """, in: window.webView, arguments: ["id": thread, "text": text,
@@ -607,13 +636,14 @@ extension AppDelegate {
         }
         func reached(_ window: DesktopWindow, _ endpoint: URL, text: String, check: String) async -> Bool {
             let started = DispatchTime.now().uptimeNanoseconds
+            let deadline = started + 6_000_000_000
             var page: [String: Any]?
             var matched = false
-            for _ in 0..<120 {
+            while DispatchTime.now().uptimeNanoseconds < deadline {
                 if window.webView.url?.host == endpoint.host && workspaceSettled(window) {
                     page = await documentState(window, endpoint, text: text)
-                    matched = ["origin", "thread", "draft", "selection"].allSatisfy { page?[$0] as? Bool == true }
-                    if matched { break }
+                    matched = ["origin", "thread", "draft", "selection", "durableDraft"].allSatisfy { page?[$0] as? Bool == true }
+                    if matched { matched = DispatchTime.now().uptimeNanoseconds < deadline; break }
                 }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
@@ -637,14 +667,14 @@ extension AppDelegate {
         try smokeCheck("origin_change_independent_drafts", otherStaged)
         if CommandLine.arguments.contains("--smoke-observe-origins") {
             // The external reader acknowledges a fresh sample from both windows.
-            for endpoint in [staged, direct] {
+            for (label, endpoint) in [("staged", staged), ("original", direct)] {
                 if endpoint == direct { backend.ready?(direct) }
-                let acknowledgment = directory.appendingPathComponent("observed-" + endpoint.host!)
+                let acknowledgment = directory.appendingPathComponent("observed-" + label + "-origin")
                 for _ in 0..<200 {
                     if FileManager.default.fileExists(atPath: acknowledgment.path) { break }
                     try await Task.sleep(nanoseconds: 50_000_000)
                 }
-                try smokeCheck("observed_" + endpoint.host!, FileManager.default.fileExists(atPath: acknowledgment.path))
+                try smokeCheck("observed_" + label + "_origin", FileManager.default.fileExists(atPath: acknowledgment.path))
             }
             let firstRestored = await reached(item, direct, text: "An unsent draft", check: "origin_change_first_direct_draft")
             let secondRestored = await reached(sibling, direct, text: "Second window draft", check: "origin_change_second_direct_draft")
@@ -668,6 +698,24 @@ extension AppDelegate {
                 """, in: item.webView, arguments: ["id": thread]) as? Int ?? 0
             try smokeCheck("large_draft_committed_before_quit", payload >= 26 * 1024 * 1024)
             smoke.results["draft_data_url_characters"] = payload
+            try await queueSmokeDraftWrite(sibling, thread: thread, text: "Second window draft before Reload",
+                                          check: "reload_draft_write_queued")
+            sibling.window.makeKeyAndOrderFront(nil)
+            let reloading = NSApp.sendAction(NSSelectorFromString("reload"), to: self, from: nil)
+            try smokeCheck("native_reload_requested", reloading)
+            var reloaded = false
+            for _ in 0..<120 {
+                if workspaceSettled(sibling),
+                   (try? await smokeJS("return !window.agentCoordSmokeBeforeNavigation;", in: sibling.webView) as? Bool) == true {
+                    reloaded = true; break
+                }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            try smokeCheck("native_reload_document_replaced", reloaded)
+            let reloadRestored = await reached(sibling, direct, text: "Second window draft before Reload", check: "native_reload_preserved_final_edit")
+            try smokeCheck("native_reload_preserved_final_edit", reloadRestored)
+            try await queueSmokeDraftWrite(item, thread: thread, text: "First window draft before Quit",
+                                          attachment: "Final attachment.png", check: "quit_final_draft_writes_queued")
             return
         }
         _ = try await smokeJS("(state.sending ||= new Set()).add(id); return true;",
@@ -680,8 +728,8 @@ extension AppDelegate {
         let editable = try await smokeJS("""
             const field = document.querySelector('#message');
             field.focus(); field.setSelectionRange(field.value.length, field.value.length);
-            return location.hostname === 'localhost' && state.sending.has(id) && !document.documentElement.inert;
-            """, in: item.webView, arguments: ["id": thread])
+            return location.origin === origin && state.sending.has(id) && !document.documentElement.inert;
+            """, in: item.webView, arguments: ["id": thread, "origin": String(staged.absoluteString.dropLast())])
         try smokeCheck("origin_change_busy_window_editable", editable as? Bool == true)
         try smokeCheck("origin_change_native_keystroke", smokeWebKey("x", flags: [], code: 7, throughApplication: true))
         let typed = try await smokeJS("""
@@ -699,6 +747,32 @@ extension AppDelegate {
         try await smokeWindowImage(item, suffix: "origin-change")
     }
 
+    @MainActor private func queueSmokeDraftWrite(_ item: DesktopWindow, thread: String, text: String,
+                                                attachment: String? = nil, check: String) async throws {
+        let queued = try await smokeJS("""
+            const store = window.agentCoordComposerDrafts;
+            if (!store || typeof window.agentCoordDrainComposerWrites !== 'function') return false;
+            const original = store.write;
+            window.agentCoordSmokeBeforeNavigation = true;
+            store.write = (key, patch) => {
+              const final = patch.text === text || attachment && patch.images?.some(image => image.name === attachment);
+              if (key !== id || !final) return original(key, patch);
+              return new Promise(resolve => setTimeout(resolve, 600)).then(() => original(key, patch));
+            };
+            const field = document.querySelector('#message');
+            field.value = text;
+            field.setSelectionRange(2, 8);
+            field.dispatchEvent(new Event('input', {bubbles:true}));
+            if (attachment) {
+              const [first, ...other] = state.attachments.items(id);
+              state.attachments.drafts.set(id, [{...first, name:attachment}, ...other]);
+              state.attachments.onChange();
+            }
+            return state.composerWrites?.size > 0;
+            """, in: item.webView, arguments: ["id": thread, "text": text, "attachment": attachment ?? ""])
+        try smokeCheck(check, queued as? Bool == true)
+    }
+
     @MainActor private func verifySmokeQuit(thread: String) async throws {
         try smokeCheck("quit_restored_two_windows", windows.count == 2)
         var recovered: [String: String] = [:]
@@ -709,25 +783,28 @@ extension AppDelegate {
                 for (let attempt = 0; attempt < 200; ++attempt) {
                     const field = document.querySelector('#message');
                     const text = field?.value, count = state.attachments.items(id).length;
-                    if (state.selected === id && (text === 'An unsent draft' && count === 4 ||
-                        text === 'Second window draft' && count === 0)) {
-                        return {text, count};
+                    if (state.selected === id && (text === 'First window draft before Quit' && count === 4 &&
+                        state.attachments.items(id)[0]?.name === 'Final attachment.png' ||
+                        text === 'Second window draft before Reload' && count === 0)) {
+                        return {text, count, firstAttachment: state.attachments.items(id)[0]?.name || ''};
                     }
                     await new Promise(resolve => setTimeout(resolve, 50));
                 }
                 const stored = await storage.read(id);
                 return {text:document.querySelector('#message')?.value || '', selected:state.selected || '',
-                    count:state.attachments.items(id).length, storedCount:stored?.images.length ?? -1, storedText:stored?.text || ''};
+                    count:state.attachments.items(id).length, firstAttachment: state.attachments.items(id)[0]?.name || '',
+                    storedCount:stored?.images.length ?? -1, storedText:stored?.text || ''};
                 """, in: item.webView, arguments: ["id": thread]) as? [String: Any]
             let text = result?["text"] as? String ?? ""
             let count = result?["count"] as? Int ?? -1
-            if count != (text == "An unsent draft" ? 4 : 0) || text.isEmpty {
-                smoke.results["quit_restoration_diagnostic"] = result ?? [:]
-            }
-            try smokeCheck("quit_restored_attachments_" + item.id, !text.isEmpty && count == (text == "An unsent draft" ? 4 : 0))
+            let valid = text == "First window draft before Quit"
+                ? count == 4 && result?["firstAttachment"] as? String == "Final attachment.png"
+                : text == "Second window draft before Reload" && count == 0
+            if !valid { smoke.results["quit_restoration_diagnostic"] = result ?? [:] }
+            try smokeCheck("quit_restored_attachments_" + item.id, valid)
             recovered[item.id] = text
         }
-        try smokeCheck("quit_restored_independent_drafts", Set(recovered.values) == ["An unsent draft", "Second window draft"])
+        try smokeCheck("quit_restored_independent_drafts", Set(recovered.values) == ["First window draft before Quit", "Second window draft before Reload"])
         smoke.results["quit_restored_window_ids"] = recovered.keys.sorted()
     }
 
@@ -1718,6 +1795,13 @@ extension AppDelegate {
               state.threadTabs.items.length === 1 && state.threadTabs.items[0].thread_id === 'detach-one';
             """, in: second.webView)
         try smokeCheck("detach_state_restored", restored as? Bool == true)
+        let durableDestination = try await smokeJS("""
+            const store = window.agentCoordComposerDrafts || ComposerDrafts.create({scope: agentCoordDesktop.windowId});
+            const draft = await store.read('detach-one');
+            return draft?.text === 'Keep detached draft' && draft.images[0]?.name === 'pixel.png';
+            """, in: second.webView)
+        try smokeCheck("detach_destination_draft_durable", durableDestination as? Bool == true &&
+            second.workspaceJSON?.contains("detach-one") == true)
         let reading = try await smokeJS("""
             return document.querySelectorAll('#timeline .agent-message').length === 40 &&
               document.querySelector('#timeline details[data-id]')?.open === true &&
