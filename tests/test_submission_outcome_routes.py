@@ -123,31 +123,43 @@ class SubmissionOutcomeRouteTests(TestCase):
         thread = self.sessions.create({})["session"]["thread_id"]
         body = {"requestId": "queue-original", "message": "Run the queued check"}
         publish = self.sessions._publish
+        dispatch = self.sessions.queue._dispatch
         publications = []
+        worker_ready, release_worker, delivered = (threading.Event() for _ in range(3))
 
         def fail_after_insert(method, parameters, **extra):
-            if method == "browser/changed" and parameters.get("threadId") == thread:
+            if method == "browser/changed" and parameters.get("threadId") == thread and not publications:
                 items = self.sessions.queue.list(thread)
                 if items:
                     publications.append([item["id"] for item in items])
                     raise CoordinationError("Could not publish the committed queue change.")
             return publish(method, parameters, **extra)
 
-        with patch.object(self.sessions, "_publish", side_effect=fail_after_insert), patch.object(self.sessions.queue, "wake"):
-            first = self.post(self.server.server_port, thread, body, operation="queue")
-            same = self.post(self.server.server_port, thread, body, operation="queue")
+        def observe_dispatch(identity):
+            worker_ready.set()
+            if release_worker.wait(3):
+                dispatch(identity)
+                delivered.set()
 
-        items = self.sessions.queue.list(thread)
-        self.assertEqual(len(items), 1, f"Publication attempts observed queue IDs {publications}")
-        self.assertEqual(publications, [[items[0]["id"]]])
-        self.assertEqual(self.receipt_state(thread, "queue-original"), "uncertain")
-        self.assert_unknown(first)
-        self.assert_unknown(same)
-
-        with patch.object(self.sessions.rpc, "request", wraps=self.sessions.rpc.request) as provider:
-            self.sessions.queue._dispatch(thread)
+        with (
+            patch.object(self.sessions, "_publish", side_effect=fail_after_insert),
+            patch.object(self.sessions.queue, "_dispatch", side_effect=observe_dispatch),
+            patch.object(self.sessions.rpc, "request", wraps=self.sessions.rpc.request) as provider,
+        ):
+            try:
+                first = self.post(self.server.server_port, thread, body, operation="queue")
+                same = self.post(self.server.server_port, thread, body, operation="queue")
+                items = self.sessions.queue.list(thread)
+                self.assertEqual(len(items), 1)
+                self.assertEqual(publications, [[items[0]["id"]]])
+                self.assertEqual(self.receipt_state(thread, "queue-original"), "uncertain")
+                self.assert_unknown(first)
+                self.assert_unknown(same)
+                self.assertTrue(worker_ready.wait(2), "The committed queue item did not wake its worker.")
+            finally:
+                release_worker.set()
+            self.assertTrue(delivered.wait(3))
             late = self.post(self.server.server_port, thread, body, operation="queue")
-            self.sessions.queue._dispatch(thread)
         effects = [call.args[0] for call in provider.call_args_list if call.args[0] in {"turn/start", "turn/steer"}]
         self.assertEqual(effects, ["turn/start"])
         self.assertEqual(self.sessions.queue.list(thread), [])

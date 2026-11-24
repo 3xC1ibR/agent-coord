@@ -117,8 +117,10 @@ class BrowserMessageQueue:
                             mentions_json, dispatch_id, int(body.get("quiet", False))))
                 if dispatch_id is not None:
                     self.sessions.dispatch.transition(db, dispatch_id, "queued", target_id=thread_id, error=None)
-            self.sessions._publish("browser/changed", {"threadId": thread_id})
-            self.wake()
+            try:
+                self.sessions._publish("browser/changed", {"threadId": thread_id})
+            finally:
+                self.wake()
             return {"queued": True, "id": item_id}
 
     def change(self, thread_id, body):
