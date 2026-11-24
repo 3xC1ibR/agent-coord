@@ -1,13 +1,13 @@
 ---
 name: orchestrate
-description: Own a complete user-requested outcome by coordinating persistent Ribbon Field app agents across providers. Use when the user asks you to manage a task, delegate work as needed, and deliver the integrated result in this conversation, or when a complex task benefits from context isolation, parallel disjoint scopes, cross-provider ensembles, or independent verification.
+description: Own a complete user-requested outcome with the smallest effective agent topology across providers. Use when the user asks you to manage a task and deliver the integrated result, or when work genuinely benefits from read-only context isolation, cross-provider blind verification, truly decoupled parallel tracks, or persistent domain ownership—keeping coupled code writes single-threaded.
 ---
 
 # Orchestrate
 
-You own the user's complete objective. Plan the work, coordinate
-app agents, review their contributions, and deliver the finished
-result in this conversation.
+You own the user's complete objective. Choose the smallest topology that
+delivers a verified result in this conversation—do not spawn agents just
+because a plan has multiple headings.
 
 The user can inspect or speak to any participating agent, but
 should not need to manage those agents or collect their results.
@@ -17,26 +17,43 @@ app-agent creation, reuse, messaging, permissions, and file
 coordination. Use [dispatch](../dispatch/SKILL.md) when the user wants requests routed
 to specialists for direct follow-up instead. Read
 [references/orchestration-playbook.md](references/orchestration-playbook.md)
-for empirical multi-agent failure modes, cross-provider ensemble topologies,
+for empirical multi-agent scaling limits, cross-provider topologies,
 and handoff templates.
 
 ## Why and when to orchestrate
 
-Models have two failure-prone defaults when working on complex tasks:
-1. **The Hero Soloist (under-delegation):** Doing noisy exploration, multi-module implementation, and self-review inside one context window—accumulating context pollution and grading their own work with the same blind spots that wrote it.
-2. **Theatrical Roleplay (bad delegation):** Splitting small, tightly coupled tasks across chatty personas ("PM", "Architect", "QA") that relay messages through a central bottleneck. Empirical studies of multi-agent systems (such as MAST and ACL Diversity Collapse analyses) show that unconstrained roleplay and premature group debate fail 41–86% of the time due to specification drift, inter-agent misalignment, and sycophantic consensus collapse.
+**Core rule: parallelize reading and verification; serialize coupled writes.**
 
-Ribbon Field app agents are **not** ephemeral provider-native subagents. They are persistent, independently addressable conversations that can run across different provider families (`--client codex`, `claude`, `antigravity`, `kimi`, `muse`), retain long-lived domain memory, transfer write/validation leases atomically (`agent-coord handoff`), and report structured `context_lifecycle` state.
+Frontier models handle long-horizon, multi-file implementation cleanly inside
+one coherent context. Empirical studies show that multi-agent coordination
+gains strongly on parallelizable read/search work, but degrades sequential,
+stateful coding tasks—often sharply—once a single agent is already capable.
 
-Reach for orchestration when it provides genuine structural leverage:
+Avoid two failure-prone multi-agent anti-patterns:
+1. **Conway's Law / Spec-Heading Slicing:** Mapping sections of a tightly
+   coupled plan or runtime 1-to-1 to persistent writer agents because their
+   file paths look disjoint. Disjoint files do **not** mean independent
+   systems: writers sharing a database schema, runtime state, event loop, or
+   release artifact make conflicting implicit decisions and burn hours on
+   integration drift and merge thrash.
+2. **Theatrical Roleplay & Overloaded Hybrids:** Splitting work across chatty
+   personas ("PM", "Architect", "QA") or mixing heavy coding, multi-worker
+   supervision, merging, and self-review inside one long-running agent.
+
+Ribbon Field app agents are persistent, independently addressable conversations
+across provider families (`--client codex`, `claude`, `antigravity`, `kimi`,
+`muse`) that retain domain memory, transfer write/validation leases atomically
+(`agent-coord handoff`), and report structured `context_lifecycle` state.
+
+Spawn additional agents only when they provide concrete structural leverage:
 
 | High-Leverage Orchestration Trigger | Why Multi-Agent Wins Here |
 | :--- | :--- |
-| **Context Isolation (High-Noise $\rightarrow$ Compact Output)** | A specialist reads 40 files, logs, or failing traces and returns a 15-line root-cause proof or localized fix, keeping your orchestrator context clean. |
-| **Disjoint Write Scopes (True Parallelism)** | Independent subsystems (`--scope 'backend/**'` vs. `--scope 'desktop/**'`) have a clear interface contract and zero write-lease contention. |
-| **Epistemic Independence (Blind Verification)** | A fresh reviewer (ideally a different `--client` provider) checks the spec, diff, and test suite without seeing the author's chain-of-thought rationalizations. |
-| **Parallel Hypothesis Search (Nominal Group Technique)** | For hard, ambiguous bugs or architectural tradeoffs, two independent agents (e.g., `codex` and `claude`) investigate in isolated contexts before you compare their evidence. |
-| **Persistent Domain Ownership** | Recurring subsystems (release/deployment, UI, migrations) reuse a long-lived app specialist that remembers prior constraints and `tried_and_failed` approaches. |
+| **Read-Only Context Isolation (High-Noise → Compact Output)** | Parallel read-only exploration, log triage, or multi-repo research absorbs noisy traces and returns compact evidence without polluting the builder's context. |
+| **Epistemic Independence (Cross-Provider Blind Verification)** | A fresh reviewer on a **different `--client` provider** audits the spec, diff, and test suite without inheriting the author's rationalizations or long-context rot. |
+| **Parallel Hypothesis Search (Nominal Group Technique)** | For hard, ambiguous bugs or architectural tradeoffs, two different providers investigate independently before you compare their evidence. |
+| **Truly Decoupled Parallel Writers** | Workstreams with independent build, test, and runtime boundaries (separate repos, independent services, bulk map/reduce migrations) and zero shared mutable design assumptions. |
+| **Persistent Domain Ownership** | Recurring operational domains (release/deployment, long-lived migrations) where reusing an existing specialist preserves `tried_and_failed` negative memory. |
 
 ## Establish the outcome
 
@@ -44,36 +61,66 @@ Identify the requested deliverable, constraints, and what counts
 as complete. Ask only for information or decisions that materially
 affect the work and cannot reasonably be inferred.
 
-Break the objective into useful assignments. Parallelize independent
-work and make dependencies explicit. Use the smallest useful team;
-respect any requested agent count or requirement for fresh agents.
-Do not split tightly coupled edits to the same file across multiple workers.
+Pick **one** clear execution mode instead of an overloaded hybrid:
 
-Start useful assignments as soon as their objectives, boundaries,
-and completion criteria are clear. Delegate further discovery when
-needed; do not finish the investigation yourself before involving workers.
+- **Default (Coupled Single-Repo Feature or Refactor) — Single Builder + Cross-Provider Blind Verifier:**
+  Keep implementation and its local tests single-threaded in one coherent
+  builder context (yourself or one dedicated specialist). Use read-only
+  subagents only to offload noisy exploration or log analysis. Once the
+  vertical slice builds and passes local tests, hand the diff and acceptance
+  criteria to a fresh blind verifier on a **different `--client` provider**.
+- **Decoupled Multi-Track Work — Pure Coordinator + Isolated Workers + Blind Verifier:**
+  Use multiple parallel writers **only** when tracks are architecturally
+  independent (not coupled layers of the same runtime). When coordinating
+  parallel writers, act as a pure coordinator: record shared interface and
+  design contracts in files on disk (not ephemeral inbox summaries), avoid
+  lateral merge fights between writers, and verify the integrated result
+  independently.
 
-Delegate substantial research, implementation, and detailed verification.
-Focus your own effort on decomposition, shared decisions, dependencies,
-resolving disagreements, evaluating evidence, and delivering the combined result.
+Respect sequential dependencies across stages and coordinators:
+- **Do not parallelize across coupled sequential rollout stages** where a later
+  stage replaces or deletes infrastructure an earlier stage is still qualifying
+  against. Either land Stage N before spawning Stage N+1 work, or combine the
+  coupled stages into one candidate build.
+- **Sequence cross-coordinator dependencies upfront:** If another active
+  coordinator is rewriting shared foundations (storage, schema, runtime
+  contracts) in the same repository, wait for those contracts to land rather
+  than racing a second parallel writer swarm against a moving base.
 
-Perform bounded execution when it directly enables a decision or is clearly
-cheaper than handing it off. Avoid lengthy work that delays coordination or
-duplicates an active assignment. Retain responsibility for checking that the
-combined result meets the user's objective.
+Retain end-to-end responsibility for checking that the assembled result meets
+the user's objective.
 
 ## Choose mechanisms and providers deliberately
 
-Match each unit of work to the right Agent Coord mechanism and provider:
+Match each unit of work to the lightest effective mechanism and provider:
 
-- **Persistent App Agent (`thread create --mode orchestration` / `send`):** Default for substantial research, subsystem implementation, cross-provider ensembles, independent code/security review, and release ownership. Supports `--client codex | claude | antigravity | kimi | muse`.
-- **Managed Terminal Delegate (`agent-coord delegate`):** Best for a single bounded, scoped terminal task (`--lease-mode write` or `--lease-mode validation`) where the worker should report once and shut down.
-- **Sidecar Watcher (`agent-coord sidecar attach`):** Best when you want a dedicated observer (`--mode notify` or bounded `--mode message`) to audit whether a target app agent actually meets acceptance criteria with evidence.
-- **Provider-Native Subagent:** Use only for quick, read-only context offloading inside a single turn when persistent identity, user visibility, and cross-provider diversity are unnecessary.
+- **Main Loop + Skills (Default for Coupled Implementation):** Do cohesive,
+  stateful implementation directly rather than fragmenting it across writer
+  subagents.
+- **Provider-Native Subagent:** Preferred for quick, bounded, read-only
+  context offloading (codebase search, log triage, doc lookup) when persistent
+  identity and cross-provider diversity are unnecessary.
+- **Persistent App Agent (`thread create --mode orchestration` / `send`):**
+  Use for cross-provider blind verification, isolated NGT investigation,
+  truly decoupled parallel tracks, or persistent domain ownership. Supports
+  `--client codex | claude | antigravity | kimi | muse`.
+- **Managed Terminal Delegate (`agent-coord delegate`):** Best for a single
+  bounded, scoped terminal task (`--lease-mode write` or `--lease-mode validation`)
+  where the worker should report once and shut down.
+- **Sidecar Watcher (`agent-coord sidecar attach`):** Best when you want a
+  dedicated observer (`--mode notify` or bounded `--mode message`) on a
+  different provider to audit whether a target app agent meets acceptance
+  criteria with evidence.
 
-When authorized or appropriate, exploit **cross-provider diversity**:
-- **Cross-family verification:** Pair an implementation specialist on one provider (e.g., `codex`) with an independent reviewer or sidecar on another (`claude` or `antigravity`) so correlated model blind spots do not pass subtle regressions.
-- **Isolated NGT exploration:** When a bug or design is non-obvious, ask two different providers to diagnose or prototype independently. Never let them read each other's raw reasoning before they commit to an initial finding—early cross-talk causes sycophantic convergence.
+Exploit **actual cross-provider diversity**—do not spawn homogeneous clones of
+the same provider when you want independent judgment:
+- **Cross-family verification:** Pair an implementation context on one provider
+  (e.g., `codex`) with a fresh blind verifier or sidecar on another (`claude`
+  or `antigravity`) so correlated model blind spots do not pass subtle bugs.
+- **Isolated NGT exploration:** When a bug or design is non-obvious, ask two
+  different providers to diagnose or prototype independently. Never let them
+  read each other's raw reasoning before they commit to an initial finding—early
+  cross-talk causes sycophantic convergence.
 
 ## Assign work and keep the collaboration open
 

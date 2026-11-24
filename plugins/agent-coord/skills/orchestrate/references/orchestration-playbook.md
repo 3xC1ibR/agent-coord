@@ -4,18 +4,25 @@ This playbook calibrates **when** and **how** to orchestrate persistent, cross-p
 
 ---
 
-## 1. Empirical Failure Modes of Multi-Agent Systems (Why Naive Swarms Fail)
+## 1. Empirical Scaling Limits & Failure Modes (2025–2026 Evidence)
 
-Large-scale empirical audits of multi-agent LLM systems (such as UC Berkeley's **MAST** taxonomy across 1,642 traces and ACL 2026 **Diversity Collapse** studies) show that naive multi-agent setups fail **41%–86.7%** of the time and frequently underperform a single well-harnessed agent.
+Controlled evaluations across frontier models converge on one core rule: **parallelize reading and verification; serialize coupled writes.**
 
-Three failure modes account for almost all multi-agent breakdowns:
+- **Capability saturation & sequential degradation (Google DeepMind / MIT, *Nature Machine Intelligence* 2026):** Across 260 configurations (including SWE-bench Verified and Terminal-Bench), centralized multi-agent setups gained up to **+80.8%** on truly parallelizable tasks, but **degraded sequential, stateful tasks by −39% to −70%** across every multi-agent topology. Once a single-agent baseline exceeds ~45% accuracy, adding multi-agent coordination yields diminishing or negative returns, with tool-heavy coding loops paying 263–285% coordination overhead.
+- **Conway's Law / spec-heading slicing (Anthropic Applied AI, Oct 2026; Cognition, Apr 2026):** Assigning one persistent writer per plan section or module in a shared runtime fragments implicit architectural decisions ("actions carry implicit decisions") and forces lossy summary-of-summary handoffs. Folding coupled writes back into a single main loop with progressive skills consistently beats domain-sliced writer swarms.
+- **Overloaded hybrids & lateral merge thrash (Cursor, 2026):** Combining planning, coding, worker supervision, merging, and judging inside one long-running context causes drift and premature completion. Likewise, parallel writers resolving their own merge conflicts overwrite or abandon work; parallel writes only scale when subsystems are genuinely decoupled, shared contracts live on disk, and integration/verification is isolated.
+- **Multi-coordinator & shared-resource collapse (Anthropic *Worse Together*, Nov 2026; UC Berkeley MAST):** Independent coordinators racing against the same repository or merge queue underperform a single sequenced coordinator; uncoordinated independent agents amplify errors **17.2×** vs. **4.4×** under centralized verification.
+- **Homogeneous clone parity (Stanford, Apr 2026; Anthropic Red Team, Aug 2026):** Under matched thinking-token budgets, splitting reasoning across identical clones does not outperform a single strong model and introduces correlated conformity errors. Multi-agent gains come from **context hygiene**, **parallel read-only wall-clock**, or **provider heterogeneity** (cross-family blind verification).
 
-1. **Specification Drift & Role Theatrics (~42% of failures):** Splitting a single coherent problem across artificial personas ("Product Manager", "Architect", "Junior Coder") causes constraints and edge cases to drop at each boundary.
-   - *Fix:* Decompose by **concrete write-scope boundaries**, **context-noise isolation**, or **epistemic independence (author vs. blind verifier)**—never by theatrical job titles.
-2. **Inter-Agent Misalignment & Hub Relay Tax (~37% of failures):** Passing verbose conversational transcripts through a central orchestrator causes **context pollution** ("lost-in-the-middle" attention degradation) and delays local fixes.
-   - *Fix:* Pass structured state (`confirmed_facts`, `constraints`, `tried_and_failed`, `open_questions`) and let authors and reviewers coordinate directly via peer messages and `agent-coord handoff`.
-3. **Premature Termination & Diversity Collapse (~21% of failures):** When multiple agents debate in a shared thread before committing to an independent artifact, weaker or peer models defer sycophantically ("Artificial Hivemind"), and agents accept unverified outputs.
-   - *Fix:* Enforce **isolated generation before comparison (Nominal Group Technique)** and require **blind verification** against executable tests.
+### Topology Selection Matrix
+
+| Workload Shape | Recommended Topology | Avoid |
+| :--- | :--- | :--- |
+| **Coupled feature, refactor, or runtime migration** | **Single Builder** (writes code + local tests) + **Fresh Cross-Provider Blind Verifier** | Mapping plan headings 1-to-1 to parallel writer worktrees |
+| **Noisy exploration, log triage, broad codebase/security audit** | **Main Loop + Parallel Read-Only Subagents** returning compact findings | Dumping 40 files/logs into the implementation context |
+| **Hard, ambiguous bug or high-stakes architecture choice** | **Cross-Provider NGT** (2 independent read-only investigators → compare → 1 builder) | Shared-thread group debate before independent artifacts |
+| **Truly decoupled workstreams** (separate repos, independent services, bulk migrations) | **Pure Coordinator + Isolated Workers** (contracts on disk) + **Blind Verifier** | Hybrid agent coding while supervising 5+ writers; lateral merge fights |
+| **Sequential rollout stages or shared-repo foundation rewrite** | **Sequence upstream contracts first** (or combine coupled stages into one candidate) | Parallel downstream swarms racing against a moving foundation |
 
 ---
 

@@ -18,27 +18,31 @@ the integrated result in the initiating conversation. Both use the same app agen
 
 ### When to orchestrate vs. work solo
 
-Do not default to doing everything in a single polluted context window, and do
-not spawn theatrical roleplay agents for trivial edits. Escalate to multi-agent
-orchestration ([orchestrate](../../orchestrate/SKILL.md)) when at least one of
-these holds:
+**Parallelize reading and verification; serialize coupled writes.** Default to
+implementing cohesive, stateful changes inside one builder context (writing
+code and its local tests together) rather than slicing plan sections 1-to-1
+into parallel writer agents—disjoint file paths inside a shared runtime or
+schema are still coupled and degrade under handoff and merge drift.
 
-1. **Context isolation (high-noise / compact-output):** Broad exploration, log
-   triage, or subsystem debugging would flood your context with intermediate
-   noise before implementation starts.
-2. **True parallelism across disjoint write scopes:** Independent modules or
-   workstreams have a clear contract and non-overlapping `--scope` paths.
-3. **Epistemic independence (blind verification or NGT search):** You need an
-   unbiased code review, security audit, or parallel root-cause investigation
-   from a fresh agent (often a different `--client` provider) that has not
-   absorbed your chain-of-thought rationalizations.
+Escalate to multi-agent orchestration ([orchestrate](../../orchestrate/SKILL.md))
+when at least one of these holds:
+
+1. **Read-only context isolation (high-noise / compact-output):** Broad
+   exploration, log triage, or multi-repo research would flood the main loop
+   with intermediate noise before implementation starts.
+2. **Epistemic independence (cross-provider blind verification or NGT):** You
+   need an unbiased code review, security audit, or parallel root-cause
+   investigation from a fresh agent on a **different `--client` provider** that
+   has not absorbed the author's rationalizations or long-context rot.
+3. **Truly decoupled parallel writers:** Independent repositories, services, or
+   map/reduce migrations with zero shared runtime, schema, or release-contract
+   coupling (not coupled layers of the same process).
 4. **Long-lived domain ownership:** Work touches a recurring domain (such as
-   release/deployment, UI, or database migrations) where reusing a persistent
+   release/deployment or long-lived migrations) where reusing a persistent
    specialist preserves negative memory (`tried_and_failed`) and direct user
    follow-up.
-5. **Cross-provider arbitrage:** A task benefits from pairing distinct provider
-   strengths (`--client codex | claude | antigravity | kimi | muse`) or running
-   a `sidecar attach` acceptance monitor alongside implementation.
+5. **Cross-provider sidecar monitoring:** Running a `sidecar attach` acceptance
+   monitor on a different provider alongside implementation.
 
 ## Supervise delegated work
 

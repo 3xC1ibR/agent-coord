@@ -47,7 +47,11 @@ For database, persistence, search, provider-event or request-path changes, run
 `python3 scripts/measure_database_contention.py --check --output build/database-performance.json`.
 CI enforces this gate. Report errors, throughput, foreground p95, writer hold p95
 and admission timeouts with the workload and revision. Never raise budgets merely
-to make a change pass. Compare matched workloads before and after optimization.
+to make a change pass. Compare matched workloads before and after optimization;
+on signed upgrade rehearsals, compare candidate latency against the unmodified
+baseline captured in the same run—if the baseline itself breaches its budgets,
+diagnose run noise before rejecting a candidate for a modest latency miss while
+keeping correctness, continuity, and exact-once delivery non-negotiable.
 The integration harness and HTTP budgets are documented in `docs/responsiveness.md`;
 use large histories and sustained mixed traffic when changing storage/indexing.
 
