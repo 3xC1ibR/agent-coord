@@ -806,27 +806,37 @@ test("Idle shows fifty rows until asked, and empty threads collapse into one con
   c.render([...many, listThread("blank")]);
   assert.equal(c.rows("idle").length, 55); assert.deepEqual(c.rows("empty"), ["blank"]);
 });
-test("production integration renders the list beside Focus with the shared thread menu", async () => {
+test("production List uses the shared thread menu and explicit dismissal receipts", async () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
   const nodes = {"atlas-overview": {hidden: false}, "working-set-overview": {hidden: false}, "thread-list-overview": {hidden: true},
     overview: {classList: {toggle() {}}}, welcome: {hidden: false}, view: {value: "active"}};
   let config, options; const calls = [];
-  const c = {state: {overviewLayout: {mode: "list"}, projectCwd: "/work", listSignature: "rev",
+  const c = {state: {overviewLayout: {mode: "list"}, projectCwd: "/work", listSignature: "rev", updatingThreads: new Set(),
       threadActions: {showMenu: (...args) => calls.push(["menu", ...args])}},
     document: {}, window: {}, savedViews: {activeId: "all", openGroup: id => calls.push(["group", id])}, $: id => nodes[id],
     WorkingSet: {createList(value) { config = value; return {render(t, host, opts) { options = opts; }}; }},
-    threadMenuItems: t => [{label: "Pin " + t.thread_id}], action: f => f(), select: id => calls.push(["open", id]),
-    toggleThreadClosed: t => calls.push(["close", t.thread_id]), threadPath: id => "threads/" + id,
-    api: async (...args) => calls.push(args), refreshList: async () => calls.push(["refresh"])};
+    threadMenuItems(t, context) { assert.equal(context.inbox, true); return [{label: "Pin " + t.thread_id}]; },
+    action: f => f(), select: id => calls.push(["open", id]), toggleThreadClosed: t => calls.push(["close", t.thread_id]),
+    updateThreadAttention: async (t, patch) => calls.push(["dismiss", t.thread_id, {...patch}]),
+    refreshList: async () => calls.push(["refresh"])};
+  c.state.threadActions.notify = (id, message) => calls.push(["notify", id, message]);
   vm.createContext(c); vm.runInContext(source.slice(source.indexOf("function renderOverviewLayout("), source.indexOf("function upcomingSchedules(")), c);
-  vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
+  vm.runInContext(source.slice(source.indexOf("async function markThreadHandled("), source.indexOf("async function markThreadRead(")), c);
   c.renderOverviewLayout([]);
   assert.equal(nodes["thread-list-overview"].hidden, false); assert.equal(nodes["working-set-overview"].hidden, true); assert.equal(nodes.overview.hidden, true);
   assert.equal(options.selectedGroup, null); assert.equal(options.placement, "active"); assert.equal(options.revision, "rev");
-  const t = thread("a", {checkpoint: {id: 8}, turn_completion: {id: 12}});
-  config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onRead(t);
+  c.savedViews.activeId = "group-fabrication";
+  c.renderOverviewLayout([], [{id: "inspection-schedule"}]);
+  assert.equal(options.selectedGroup, "fabrication");
+  assert.equal(nodes.overview.hidden, false, "scheduled prompts remain visible beside List");
+  const t = thread("a", {can_handle_response: true, checkpoint: {id: 8}, turn_completion: {id: 12}});
+  config.onOpen("a"); config.onClose(t); config.onMenu(t, "anchor", "event"); await config.onDismiss(t);
   assert.deepEqual(calls.slice(0, 3), [["open", "a"], ["close", "a"], ["menu", "anchor", "Thread a", [{label: "Pin a"}], "event"]]);
-  assert.equal(JSON.stringify(calls[3]), JSON.stringify(["threads/a", {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12}]));
+  assert.deepEqual(calls.slice(3), [
+    ["dismiss", "a", {handled: true, handled_checkpoint_id: 8, handled_completion_id: 12}],
+    ["notify", "dismiss:a", "Update dismissed · Thread remains in Now"],
+    ["refresh"],
+  ]);
 });
 
 test("Pinned leads the inbox: every pinned thread or app agent appears once, needs-you first, then working, then recency", () => {

@@ -200,7 +200,7 @@ test("the ordinary composer keeps the 202 queued and a concurrent stream confirm
     const outgoingMessages = outgoing();
     const detail = {...history(), running: false, work_thread: {client: "codex", browser_session: true, attention: "now"}};
     const input = {value: "same text"};
-    const state = {config: {interactionContinuity: true}, selected: "thread", detail, closing: new Set(),
+    const state = {config: {interactionContinuity: true, ordinarySubmissionReceipts: 1}, selected: "thread", detail, closing: new Set(),
       commandFeedback: new Map(), drafts: new Map(), outgoing: outgoingMessages};
     const c = vm.createContext({state, document: {}, $: () => input, sessionPath: id => "sessions/" + id,
       DispatchUI: {requestKey: () => "accepted"}, conversationEntry: () => ({detail}),
