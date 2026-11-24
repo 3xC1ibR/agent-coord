@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import signal
 import shutil
 import tempfile
@@ -11,6 +12,7 @@ import time
 import unittest
 from unittest.mock import patch
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("plugin_tools", ROOT / "scripts/plugin_tools.py")
@@ -22,7 +24,7 @@ class PluginToolsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.plugin = self.root / "plugin"
         shutil.copytree(tools.PLUGIN, self.plugin, ignore=shutil.ignore_patterns("__pycache__"))
 
@@ -103,7 +105,7 @@ class PluginToolsTests(unittest.TestCase):
         (previous / "scripts/web/openui.js").write_text("original assets")
         return {"codex_home": codex, "claude_home": claude, "share": self.root / "shared"}, previous, registry
 
-    def test_dev_link_shares_live_assets_without_rewriting_source_or_pinned_code(self):
+    def test_dev_link_snapshots_codex_without_rewriting_source_or_pinned_code(self):
         homes, previous, registry = self.development_homes()
         manifest = self.plugin / ".codex-plugin/plugin.json"
         source_manifest = manifest.read_bytes()
@@ -113,10 +115,10 @@ class PluginToolsTests(unittest.TestCase):
         old_directory = previous.stat().st_ino
         original_config = json.loads(registry.read_bytes())
         result = tools.dev_link(self.plugin, prune=True, **homes)
-        self.assertEqual(result["prunedCodexDirectories"], 2)
+        self.assertEqual(result["repairedCodexDirectories"], 0)
         self.assertGreater(result["deduplicatedBytes"], 0)
         self.assertEqual(manifest.read_bytes(), source_manifest)
-        self.assertTrue(previous.is_symlink())
+        self.assertFalse(previous.is_symlink())
         self.assertEqual(old_directory, previous.stat().st_ino)
         self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
         self.assertEqual(subprocess.check_output([second / "scripts/hook"]), b"second hook")
@@ -127,18 +129,103 @@ class PluginToolsTests(unittest.TestCase):
         self.assertEqual(updated["plugins"]["agent-coord@agent-coord"][0]["installPath"], result["claude"])
         self.assertTrue(Path(original_config["plugins"]["agent-coord@agent-coord"][0]["installPath"]).is_dir())
         source = self.plugin / "skills/agent-coordination/SKILL.md"
-        source.write_text(source.read_text() + "\nUpdated development text.\n")
-        assets = Path("scripts/agent_coord/web/vendor/openui/openui-bundle.min.js")
+        original_skill = source.read_text()
         for key in ("codex", "claude"):
-            cache = Path(result[key])
-            self.assertFalse((cache / ".codex-plugin").is_symlink())
-            self.assertFalse((cache / ".codex-plugin/plugin.json").is_symlink())
-            self.assertTrue((cache / assets).samefile(self.plugin / assets))
-            self.assertEqual((cache / source.relative_to(self.plugin)).read_text(), source.read_text())
-            self.assertGreater(tools.verify(self.plugin, cache), 10)
+            self.assertGreater(tools.verify(self.plugin, Path(result[key])), 10)
         retry = tools.dev_link(self.plugin, prune=True, **homes)
         self.assertEqual(retry["version"], result["version"])
-        self.assertEqual(retry["prunedCodexDirectories"], 0)
+        self.assertEqual(retry["repairedCodexDirectories"], 0)
+        source.write_text(source.read_text() + "\nUpdated development text.\n")
+        relative_skill = source.relative_to(self.plugin)
+        self.assertEqual((Path(result["codex"]) / relative_skill).read_text(), original_skill)
+        self.assertEqual((Path(result["claude"]) / relative_skill).read_text(), source.read_text())
+        removed = self.plugin / "scripts/agent_coord/web/vendor/openui/openui-bundle.min.js"
+        removed.unlink()
+        updated = tools.dev_link(self.plugin, prune=True, **homes)
+        self.assertNotEqual(updated["version"], result["version"])
+        self.assertGreater(tools.verify(self.plugin, Path(updated["codex"])), 10)
+        self.assertFalse((Path(updated["codex"]) / removed.relative_to(self.plugin)).exists())
+        self.assertTrue((Path(result["codex"]) / removed.relative_to(self.plugin)).is_file())
+        self.assertFalse(any(path.is_symlink() for path in Path(updated["codex"]).rglob("*")))
+
+    def test_dev_link_repairs_legacy_component_links_in_place(self):
+        homes, previous, _ = self.development_homes()
+        current = homes["share"] / "current"
+        current.parent.mkdir()
+        current.symlink_to(self.plugin)
+        legacy = previous.with_name("0.1.0+codex.20261124000000")
+        tools._publish_development_shim(self.plugin, current, legacy)
+        original_inode = legacy.stat().st_ino
+        hook = (legacy / "scripts/agent-coord-hook").read_bytes()
+        result = tools.dev_link(self.plugin, **homes)
+        self.assertEqual(result["repairedCodexDirectories"], 1)
+        self.assertEqual(Path(result["codex"]), legacy)
+        self.assertEqual(legacy.stat().st_ino, original_inode)
+        self.assertEqual((legacy / "scripts/agent-coord-hook").read_bytes(), hook)
+        self.assertFalse(any(path.is_symlink() for path in legacy.rglob("*")))
+
+    @unittest.skipUnless(shutil.which("codex"), "requires the Codex CLI")
+    def test_codex_native_session_runs_development_hook(self):
+        receipt = self.root / "hook-events.jsonl"
+        (self.plugin / "scripts/agent-coord-hook").write_text(
+            "import json, pathlib, sys\n"
+            "event = json.load(sys.stdin)\n"
+            f"with pathlib.Path({str(receipt)!r}).open('a') as output:\n"
+            "    output.write(json.dumps(event) + '\\n')\n"
+            "print(json.dumps({'decision': 'block', 'reason': 'Fixture stops before inference.'} "
+            "if event['hook_event_name'] == 'UserPromptSubmit' else {}))\n")
+        hook = {"hooks": {event: [{"hooks": [{"type": "command",
+            "command": shlex.quote(sys.executable) + ' "${CLAUDE_PLUGIN_ROOT}/scripts/agent-coord-hook"',
+            "timeout": 5}]}] for event in ("SessionStart", "UserPromptSubmit")}}
+        for path in ("hooks.json", "hooks/hooks.json"):
+            (self.plugin / path).write_text(json.dumps(hook))
+        manifest = self.plugin / ".codex-plugin/plugin.json"
+        data = json.loads(manifest.read_text())
+        data.pop("mcpServers", None)
+        manifest.write_text(json.dumps(data))
+        marketplace = self.root / ".agents/plugins/marketplace.json"
+        marketplace.parent.mkdir(parents=True)
+        data = json.loads((ROOT / ".agents/plugins/marketplace.json").read_text())
+        data["plugins"][0]["source"]["path"] = "./plugin"
+        marketplace.write_text(json.dumps(data))
+        homes, _, _ = self.development_homes()
+        tools.dev_link(self.plugin, **homes)
+        home = homes["codex_home"]
+        (home / "config.toml").write_text(
+            'model_provider = "fixture"\nmodel = "fixture"\n'
+            '[marketplaces.personal]\nsource_type = "local"\nsource = ' + json.dumps(str(self.root)) +
+            '\n[plugins."agent-coord@personal"]\nenabled = true\n'
+            '[model_providers.fixture]\nname = "Local fixture"\n'
+            'base_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n'
+            'request_max_retries = 0\nstream_max_retries = 0\n')
+        # Only this test's inert receipt hook is trusted. It blocks before inference;
+        # even a broken hook can only contact the closed loopback fixture port.
+        from test_browser_providers import CoordinationStore
+        from agent_coord.codex_app_server import CodexRPC
+        with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            rpc = CodexRPC(CoordinationStore(self.root / "test.sqlite3"), lambda event: None)
+            try:
+                inventory = rpc.request("hooks/list", {"cwds": [str(self.root)]})
+            finally:
+                rpc.close()
+        self.assertNotIn("unsupported plugin entry type", json.dumps(inventory))
+        self.assertFalse(inventory["data"][0]["errors"], inventory)
+        with (home / "config.toml").open("a") as config:
+            for hook in inventory["data"][0]["hooks"]:
+                command_hash, content_hash = hook["currentHash"].split("/")
+                config.write('\n[hooks.state.' + json.dumps(hook["key"]) + ']\n'
+                    'enabled = true\ntrusted_hash = ' + json.dumps(command_hash) + '\n'
+                    'trusted_content_hash = ' + json.dumps(content_hash) + '\n')
+        result = subprocess.run(["codex", "exec",
+            "--trust", "--skip-git-repo-check", "--sandbox", "read-only", "--json",
+            "Hook execution fixture."], cwd=self.root,
+            env={**os.environ, "CODEX_HOME": str(home)}, capture_output=True, text=True, timeout=30)
+        evidence = result.stdout + result.stderr + json.dumps(inventory)
+        self.assertNotIn("unsupported plugin entry type", evidence)
+        self.assertTrue(receipt.exists(), evidence)
+        events = [json.loads(line)["hook_event_name"] for line in receipt.read_text().splitlines()]
+        self.assertIn("SessionStart", events)
+        self.assertIn("UserPromptSubmit", events)
 
     @unittest.skipUnless(shutil.which("codex"), "requires the Codex CLI")
     def test_codex_app_server_discovers_development_skills(self):
@@ -146,7 +233,7 @@ class PluginToolsTests(unittest.TestCase):
         from agent_coord.codex_app_server import CodexRPC
 
         homes, _, _ = self.development_homes()
-        tools.dev_link(self.plugin, **homes)
+        installed = tools.dev_link(self.plugin, **homes)
         home = homes["codex_home"]
         (home / "config.toml").write_text(
             '[marketplaces.personal]\nsource_type = "local"\nsource = ' + json.dumps(str(ROOT)) +
@@ -160,16 +247,23 @@ class PluginToolsTests(unittest.TestCase):
         skills = {skill["name"]: Path(skill["path"]).resolve() for group in result["data"]
                   for skill in group["skills"] if skill["enabled"]}
         for skill in (self.plugin / "skills").iterdir():
-            self.assertEqual(skills["agent-coord:" + skill.name], (skill / "SKILL.md").resolve())
+            self.assertEqual(skills["agent-coord:" + skill.name],
+                             Path(installed["codex"], "skills", skill.name, "SKILL.md").resolve())
 
     def test_interrupted_cache_exchange_keeps_pinned_hook_and_can_resume(self):
         homes, previous, _ = self.development_homes()
+        retained = homes["share"] / "retained/personal" / previous.name
+        retained.parent.mkdir(parents=True)
+        previous.rename(retained)
+        previous.symlink_to(retained)
         with patch.object(tools, "_exchange_paths", side_effect=KeyboardInterrupt()):
             with self.assertRaises(KeyboardInterrupt):
                 tools.dev_link(self.plugin, prune=True, **homes)
         self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
         result = tools.dev_link(self.plugin, prune=True, **homes)
-        self.assertEqual(result["prunedCodexDirectories"], 1)
+        self.assertEqual(result["repairedCodexDirectories"], 1)
+        self.assertFalse(previous.is_symlink())
+        self.assertEqual(subprocess.check_output([retained / "scripts/hook"]), b"original hook")
         self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
 
     def test_install_never_exposes_pinned_paths_to_installer_pruning(self):
@@ -242,11 +336,11 @@ class PluginToolsTests(unittest.TestCase):
         marker = self.root / "installer-started"
         binary = self.root / "bin/codex"
         binary.parent.mkdir()
-        binary.write_text("#!" + os.sys.executable + "\n" +
-                          "import os,pathlib,shutil,time\n" +
+        fixture = ("import os,pathlib,shutil,time\n" +
                           "cache=pathlib.Path(os.environ['CODEX_HOME'])/'plugins/cache'\n" +
                           "cache.mkdir(parents=True)\nshutil.rmtree(cache)\n" +
                           "pathlib.Path(" + repr(str(marker)) + ").touch()\ntime.sleep(30)\n")
+        binary.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " -c " + shlex.quote(fixture) + "\n")
         binary.chmod(0o755)
         code = ("import importlib.util,pathlib; "
                 "s=importlib.util.spec_from_file_location('plugin_tools'," + repr(str(ROOT / "scripts/plugin_tools.py")) + "); "

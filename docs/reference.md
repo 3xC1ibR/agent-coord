@@ -2211,20 +2211,23 @@ claude plugin list --json
 
 The installer prints the selected development version and both cache paths.
 Check that both clients report this version. Start fresh Codex and Claude
-sessions to exercise updated skill discovery and hook registrations. Each
-development cache reads scripts, skills and the bundled OpenUI assets through
-`~/.local/share/agent-coord/current`. Future source edits take effect at those
-paths immediately. Rerun `dev-link` after changing client manifests or hook registrations.
-The committed manifests retain their existing versions.
+sessions to exercise updated skill discovery and hook registrations. Codex gets
+a regular-directory snapshot: its native hook validator rejects symlinks anywhere
+in a plugin, including its root. Rerun `dev-link` after every source change to
+publish a new snapshot; an unchanged source reuses the existing version. Claude
+reads scripts, skills and the bundled OpenUI assets through
+`~/.local/share/agent-coord/current`. The committed manifests retain their
+existing versions.
 
 Previously installed versions remain usable by sessions that loaded them. The
-optional `--prune` exchanges old Codex cache directories for links to their
-original contents in `~/.local/share/agent-coord/retained` and shares storage
-for identical files. Existing paths, working directories and version-specific
-code continue to work throughout the exchange. This operation requires a
-filesystem with atomic directory exchange on macOS or Linux and the cache
-and retained directory on the same volume. The installed desktop backend continues to own live requests until its
-ordinary backend update.
+optional `--prune` shares storage for identical cached files using hard links;
+cache roots and their contents remain ordinary directories and files. The helper
+also repairs symlinks created by older development installers, preserving pinned
+paths and original retained copies in `~/.local/share/agent-coord/retained`.
+Repairing those legacy links requires atomic directory exchange on macOS or Linux.
+The installed desktop backend continues to own live requests until its ordinary
+backend update. The Python suite includes an isolated native Codex session that
+must execute both session-start and prompt hooks before model inference.
 
 ### Install an immutable plugin snapshot
 

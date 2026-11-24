@@ -166,7 +166,7 @@ def install_codex(marketplace: str, *, codex_home: Path | None = None) -> dict:
 
 
 def _exchange_paths(left: Path, right: Path) -> None:
-    """Exchange a pinned directory and its forwarding link without a lookup gap."""
+    """Exchange a legacy link and its replacement without a lookup gap."""
     libc = ctypes.CDLL(None, use_errno=True)
     names = (os.fsencode(left), os.fsencode(right))
     if sys.platform == "darwin":
@@ -174,44 +174,81 @@ def _exchange_paths(left: Path, right: Path) -> None:
     elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
         result = libc.renameat2(-100, names[0], -100, names[1], 2)  # RENAME_EXCHANGE
     else:
-        raise ValueError("Atomic exchange is unavailable. Run dev-link without --prune.")
+        raise ValueError("Atomic exchange is required to repair a legacy Codex cache without a path gap.")
     if result != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), str(left))
 
 
-def _prune_cached_versions(cache: Path, development: Path, retained: Path) -> dict:
-    """Keep every original directory inode and path usable by existing processes."""
-    retained.mkdir(parents=True, exist_ok=True)
-    moved = shared_bytes = 0
-    identical = {}
-    for version in sorted(cache.iterdir()):
-        if version == development or not VERSION.fullmatch(version.name):
+def _snapshot_digest(plugin: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(plugin.rglob("*")):
+        if "__pycache__" in path.parts or path.suffix == ".pyc" or path.name == ".agent-coord-development.json":
             continue
-        archive = retained / version.name
-        if version.is_symlink():
-            if version.readlink() != archive or not archive.is_dir():
-                continue
-        else:
-            if not version.is_dir():
-                continue
-            manifest = version / ".codex-plugin/plugin.json"
-            if not manifest.is_file() or read_object(manifest).get("name") != "agent-coord":
-                continue
-            # The exchange puts the original tree exactly where this link points.
-            # A process killed on either side leaves the version fully usable.
-            if not archive.is_symlink():
-                archive.symlink_to(archive, target_is_directory=True)
-            if archive.readlink() != archive:
-                raise ValueError(f"Unexpected retained version path: {archive}")
-            _exchange_paths(archive, version)
-            moved += 1
-        # Published versions are immutable. Share identical file data while
-        # retaining each version's file modes, timestamps, manifest and imports.
-        with tempfile.TemporaryDirectory(dir=retained) as scratch:
-            link = Path(scratch, "file")
-            for directory, directories, files in os.walk(archive):
-                directories[:] = [name for name in directories if name != "__pycache__"]
+        if path.is_symlink():
+            raise ValueError(f"Unsupported link in Codex snapshot: {path}")
+        if path.is_file():
+            digest.update(json.dumps([str(path.relative_to(plugin)), path.stat().st_mode & 0o777]).encode())
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _copy_codex_snapshot(source: Path, target: Path) -> None:
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    _snapshot_digest(target)
+
+
+def _repair_codex_links(cache: Path, current: Path, retained: Path, plugin: Path) -> int:
+    """Materialize only links made by the former development installer.
+
+    Keep retained trees in place: a running process may have resolved its old
+    version to that path. Atomic exchange also keeps every pinned cache path valid.
+    """
+    repaired = 0
+    for version in sorted(cache.iterdir()):
+        if not VERSION.fullmatch(version.name) or not version.is_dir():
+            continue
+        legacy_root = version.is_symlink() and version.readlink() == retained / version.name
+        if version.is_symlink() and not legacy_root:
+            continue
+        legacy_components = any((version / name).is_symlink() and
+                                (version / name).readlink() == current / name
+                                for name in ("scripts", "skills"))
+        if not legacy_root and not legacy_components:
+            continue
+        with tempfile.TemporaryDirectory(dir=cache) as temporary:
+            replacement = Path(temporary, "plugin")
+            _copy_codex_snapshot(version, replacement)
+            if legacy_components:
+                (replacement / ".agent-coord-development.json").write_text(json.dumps({
+                    "source": str(plugin), "digest": _snapshot_digest(replacement)}) + "\n")
+            if legacy_root:
+                _exchange_paths(replacement, version)
+            else:
+                # Preserve the cache directory inode for pinned working directories.
+                for name in ("scripts", "skills"):
+                    entry = version / name
+                    if entry.is_symlink() and entry.readlink() == current / name:
+                        _exchange_paths(replacement / name, entry)
+                os.replace(replacement / ".agent-coord-development.json",
+                           version / ".agent-coord-development.json")
+        repaired += 1
+    return repaired
+
+
+def _prune_cached_versions(cache: Path, retained: Path) -> dict:
+    """Share immutable file data without introducing unsupported cache links."""
+    shared_bytes = 0
+    identical = {}
+    # Include retained originals, but never move or delete their pinned paths.
+    versions = [p for root in (retained, cache) if root.is_dir() for p in sorted(root.iterdir())
+                if VERSION.fullmatch(p.name) and p.is_dir() and not p.is_symlink()]
+    with tempfile.TemporaryDirectory(dir=cache) as scratch:
+        link = Path(scratch, "file")
+        for version in versions:
+            for directory, directories, files in os.walk(version):
+                directories[:] = [name for name in directories if name != "__pycache__"
+                                  and not Path(directory, name).is_symlink()]
                 for name in files:
                     path = Path(directory, name)
                     status = path.lstat()
@@ -225,7 +262,25 @@ def _prune_cached_versions(cache: Path, development: Path, retained: Path) -> di
                     os.link(original, link)
                     os.replace(link, path)
                     shared_bytes += status.st_size
-    return {"prunedCodexDirectories": moved, "deduplicatedBytes": shared_bytes}
+    return {"deduplicatedBytes": shared_bytes}
+
+
+def _publish_codex_snapshot(plugin: Path, target: Path) -> None:
+    with tempfile.TemporaryDirectory(dir=target.parent) as temporary:
+        snapshot = Path(temporary, "plugin")
+        _copy_codex_snapshot(plugin, snapshot)
+        (snapshot / ".agent-coord-development.json").write_text(json.dumps({
+            "source": str(plugin), "digest": _snapshot_digest(snapshot)}) + "\n")
+        os.rename(snapshot, target)
+
+
+def _matches_development_snapshot(plugin: Path, target: Path) -> bool:
+    marker = target / ".agent-coord-development.json"
+    if target.is_symlink() or not marker.is_file():
+        return False
+    metadata = read_object(marker)
+    return (metadata.get("source") == str(plugin) and
+            metadata.get("digest") == _snapshot_digest(plugin) == _snapshot_digest(target))
 
 
 def _write_development_shim(plugin: Path, current: Path, target: Path) -> None:
@@ -237,8 +292,7 @@ def _write_development_shim(plugin: Path, current: Path, target: Path) -> None:
             elif not entry.is_symlink() or entry.readlink() != current / path.name:
                 raise ValueError(f"Unmanaged component in development installation: {entry}")
             continue
-        # Codex skips a cached plugin with an external symlink for its manifest.
-        # Keep client metadata and hook registrations as ordinary files.
+        # Claude supports live script/skill links; keep its registration files local.
         for source in path.rglob("*") if path.is_dir() else (path,):
             if not source.is_file():
                 continue
@@ -267,7 +321,7 @@ def _publish_development_shim(plugin: Path, current: Path, target: Path) -> None
 
 
 def dev_link(plugin: Path, *, prune=False, codex_home=None, claude_home=None, share=None) -> dict:
-    """Switch new client sessions to the checkout. Preserve all previous paths."""
+    """Refresh local clients while preserving every previous Codex snapshot."""
     plugin = plugin.resolve()
     validate(plugin)
     codex_home = Path(codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
@@ -305,18 +359,18 @@ def dev_link(plugin: Path, *, prune=False, codex_home=None, claude_home=None, sh
             pointer.symlink_to(plugin, target_is_directory=True)
             os.replace(pointer, current)
         base = VERSION.fullmatch(read_object(plugin / ".codex-plugin/plugin.json")["version"]).group(1)
-        # A subsequent immutable installation supersedes a development version.
-        # Reuse the shim only while it is the newest installation for this base.
+        repaired = _repair_codex_links(codex_cache, current, share / "retained" / marketplace, plugin)
+        # Source edits require a new Codex version; pinned sessions keep their bytes.
         candidates = [path for path in installed if VERSION.fullmatch(path.name).group(1) == base]
         latest = max(candidates, key=lambda path: int(path.name.partition("+codex.")[2] or 0), default=None)
-        scripts = latest / "scripts" if latest else None
-        if scripts and not latest.is_symlink() and scripts.is_symlink() and scripts.readlink() == current / "scripts":
+        if latest and _matches_development_snapshot(plugin, latest):
             version = latest.name
         else:
             version = base + "+codex." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         codex = codex_cache / version
         claude = claude_cache / version
-        _publish_development_shim(plugin, current, codex)
+        if not codex.exists():
+            _publish_codex_snapshot(plugin, codex)
         _publish_development_shim(plugin, current, claude)
         if row["version"] != version:
             row.update(version=version, installPath=str(claude),
@@ -328,9 +382,10 @@ def dev_link(plugin: Path, *, prune=False, codex_home=None, claude_home=None, sh
                 if registry.read_bytes() != before:
                     raise ValueError("Claude plugin configuration changed; retry dev-link.")
                 os.replace(updated, registry)
-        result = {"current": str(current), "version": version, "codex": str(codex), "claude": str(claude)}
+        result = {"current": str(current), "version": version, "codex": str(codex), "claude": str(claude),
+                  "repairedCodexDirectories": repaired}
         if prune:
-            result.update(_prune_cached_versions(codex_cache, codex, share / "retained" / marketplace))
+            result.update(_prune_cached_versions(codex_cache, share / "retained" / marketplace))
         return result
 
 
