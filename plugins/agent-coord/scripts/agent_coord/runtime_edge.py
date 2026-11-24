@@ -109,7 +109,8 @@ def status_for_desktop(directory, status):
     edge = read_address(directory)
     if not edge:
         raise RuntimeError("The stable local runtime listener has no discovery record.")
-    return {**adoption_status(directory, status), "edge_url": edge["url"], "edge_observer": edge["observer"]}
+    return {**adoption_status(directory, status), "edge_url": edge["url"], "edge_observer": edge["observer"],
+            "unbrokered_provider_wait": 1}
 
 
 def adoption_status(directory, status):
@@ -148,7 +149,7 @@ def _publish_route(directory, status, browser_token, ready, predecessor):
     public_status = {key: status.get(key) for key in (
         "status", "url", "pid", "instance", "payload", "pending", "pending_confirmation",
         "runtime_updates", "runtime_update_prompts", "uninterrupted_updates",
-        "interrupted_provider_continuation", "paused", "upgrade_error",
+        "interrupted_provider_continuation", "unbrokered_provider_wait", "paused", "upgrade_error",
     )}
     route = {"status": public_status, "browser_token": browser_token, "ready": ready, "predecessor": predecessor}
     if current and not current["ready"]:
@@ -173,7 +174,7 @@ def publish_predecessor(directory, status):
             if response.status != 200:
                 raise RuntimeError("The preceding coordinator did not provide browser authentication.")
             token = json.load(response)["token"]
-    publish(directory, status, token, ready=True, predecessor=True)
+    publish(directory, {**status, "unbrokered_provider_wait": 1}, token, ready=True, predecessor=True)
 
 
 def _cursor(target, generation, event_id):

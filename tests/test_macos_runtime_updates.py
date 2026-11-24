@@ -39,7 +39,10 @@ func status(_ instance: String, _ payload: URL) -> [String: Any] {
 func update(_ id: String, _ phase: String) -> [String: Any] {
     return ["id": id, "phase": phase, "target": target.path, "previous": previous.path]
 }
-try backend.accept(status("old", previous))
+var predecessor = status("old", previous)
+predecessor["interrupted_provider_continuation"] = 1
+try backend.accept(predecessor)
+precondition(backend.continuesInterruptedProviders)
 var accepted = status("old", previous)
 accepted["update"] = update("first", "accepted")
 try backend.accept(accepted)
@@ -77,7 +80,10 @@ let edge = "http://127.0.0.1:22345/"
 var edgeStatus = status("before", previous)
 edgeStatus["edge_url"] = edge
 edgeStatus["edge_observer"] = String(repeating: "a", count: 43)
+edgeStatus["unbrokered_provider_wait"] = 1
+edgeStatus["interrupted_provider_continuation"] = 1
 try stable.accept(edgeStatus)
+precondition(!stable.continuesInterruptedProviders)
 for generation in 1...3 {
     let key = "upgrade-\(generation)"
     var active = status("before-\(generation)", previous)

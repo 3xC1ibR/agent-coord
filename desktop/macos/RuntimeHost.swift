@@ -320,7 +320,9 @@ final class Backend {
         pendingUpdate = pending
         supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
         supportsUninterruptedUpdates = (status["uninterrupted_updates"] as? Int ?? 0) >= 1
-        continuesInterruptedProviders = (status["interrupted_provider_continuation"] as? Int ?? 0) >= 1
+        let waitsForUnbrokeredProviders = (status["unbrokered_provider_wait"] as? Int ?? 0) >= 1
+        continuesInterruptedProviders = !waitsForUnbrokeredProviders
+            && (status["interrupted_provider_continuation"] as? Int ?? 0) >= 1
         pendingUpdateRequiresConfirmation = (status["runtime_update_prompts"] as? Int ?? 0) >= 1
             && status["pending_confirmation"] as? Bool == true
         self.instance = instance
