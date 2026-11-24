@@ -556,7 +556,15 @@ class AntigravityRPC:
     def _confirm_delivery(self, thread_id):
         state = self.delivery_turns.get(thread_id)
         if state and not state["accepted"]:
-            self.delivery.submitted(thread_id, state["id"], state["batch"])
+            from .browser_persistence import capturing_writes
+            projection = getattr(self.store, "provider_projection", None)
+            if projection is not None and capturing_writes():
+                turn_id, batch = state["id"], state["batch"]
+                projection.sessions.persistence.submit(
+                    lambda: self.delivery.submitted(thread_id, turn_id, batch),
+                    key=thread_id, required=True)
+            else:
+                self.delivery.submitted(thread_id, state["id"], state["batch"])
             state["accepted"] = True
 
     # ACP has no steering operation or safe in-prompt delivery boundary.
@@ -633,12 +641,19 @@ class AntigravityRPC:
                 # provider output. Throttle failed attempts too, so contention
                 # cannot make every streamed chunk wait on the same DB lock.
                 self.last_activity[thread_id] = now
-                try:
-                    self.store.touch(thread_id)
-                except (sqlite3.Error, CoordinationError):
-                    logging.getLogger(__name__).warning(
-                        "Could not refresh Antigravity activity for %s; continuing provider stream",
-                        thread_id, exc_info=True)
+                def touch():
+                    try:
+                        self.store.touch(thread_id)
+                    except (sqlite3.Error, CoordinationError):
+                        logging.getLogger(__name__).warning(
+                            "Could not refresh Antigravity activity for %s; continuing provider stream",
+                            thread_id, exc_info=True)
+                from .browser_persistence import capturing_writes
+                projection = getattr(self.store, "provider_projection", None)
+                if projection is not None and capturing_writes():
+                    projection.sessions.persistence.submit(touch, key=thread_id, required=False, coalesce="provider_activity")
+                else:
+                    touch()
         if kind == "config_option_update":
             self.catalog = model_catalog(update)
         with self.lock:

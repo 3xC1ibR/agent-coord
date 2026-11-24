@@ -303,6 +303,20 @@ class ACPProjectionTests(unittest.TestCase):
             future.result(timeout=2)
         self.assertEqual(adapter.completed[self.identity]["status"], "interrupted")
 
+    def test_antigravity_first_delta_captures_delivery_and_activity_without_database_io(self):
+        from agent_coord.browser_persistence import capture_writes
+        adapter, connection = self.bind("antigravity")
+        adapter.on_event = lambda _: None
+        self.projection.stream_delta_protocol = 1
+        adapter.delivery_turns[self.identity] = {"id": self.turn_id, "batch": {"ids": [1]}, "accepted": False}
+        message = {"method": "session/update", "params": {"sessionId": "native-session", "update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "first"}}}}
+        with capture_writes() as writes, patch.object(self.store, "_connection", side_effect=AssertionError("SQLite under delta lock")):
+            connection._message(message)
+        self.assertTrue(adapter.delivery_turns[self.identity]["accepted"])
+        self.assertEqual(len(writes), 2)
+        self.assertEqual([required for _, required in writes], [True, False])
+
 
 class ACPCancellationTests(unittest.TestCase):
     def test_cancel_waits_for_native_terminal_reply_before_close(self):
