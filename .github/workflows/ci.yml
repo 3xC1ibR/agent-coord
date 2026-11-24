@@ -159,6 +159,19 @@ jobs:
           path: build/ios-simulator/Build/Products/Release-iphonesimulator/*.app
           if-no-files-found: error
           retention-days: 30
+      - name: Build the iOS companion for a physical device
+        run: |
+          xcodebuild -project mobile/ios/RibbonField.xcodeproj \
+            -scheme RibbonField -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios-device CODE_SIGNING_ALLOWED=NO build
+      - name: Retain the device application for local provisioning
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-device-unsigned
+          path: build/ios-device/Build/Products/Release-iphoneos/*.app
+          if-no-files-found: error
+          retention-days: 30
 
   macos-build:
     name: macOS standalone build (arm64)
