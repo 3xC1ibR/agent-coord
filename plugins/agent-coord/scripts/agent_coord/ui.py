@@ -1464,6 +1464,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
+        self._storage_stopped = threading.Event()
+        self._migration_index = None
         self._idle_workers = []
         self._workers_closing = False
         super().__init__(*args, **kwargs)
@@ -1490,7 +1492,45 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 return
             request, client_address = next_request
 
+    def start_storage_maintenance(self, owner_guard):
+        """Start migration only after the serving runtime owns its committed database."""
+        from .search_publication import SearchPublicationWorker, prepare_search_publication
+        from .search_store import SearchStore
+        from .transcript_migration import start_runtime_migration
+
+        sessions = self.browser_sessions
+        store = sessions.store
+
+        def available():
+            return owner_guard() and not self._storage_stopped.is_set() and not sessions.admission.paused
+
+        def prepare_search():
+            if not available():
+                return False
+            if self.search_publications is not None:
+                return True
+            self._migration_index = SearchStore.for_store(store)
+            if not prepare_search_publication(store, stopped=self._storage_stopped, owner_guard=available):
+                return False
+            with sessions.admission.enter() as allowed:
+                if not allowed or not available():
+                    return False
+                self.search_publications = SearchPublicationWorker.start_if_active(store)
+            return self.search_publications is not None
+
+        if available():
+            with sessions.admission.enter() as allowed:
+                if allowed:
+                    self.search_publications = SearchPublicationWorker.start_if_active(store)
+                    if self.search_publications is None:
+                        sessions.start_search_index()
+        start_runtime_migration(sessions, owner_guard=owner_guard, search_handshake=prepare_search)
+
     def server_close(self) -> None:
+        self._storage_stopped.set()
+        migration = getattr(self.browser_sessions, "transcript_migration", None)
+        if migration is not None:
+            migration.close(timeout=None)
         with self._worker_lock:
             self._workers_closing = True
             for mailbox in self._idle_workers:
@@ -1521,6 +1561,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 try:
                     if self.search_publications is not None:
                         self.search_publications.close()
+                    elif self._migration_index is not None:
+                        self._migration_index.close()
                 finally:
                     super().server_close()
 
@@ -1592,10 +1634,6 @@ def make_ui_server(
     remote.restore(f"http://{target_host}:{bound_port}")
     try:
         sessions.start_database_checkpoint()
-        from .search_publication import SearchPublicationWorker
-        server.search_publications = SearchPublicationWorker.start_if_active(store)
-        if server.search_publications is None:
-            sessions.start_search_index()
         push.start()
         native.start()
         server.thread_control.start()

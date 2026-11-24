@@ -1383,6 +1383,9 @@ class Runtime:
             os.write(self.ready_fd, b"ready\n")
             os.close(self.ready_fd)
             self.ready_fd = None
+        self.server.start_storage_maintenance(
+            lambda: not self.trial and not self.upgrading and not self.stopping.is_set()
+            and self.supervisor_retirement is None)
         from . import runtime_update
         candidate = None
         recovery = None

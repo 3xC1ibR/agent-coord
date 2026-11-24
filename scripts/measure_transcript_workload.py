@@ -164,6 +164,7 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             if verified['failures']: raise ValueError('Search baseline verification failed')
             search.activate()
         server = ui.make_ui_server(store, port=0, cwd=directory, browser_sessions=sessions)
+        server.start_storage_maintenance(lambda: True)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
         resources.update(server=server, worker=worker)

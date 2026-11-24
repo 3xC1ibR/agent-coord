@@ -3,8 +3,11 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
+
+import test_ui
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.search_publication import SearchPublicationWorker, install_change_capture, prepare_search_publication
@@ -113,3 +116,35 @@ class SearchPublicationTests(unittest.TestCase):
             self.assertEqual(verify.call_count, 1)
         with self.index.connection() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM search_threads WHERE title='changed during verification'").fetchone()[0], 1)
+
+
+class SearchRuntimeLifecycleTests(unittest.TestCase):
+    setUp = test_ui.BrowserHTTPTests.setUp
+    stop_server = test_ui.BrowserHTTPTests.stop_server
+    request = test_ui.BrowserHTTPTests.request
+
+    def test_committed_server_attaches_worker_after_verifying_a_new_index(self):
+        from agent_coord import desktop_runtime
+
+        self.assertIsNone(self.server.search_publications)
+        path = str(self.store.database_path)
+        desktop_runtime._OWNED_DATABASES.add(path)
+        self.addCleanup(desktop_runtime._OWNED_DATABASES.discard, path)
+        self.store.register(session_id="baseline", client="codex", cwd=str(self.root), name="Before activation")
+        self.server.start_storage_maintenance(lambda: True)
+        deadline = time.monotonic() + 10
+        while self.server.search_publications is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        worker = self.server.search_publications
+        self.assertIsNotNone(worker)
+        self.assertTrue(worker.index.active)
+        self.store.threads.update("baseline", title="After verification")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with worker.index.connection(readonly=True) as db:
+                row = db.execute("SELECT title FROM search_threads WHERE thread_id='baseline'").fetchone()
+            if row is not None and row[0] == "after verification":
+                break
+            time.sleep(.02)
+        else:
+            self.fail("The committed server did not publish the updated thread")
