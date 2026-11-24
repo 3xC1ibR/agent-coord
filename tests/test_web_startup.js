@@ -121,14 +121,56 @@ test("a stalled request reaches the total deadline without unsafe reinsertion", 
   page.advance(3999);
   assert.equal(page.status.startup, "loading");
   page.advance(1);
-  assert.equal(page.status.startup, "failed");
+  assert.equal(page.status.startup, "waiting");
   assert.equal(page.inserted.length, 1);
-  // A timeout is not proof the script did not execute. Late callbacks cannot
-  // restart the sequence, replace the document, or initialize the app twice.
+  assert.equal(page.notice.hidden, false);
+  assert.equal(page.timers.size, 0);
+  // A late success continues forward without replaying any script or extending
+  // the retry deadline. The real-browser test executes the delayed app itself.
   script.onload(); script.onerror();
+  for (const path of paths.slice(1)) {
+    assert.equal(new URL(page.current().src).pathname, path);
+    page.current().onload();
+  }
+  assert.equal(page.inserted.length, paths.length);
+  assert.equal(page.status.startup, "loaded");
+  assert.equal(page.notice.hidden, true);
+  assert.equal(page.timers.size, 0);
+});
+
+test("late success cannot start another retry window for a failed dependent", () => {
+  const page = fixture();
+  page.advance(4000);
+  page.current().onload();
+  page.current().onerror();
+  assert.equal(page.status.startup, "failed");
+  assert.equal(page.notice.hidden, false);
+  page.advance(10000);
+  assert.equal(page.inserted.length, 2);
+  assert.equal(page.timers.size, 0);
+});
+
+test("late load failure never reinserts the uncertain script", () => {
+  const page = fixture();
+  page.advance(4000);
+  page.current().onerror();
+  assert.equal(page.status.startup, "failed");
   page.advance(10000);
   assert.equal(page.inserted.length, 1);
   assert.equal(page.timers.size, 0);
+});
+
+test("late completion preserves an unrelated application error", () => {
+  const page = fixture();
+  page.advance(4000);
+  page.message.textContent = "Conversation could not be opened.";
+  for (const path of paths) {
+    assert.equal(new URL(page.current().src).pathname, path);
+    page.current().onload();
+  }
+  assert.equal(page.status.startup, "loaded");
+  assert.equal(page.notice.hidden, false);
+  assert.equal(page.message.textContent, "Conversation could not be opened.");
 });
 
 test("the recovery deadline covers the whole sequence, not each asset separately", () => {

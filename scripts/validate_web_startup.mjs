@@ -17,10 +17,10 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, inde
 }, []));
 const webRoot = resolve(args["web-root"] || `${root}/plugins/agent-coord/scripts/agent_coord/web`);
 const output = resolve(args.output || "/tmp/ribbon-startup.json");
-const scenarios = (args.cases || "normal,transient,persistent,late-failure").split(",");
+const scenarios = (args.cases || "normal,transient,persistent,late-failure,delayed-app").split(",");
 const repetitions = Number(args.repeat || 1);
 assert.ok(Number.isInteger(repetitions) && repetitions > 0 && repetitions <= 20);
-assert.ok(scenarios.every(name => ["normal", "transient", "persistent", "late-failure"].includes(name)));
+assert.ok(scenarios.every(name => ["normal", "transient", "persistent", "late-failure", "delayed-app"].includes(name)));
 assert.ok(!args.engine || ["chromium", "webkit"].includes(args.engine));
 mkdirSync(dirname(output), {recursive: true});
 const {chromium, webkit} = createRequire(`${root}/demo/package.json`)("playwright");
@@ -106,6 +106,8 @@ try {
     let tailHeld = false;
     let releaseTailRequest;
     const tailRequest = new Promise(done => { releaseTailRequest = done; });
+    let releaseApp;
+    const appResponse = new Promise(done => { releaseApp = done; });
     await page.route("**/*", async route => {
       const url = new URL(route.request().url());
       if (url.origin !== base) return route.abort();
@@ -114,6 +116,10 @@ try {
       const count = result.requests[asset] = (result.requests[asset] || 0) + 1;
       const fail = scenario === "transient" && transient.has(asset) && count === 1 ||
         scenario === "persistent" && asset === "navigation.js";
+      if (scenario === "delayed-app" && asset === "app.js" && count === 1) {
+        await appResponse;
+        return route.continue();
+      }
       if (scenario === "late-failure" && asset === "thread-hover.js" && count === 1) {
         tailHeld = true;
         releaseTailRequest();
@@ -137,6 +143,16 @@ try {
       if (scenario === "late-failure") {
         await Promise.race([tailRequest, new Promise((_, reject) => setTimeout(() => reject(Error("Tail was not requested")), 5000))]);
       }
+      if (scenario === "delayed-app") {
+        await page.waitForFunction(() => !document.querySelector("#error").hidden &&
+          document.querySelector("#error").textContent.includes("Could not load Ribbon Field"), null, {timeout: 5000});
+        await page.waitForTimeout(100);
+        result.beforeLateResponse = await page.evaluate(() => ({at: performance.now(),
+          status: document.documentElement.dataset.startup, appExecuted: window.__startupProbe.loaded.includes("app.js")}));
+        assert.equal(result.beforeLateResponse.appExecuted, false, "hold the actual app script beyond the deadline");
+        result.releaseMs = await page.evaluate(() => performance.now());
+        releaseApp();
+      }
       if (scenario === "persistent") {
         await page.waitForTimeout(4500);
         result.initialization = await page.evaluate(() => window.__startupProbe);
@@ -157,14 +173,25 @@ try {
           !document.querySelector("#message").disabled && !document.querySelector("#send").disabled,
         null, {timeout: 5000, polling: 20});
         result.readyMs = await page.evaluate(() => performance.now());
-        assert.ok(result.readyMs <= 5000, `startup took ${result.readyMs}ms`);
+        if (scenario !== "delayed-app") assert.ok(result.readyMs <= 5000, `startup took ${result.readyMs}ms`);
         if (scenario === "transient") assert.deepEqual(new Set(result.failures), transient);
         const draft = `Startup retained draft: ${scenario}`;
         await page.locator("#message").fill(draft);
         if (tailHeld) releaseTail();
-        await page.waitForFunction(() => typeof threadHover !== "undefined", null, {timeout: 5000});
+        await page.waitForFunction(() => typeof threadHover !== "undefined", null,
+          {timeout: scenario === "delayed-app" ? 1000 : 5000});
         result.recoveredMs = await page.evaluate(() => performance.now());
-        assert.ok(result.recoveredMs <= 5000, `asset recovery took ${result.recoveredMs}ms`);
+        if (scenario !== "delayed-app") assert.ok(result.recoveredMs <= 5000, `asset recovery took ${result.recoveredMs}ms`);
+        if (scenario === "delayed-app") {
+          assert.ok(result.recoveredMs - result.releaseMs <= 1000, "finish promptly after late success");
+          assert.equal(result.requests["app.js"], 1, "never retry an uncertain app execution");
+          assert.equal(await page.locator("#error").isVisible(), false, "clear the resolved startup notice");
+          // This real keyboard handler belongs to filter-menu.js, after app.js.
+          await page.evaluate(() => { document.querySelector("#filter-menu").open = true; });
+          await page.keyboard.press("Escape");
+          assert.equal(await page.locator("#filter-menu").evaluate(menu => menu.open), false);
+          result.lateCompletionFunctional = true;
+        }
         await page.waitForTimeout(1100);
         assert.equal(await page.locator("#message").inputValue(), draft, "recovery must retain a draft");
         assert.equal(await page.evaluate(() => performance.timeOrigin), timeOrigin, "recovery must retain the document");
@@ -194,6 +221,7 @@ try {
       await page.screenshot({path: result.screenshot}).catch(() => {});
     } finally {
       releaseTail();
+      releaseApp();
       await context.close();
     }
     console.log(JSON.stringify({scenario, passed: result.passed, readyMs: result.readyMs, failure: result.failure}));

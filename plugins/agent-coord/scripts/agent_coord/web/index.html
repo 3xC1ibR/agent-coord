@@ -429,22 +429,33 @@
     const sources = Array.from(document.querySelectorAll("script[data-startup-failed], link[data-startup]"),
       asset => asset.src || asset.href);
     const delays = [100, 200, 400, 800, 1600];
-    let index = 0, retryTimer;
-    const deadline = setTimeout(fail, 4000);
+    const notice = document.getElementById("error");
+    const failureMessage = "Could not load Ribbon Field. Check your connection.";
+    let index = 0, retryTimer, pending = false, expired = false;
+    const deadline = setTimeout(() => {
+      expired = true;
+      clearTimeout(retryTimer);
+      // End automatic retries, but a pending script can still execute. Its late
+      // success must finish the sequence instead of leaving a partial interface.
+      status.startup = pending ? "waiting" : "failed";
+      showFailure();
+    }, 4000);
+    function showFailure() {
+      notice.querySelector("span").textContent = failureMessage;
+      notice.hidden = false;
+    }
     function fail() {
-      if (status.startup !== "loading") return;
       status.startup = "failed";
       clearTimeout(deadline);
       clearTimeout(retryTimer);
-      const notice = document.getElementById("error");
-      notice.querySelector("span").textContent = "Could not load Ribbon Field. Check your connection.";
-      notice.hidden = false;
+      showFailure();
     }
     function load(attempt = 0) {
-      if (status.startup !== "loading") return;
+      if (status.startup !== "loading" && status.startup !== "waiting") return;
       if (index === sources.length) {
         status.startup = "loaded";
         clearTimeout(deadline);
+        if (notice.querySelector("span").textContent === failureMessage) notice.hidden = true;
         return;
       }
       const script = document.createElement("script");
@@ -455,18 +466,21 @@
       script.onload = () => {
         if (settled) return;
         settled = true;
+        pending = false;
         index++;
         load();
       };
       script.onerror = () => {
-        if (settled || status.startup !== "loading") return;
+        if (settled) return;
         settled = true;
+        pending = false;
         script.remove();
-        if (attempt === delays.length) fail();
+        if (expired || attempt === delays.length) fail();
         else retryTimer = setTimeout(() => load(attempt + 1), delays[attempt]);
       };
       // Never retry a timeout or an execution error: the script may have run.
       // Only a script-element load error proves reinsertion cannot initialize twice.
+      pending = true;
       document.head.append(script);
     }
     load();
