@@ -828,7 +828,7 @@ test("one needs-you derivation: dismissal clears it, running beats a stale reque
 
   const parent = thread("parent", {response_state: "available", needs_attention: true, attention_reason: "review",
     attention_items: [{thread_id: "child", reason: "review"}]});
-  const child = {...request, thread_id: "child", attention_owner_thread_id: "parent"};
+  const child = {...request, thread_id: "child", supervisor_thread_id: "parent", attention_owner_thread_id: "child"};
   assert.equal(threadViews.needsAction(parent, [parent, child]), false, "a child's needs-you does not propagate");
   assert.equal(threadViews.needsAction(parent, [parent, {...child, open_ask: {id: 2}}]), false, "nor does its question");
   for (const escalation of [{status: "stalled"}, {status: "needs input"}, {response_state: "failed"}])

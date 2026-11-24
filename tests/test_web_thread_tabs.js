@@ -545,7 +545,7 @@ test("a parent tab dot clears when its child's request is dismissed and stays bl
   const parent = {...thread("parent"), response_state: "available", needs_attention: true, attention_reason: "review",
     attention_items: [{thread_id: "child", reason: "review"}]};
   const child = {...thread("child"), response_state: "input", needs_attention: true, attention_reason: "review",
-    attention_owner_thread_id: "parent", can_handle_response: true,
+    supervisor_thread_id: "parent", attention_owner_thread_id: "child", can_handle_response: true,
     checkpoint: {id: 9, next_actor: "user", next_action: "Choose a plan"}};
   tabs.open(parent);
   const tab = () => container.children[1].children[0];

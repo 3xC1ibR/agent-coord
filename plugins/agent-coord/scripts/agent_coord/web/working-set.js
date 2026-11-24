@@ -625,6 +625,6 @@ const WorkingSet = (() => {
       },
     };
   }
-  return {create, derive, levelOf, columnOf, needsReply, groupFor, createList, listSections, placementOf, requestOf, escalates};
+  return {create, derive, levelOf, columnOf, needsReply, groupFor, createList, listSections, placementOf, requestOf, escalates, parentOf};
 })();
 if (typeof module !== "undefined") module.exports = WorkingSet;

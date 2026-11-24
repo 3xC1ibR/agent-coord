@@ -47,8 +47,12 @@ const threadViews = (() => {
   }
   function needsAction(thread, threads = []) {
     if (!thread || thread.attention === "archived" || thread.snoozed) return false;
-    const children = (Array.isArray(threads) ? threads : []).filter(child => child !== thread && child.thread_id !== thread.thread_id &&
-      child.attention_owner_thread_id === thread.thread_id && child.attention !== "archived" && !child.snoozed);
+    // Children by supervision, as the inbox nests them; the backend's attention owner is not the relation.
+    const inventory = Array.isArray(threads) ? threads : [];
+    const byId = new Map(inventory.map(item => [item.thread_id, item]));
+    byId.set(thread.thread_id, thread);
+    const children = inventory.filter(child => child.thread_id !== thread.thread_id &&
+      overview.parentOf(child, byId) === thread && child.attention !== "archived" && !child.snoozed);
     const request = overview.requestOf(thread);
     if (["approval", "question"].includes(request) || children.some(child => overview.requestOf(child) === "approval")) return true;
     if (grouping.status(thread).key === "running") return false;
