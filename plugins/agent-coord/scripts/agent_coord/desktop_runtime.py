@@ -502,7 +502,7 @@ def payload_command(payload):
     python = Path(config["python"])
     if not python.is_absolute():
         python = payload / python
-    return [str(python), "-u", str(payload / "backend.py")]
+    return [str(python), "-B", "-u", str(payload / "backend.py")]
 
 
 def payload_environment(payload):

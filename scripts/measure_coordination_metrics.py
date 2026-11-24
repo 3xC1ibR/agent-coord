@@ -82,7 +82,7 @@ def main():
                 reports[mode] = report
                 print(json.dumps({"mode": mode, "report": str(result_path)}), flush=True)
                 continue
-            command = [sys.executable, str(Path(__file__).with_name("measure_backend_latency.py")),
+            command = [sys.executable, "-B", str(Path(__file__).with_name("measure_backend_latency.py")),
                        "--snapshot", str(args.snapshot.resolve()), "--agents", "6", "--windows", "3",
                        "--hook-rate", "3", "--delta-rate", "6", "--stored-history", "--warmup", str(args.warmup),
                        "--sends", str(args.sends), "--reads", str(args.reads), "--output", str(result_path.resolve())]

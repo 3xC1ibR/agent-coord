@@ -33,13 +33,17 @@ def verify(app: Path, *, native_smoke: bool = False, report: Path | None = None)
         shutil.copytree(app, relocated, symlinks=True)
         resources = relocated / "Contents/Resources"
         config = portable_configuration(relocated)
+        # Native hooks can clear their inherited Python flags. Exercise the
+        # generated commands before accepting the package as immutable.
+        from python_resource_validation import validate
+        result["python_resource_integrity"] = validate(relocated)
         home = root / "new-user"
         home.mkdir()
         environment = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                        "TMPDIR": str(root), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
                        "PYTHONPATH": str(resources / "backend")}
         python = resources / config["python"]
-        probe = subprocess.run([str(python), "-c", """
+        probe = subprocess.run([str(python), "-B", "-c", """
 import json, sys, ssl, sqlite3, platform
 from pathlib import Path
 sys.path.insert(0, str(Path(sys.argv[1]) / 'push-libs'))
@@ -63,7 +67,7 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
                          "test_desktop_runtime.py", "test_runtime_unsupported_update.py",
                          "fixtures/update_interruption_provider.py"):
             shutil.copyfile(tests / filename, fixtures / filename)
-        subprocess.run([str(python), "-m", "unittest", "-v",
+        subprocess.run([str(python), "-B", "-m", "unittest", "-v",
                         "test_coordinator_projection.ProjectionTests."
                         "test_next_request_replaces_codex_provider_whose_output_ended",
                         "test_coordinator_projection.ProjectionTests."
@@ -78,7 +82,7 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
         result["codex_provider_relaunch"] = True
         result["legacy_watchdog_approval_recovery"] = True
         result["coordinator_owned_provider_update"] = ["kimi", "antigravity", "muse"]
-        with subprocess.Popen([str(python), "-u", str(resources / "backend.py")], cwd=home,
+        with subprocess.Popen([str(python), "-B", "-u", str(resources / "backend.py")], cwd=home,
                               env=environment, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
             try:
@@ -119,7 +123,7 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
             # The native smoke suite starts no model turns and owns a temporary
             # database/preferences domain. Use only system tools on PATH.
             try:
-                subprocess.run([str(python), str(Path(__file__).with_name("smoke_test.py")),
+                subprocess.run([str(python), "-B", str(Path(__file__).with_name("smoke_test.py")),
                                 "--app", str(relocated), "--report", str(native_report)],
                                cwd=home, env=environment, check=True, capture_output=True, text=True)
             finally:
@@ -129,6 +133,8 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
                     report.write_text(json.dumps(result, indent=2) + "\n")
                     for screenshot in native_report.parent.glob(native_report.name + "*.png"):
                         shutil.copyfile(screenshot, Path(str(report) + screenshot.name[len(native_report.name):]))
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(relocated)], check=True)
+        result["signature_preserved"] = True
     if report:
         report.write_text(json.dumps(result, indent=2) + "\n")
     return result

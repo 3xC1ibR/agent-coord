@@ -2708,7 +2708,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                         raise RuntimeError('Native smoke fixture command failed: ' + args[0])
                 return json.loads(output.getvalue())
             """
-        task.arguments = ["-c", commands + "\n" + source, smokeDirectory!.appendingPathComponent("state.sqlite3").path] + arguments
+        task.arguments = ["-B", "-c", commands + "\n" + source, smokeDirectory!.appendingPathComponent("state.sqlite3").path] + arguments
         task.environment = ["PATH": configuration.toolPath, "PYTHONPATH": resources.appendingPathComponent("backend").path,
                             "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"]
         task.currentDirectoryURL = smokeDirectory

@@ -305,7 +305,7 @@ def run_operator_gate(args):
         sys.path.insert(0, str(ROOT/"plugins/agent-coord/scripts"))
         from agent_coord.desktop_runtime import payload_digest
         digest = payload_digest(candidate/"Contents/Resources")
-        command = [sys.executable, ROOT/"scripts/validate_signed_runtime_responsiveness.py",
+        command = [sys.executable, "-B", ROOT/"scripts/validate_signed_runtime_responsiveness.py",
                    "--previous", args.previous.resolve(strict=True), "--candidate", candidate,
                    "--snapshot", snapshot, "--report", report]
         if stable_origin:
