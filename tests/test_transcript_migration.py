@@ -60,6 +60,20 @@ class TranscriptMigrationTests(unittest.TestCase):
         self.assertEqual(self.worker.transcripts.read_full("thread"), self.history)
         self.assertEqual(self.worker.phase, "active")
 
+    def test_active_inventory_opens_only_read_connections(self):
+        self.ready = True
+        self.assertTrue(self.worker.run_once())
+        connect = self.store._connection
+
+        @contextmanager
+        def read_connection():
+            with connect() as db:
+                self.assertEqual(db.execute("PRAGMA query_only").fetchone()[0], 1)
+                yield db
+
+        with patch.object(self.store, "_connection", read_connection):
+            self.assertTrue(self.worker.run_once())
+
     def test_ownership_loss_after_file_preparation_prevents_publication(self):
         original = self.worker.transcripts._sync_directory
         def lose_owner(directory):

@@ -118,7 +118,8 @@ class TranscriptMigrationWorker:
         # The search hook owns activation and durable replay of its source log.
         # Transcript activation is independently fenced and per-thread atomic.
         inactive = self._inventory(inactive=True, limit=self.batch_size)
-        self.transcripts.migrate(thread_ids=inactive, activate=True)
+        if inactive:
+            self.transcripts.migrate(thread_ids=inactive, activate=True)
         self.phase = "activating" if self._inventory(inactive=True, limit=1) else "active"
         self.error = None
         return self.phase == "active"
