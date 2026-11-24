@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -185,6 +186,7 @@ function appFixture() {
   c.sessionStorage = {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
+  loadComposer(c);
   for (const [start, end] of [["async function sendMessage(", '$("composer").onsubmit'],
     ["function requestButton(", "function renderRequests("],
     ["async function updateThreadAttention(", "function threadCard("]]) {
@@ -196,8 +198,9 @@ function appFixture() {
 test("accepted messages advance, slash commands and failed sends do not", async () => {
   for (const outcome of ["accepted", "command", "failed"]) {
     const {c, advanced} = appFixture();
+    if (outcome === "command") c.$("message").value = "/help";
     c.api = async () => {
-      if (outcome === "failed") throw new Error("Failed send");
+      if (outcome === "failed") throw Object.assign(new Error("Failed send"), {status: 400});
       return outcome === "command" ? {command: {message: "Help"}} : {};
     };
     if (outcome === "failed") {
@@ -281,7 +284,7 @@ test("app Roll up retains all projects and queue order through refresh and cross
   const c = projectAppFixture(), roll = c.state.rollUp;
   await roll.start();
   assert.equal(c.state.selected, "first");
-  assert.equal(c.state.projectCwd, "/first");
+  assert.equal(c.state.projectCwd, "/home");
   assert.equal(roll.active, true);
   assert.equal(c.$("roll-up-bar").hidden, false);
   assert.deepEqual(queued(c), ["first", "second", "third"]);
@@ -292,13 +295,13 @@ test("app Roll up retains all projects and queue order through refresh and cross
   c.$("message").value = "Unsent draft";
   await roll.responded(roll.ticket());
   assert.equal(c.state.selected, "second");
-  assert.equal(c.state.projectCwd, "/second");
+  assert.equal(c.state.projectCwd, "/home");
   assert.equal(c.state.drafts.get("first"), "Unsent draft");
   assert.equal(roll.active, true);
   assert.deepEqual(queued(c), ["second", "third", "arrival"]);
   await roll.skip();
   assert.equal(c.state.selected, "third");
-  assert.equal(c.state.projectCwd, "/third");
+  assert.equal(c.state.projectCwd, "/home");
   assert.deepEqual(queued(c), ["third", "arrival"]);
 });
 
@@ -306,7 +309,7 @@ test("app Roll up preserves its pass when a thread's project is learned from fre
   const c = projectAppFixture({known: false});
   await c.state.rollUp.start();
   assert.equal(c.state.selected, "first");
-  assert.equal(c.state.projectCwd, "/first");
+  assert.equal(c.state.projectCwd, "/home");
   assert.equal(c.state.rollUp.active, true);
   assert.deepEqual(queued(c), ["first", "second", "third"]);
 });
@@ -323,7 +326,7 @@ test("manual project or conversation navigation still stops the app Roll up pass
       assert.equal(c.state.selected, null);
     } else {
       await c.select("second");
-      assert.equal(c.state.projectCwd, "/second");
+      assert.equal(c.state.projectCwd, "/home");
       assert.equal(c.state.selected, "second");
     }
     assert.equal(c.state.rollUp.active, false, destination);
@@ -333,7 +336,7 @@ test("manual project or conversation navigation still stops the app Roll up pass
   }
 });
 
-test("opening a cached conversation in another project paints before that project's thread list loads", async () => {
+test("opening a cached conversation paints before redrawing the current workspace", async () => {
   const c = projectAppFixture();
   const listed = [];
   let finishList;
@@ -351,6 +354,7 @@ test("opening a cached conversation in another project paints before that projec
   c.requestAnimationFrame = callback => frames.push(callback);
   c.setTimeout = callback => callback();
   c.renderQueuedMessages = () => {};
+  c.renderRequests = () => {};
   c.$("timeline").replaceChildren = () => {};
   c.refreshDetail = async () => true;
   const opening = c.select("second", {refreshInventory: false});
@@ -359,8 +363,8 @@ test("opening a cached conversation in another project paints before that projec
   assert.deepEqual(order, ["conversation"], "the overview is not redrawn before the conversation's frame");
   frames.splice(0).forEach(callback => callback());
   assert.deepEqual(order, ["conversation", "overview"]);
-  assert.equal(c.state.projectCwd, "/second");
-  assert.equal(listed.length, 1);
-  finishList();
+  assert.equal(c.state.projectCwd, "/home");
+  assert.equal(listed.length, 0);
+  finishList?.();
   await opening;
 });

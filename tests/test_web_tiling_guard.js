@@ -4,8 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-// Tiling copies the listed conversations' composer drafts into panes. Only a
-// send or image read for one of those conversations can be duplicated or lost.
+// Tiling shares each conversation's composer state with its in-process pane.
 const thread = id => ({thread_id: id, title: "Thread " + id, attention: "now"});
 
 function shellFixture() {
@@ -42,26 +41,26 @@ test("a send or image for another conversation does not block tiling", async () 
   assert.deepEqual(errors, []);
 });
 
-test("a tiled conversation's unaccepted send or unread image blocks copying its draft", async () => {
-  for (const block of ["send", "image"]) {
-    const {shell, state, pending, errors, drafts} = shellFixture();
-    if (block === "send") state.sending.add("b"); else pending.add("b");
-    assert.equal(shell.tileCurrent(), false);
-    assert.equal(shell.active, false);
-    assert.deepEqual(drafts, []);
-    assert.match(errors[0], /this conversation's send or image attachment/);
-    // Once the send is accepted or the image is read, the same layout proceeds.
-    state.sending.clear(); pending.clear();
-    assert.equal(shell.tileCurrent(), true);
-    assert.deepEqual([...new Set(drafts)].sort(), ["a", "b"]);
-  }
+test("pending sends and image items stay with their conversation while tiling", () => {
+  const {shell, state, pending, errors, drafts} = shellFixture();
+  state.sending.add("b");
+  pending.add("b");
+  const image = {name: "still-reading.png", url: null};
+  state.attachments.drafts.set("b", [image]);
+  assert.equal(shell.tileCurrent(), true);
+  assert.deepEqual([...new Set(drafts)].sort(), ["a", "b"]);
+  assert.equal(shell.records.get("b").initialDraft.images[0], image);
+  assert.deepEqual(errors, []);
 });
 
-test("a new conversation still being created blocks tiling", () => {
-  const {shell, state, errors} = shellFixture();
+test("the open modal blocks tiling while an active draft alone does not", () => {
+  const {shell, state} = shellFixture();
+  state.selected = "new-session";
   state.sending.add({draftId: "draft"});
+  shell.document.querySelector = () => ({});
   assert.equal(shell.tileCurrent(), false);
-  assert.equal(errors.length, 1);
+  shell.document.querySelector = () => null;
+  assert.equal(shell.tileCurrent(), true);
 });
 
 test("leaving tiles is not blocked by a send in this window", async () => {
@@ -73,13 +72,13 @@ test("leaving tiles is not blocked by a send in this window", async () => {
   assert.deepEqual(errors, []);
 });
 
-test("retiling and dragging check only the conversations they bring into panes", () => {
+test("retiling and dragging can proceed while another submission is pending", () => {
   const {shell, state, errors, setThreads} = shellFixture();
   assert.equal(shell.tileCurrent(), true);
   state.sending.add("c");
   assert.equal(shell.canDrag(thread("b")), true);
-  assert.equal(shell.canDrag(thread("c")), false);
+  assert.equal(shell.canDrag(thread("c")), true);
   setThreads([thread("a"), thread("b"), thread("c")]);
-  assert.equal(shell.tileCurrent(), false);
-  assert.equal(errors.length, 2);
+  assert.equal(shell.tileCurrent(), true);
+  assert.deepEqual(errors, []);
 });

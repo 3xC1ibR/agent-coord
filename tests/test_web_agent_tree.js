@@ -248,7 +248,7 @@ function setupController(records, selected = "root", response, {compact = true} 
       return elements.get(id);
     },
     get collapsed() { return c.$("context-panel").hidden; },
-    AgentTree: {...Tree, Panel: class { update() {} fit() {} clearMessages() {} message(params) { c.messages.push(params); } }}, messages: [],
+    AgentTree: {...Tree, Breadcrumb: null, Panel: class { update() {} fit() {} clearMessages() {} message(params) { c.messages.push(params); } }}, messages: [],
     isSessionDraft: () => c.state.selected === "new-session", threadPath: id => "threads/" + id,
     renderStatus() {}, renderList() {}, showError: error => c.errors.push(error), action: fn => fn(),
     api: path => {
@@ -275,23 +275,28 @@ test("only a visible Agents panel handles live send events", async () => {
   const send = {messageId: 1, threadId: "root", recipientId: "child"};
   c.controller.message(send); assert.equal(c.messages.length, 0);
   c.controller.bind(); await c.controller.load();
+  c.controller.message(send); assert.equal(c.messages.length, 0);
+  await c.controller.open();
   c.controller.message(send); assert.equal(c.messages.length, 1);
   c.document.hidden = true; c.controller.message(send); assert.equal(c.messages.length, 1);
   c.document.hidden = false; c.controller.setMode("context");
   c.controller.message(send); assert.equal(c.messages.length, 1);
 });
 
-test("opening either a parent or leaf conversation defaults to its full tree and opens the panel", async () => {
+test("opening either a parent or leaf conversation keeps its full tree available without opening the panel", async () => {
   const records = [thread("root"), thread("child", "root")];
   for (const selected of ["root", "child"]) {
     const c = setupController(records, selected);
     c.controller.bind(); await c.controller.load();
     assert.equal(c.$("panel-agents").hidden, false);
     assert.equal(c.$("panel-context").hidden, false);
-    assert.equal(c.controller.mode, "agents");
+    assert.equal(c.controller.mode, "context");
     assert.equal(c.controller.root, "root");
+    assert.equal(c.collapsed, true);
+    assert.equal(c.state.threadTabs.items[0].tree_open, false);
+    await c.controller.open();
+    assert.equal(c.controller.mode, "agents");
     assert.equal(c.collapsed, false);
-    assert.equal(c.state.threadTabs.items[0].tree_open, true);
   }
 });
 
@@ -302,24 +307,24 @@ test("family discovery includes an archived ancestor missing from overview inven
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
   assert.equal(c.$("panel-context").hidden, false);
-  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, "root");
-  assert.equal(c.collapsed, false);
+  assert.equal(c.collapsed, true);
 });
 
-test("fork-only families open the Agents panel, including an archived source absent from inventory", async () => {
+test("fork-only families make the Agents panel available, including an archived source absent from inventory", async () => {
   const source = thread("source"), fork = thread("fork", null, {forked_from: {thread_id: "source"}});
   for (const selected of ["source", "fork"]) {
     const c = setupController([source, fork], selected);
     c.controller.bind(); await c.controller.load();
-    assert.equal(c.controller.mode, "agents");
+    assert.equal(c.controller.mode, "context");
     assert.equal(c.controller.root, "source");
-    assert.equal(c.collapsed, false);
+    assert.equal(c.collapsed, true);
   }
   const c = setupController([fork], "fork", () => Promise.resolve({root_thread_id: "source",
     data: [{...source, attention: "archived"}, fork]}));
   c.controller.bind(); await c.controller.load();
-  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.mode, "context");
   assert.equal(c.controller.root, "source");
   assert.equal(c.controller.tree.relationships.get("fork"), "fork");
 });
@@ -352,7 +357,7 @@ test("switching conversations and changing child lists hides or restores the Age
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
   assert.equal(c.$("panel-context").hidden, false);
-  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.mode, "context");
 
   // Switching to a standalone conversation hides Agents and selects Context, even with preservePanel.
   c.state.selected = "solo"; c.state.threadTabs.selected = "solo"; c.state.threadTabs.items.push({thread_id: "solo"});
@@ -366,7 +371,7 @@ test("switching conversations and changing child lists hides or restores the Age
   c.controller.bind(); await c.controller.load();
   assert.equal(c.$("panel-agents").hidden, false);
   assert.equal(c.$("panel-context").hidden, false);
-  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.mode, "context");
 
   // If the child list changes, both tabs hide and focus leaves the hidden control.
   let focusReturned = false;
@@ -411,11 +416,14 @@ test("on a phone, opening a conversation with agents lands on the conversation; 
   c.controller.bind(); await c.controller.load();
   assert.equal(opened, 0, "the thread sheet does not open over the conversation");
   assert.equal(c.collapsed, collapsed, "the default does not expand the context panel");
-  assert.equal(c.controller.mode, "agents", "thread options open on the tree when asked");
+  assert.equal(c.controller.mode, "context", "thread options stay closed until explicitly requested");
   c.state.selected = "child";
   c.controller.bind({preservePanel: true}); await c.controller.load();
-  assert.equal(c.controller.mode, "agents");
+  assert.equal(c.controller.mode, "context");
   assert.equal(opened, 0);
+  await c.controller.open();
+  assert.equal(c.controller.mode, "agents");
+  assert.equal(opened, 1);
   c.controller.setMode("context");
   c.controller.bind({preservePanel: true}); await c.controller.load();
   assert.equal(c.controller.mode, "context");
@@ -441,6 +449,7 @@ test("creating a new draft session or switching conversations with an outstandin
   const replies = new Map();
   const c = setupController([thread("root"), thread("child", "root")], "root", path => new Promise(resolve => replies.set(path, resolve)));
   c.controller.bind();
+  c.controller.setMode("agents");
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.$("panel-agents").hidden, false);
   assert.equal(c.$("panel-context").hidden, false);
@@ -517,10 +526,12 @@ test("new draft sessions hide and collapse the Context panel across desktop and 
   assert.equal(desktop.$("context-panel").hidden, false);
   assert.equal(desktop.$("conversation").classList.contains("context-collapsed"), false);
 
-  // 2. Compact layout (<= 1100px, compact = true): automatic Agents opening in a parent chat does not persist a false uncollapsed preference into a new draft or a standalone conversation.
+  // A compact parent chat keeps Context closed. Explicit Agents access must not affect a new draft.
   const compact = setupController([thread("root"), thread("child", "root"), thread("solo")], "root", path => Promise.resolve(
     path.includes("solo") ? {root_thread_id: "solo", data: [thread("solo")]} : {root_thread_id: "root", data: [thread("root"), thread("child", "root")]}), {compact: true});
   compact.controller.bind(); await compact.controller.load();
+  assert.equal(compact.$("context-panel").hidden, true);
+  await compact.controller.open();
   assert.equal(compact.controller.mode, "agents");
   assert.equal(compact.$("context-panel").hidden, false);
   assert.equal(compact.storage.get("agent-coord.context-collapsed"), undefined);
@@ -579,6 +590,7 @@ test("both Context and Agents side panel modes support pointer and keyboard resi
 
   // Switching to Agents mode switches the grip's ARIA range and resizes --agent-panel-width independently.
   c.controller.bind(); await c.controller.load();
+  await c.controller.open();
   assert.equal(c.controller.mode, "agents");
   assert.equal(grip.getAttribute("aria-label"), "Resize agent tree panel");
   assert.equal(grip.getAttribute("aria-valuemin"), "30");

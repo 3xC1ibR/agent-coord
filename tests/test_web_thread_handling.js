@@ -44,9 +44,9 @@ function cardSetup(item) {
   return c;
 }
 
-test("Dismiss handles replies and saved blockers without opening the card", async () => {
+test("Dismiss handles saved blockers without opening their card", async () => {
   for (const inAttention of [true, false]) {
-    for (const response_state of ["reply", "action", "input"]) {
+    for (const response_state of ["action", "input"]) {
       const item = response({links: [], status: "idle", response_state}), c = cardSetup(item);
       c.api = async (path, body) => {
         assert.equal(path, "threads/one");
@@ -78,7 +78,7 @@ test("Dismiss handles replies and saved blockers without opening the card", asyn
 });
 
 test("Dismiss is absent for live input and disabled while the card is saving or closing", () => {
-  const item = response({links: []}), c = cardSetup(item);
+  const item = response({links: [], response_state: "input"}), c = cardSetup(item);
   const control = () => c.threadCard(item, false, true).children
     .find(child => child.className === "card-actions")?.children.find(child => child.className === "card-end-actions")
     ?.children.find(child => child.dataset.action === "handle");
@@ -179,7 +179,7 @@ test("updates share the attention queue and read responses remain in their stage
   assert.equal(threadViews.matches(unread, {show: "attention"}), true);
 });
 
-test("inbox row menus offer Dismiss from Attention and Mark as read only where they apply", async () => {
+test("inbox row menus expose the single eligible Attention action", async () => {
   const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js");
   const item = response({links: [], status: "idle", response_state: "input", unread_result: true,
     checkpoint: {id: 12, phase: "planning", next_actor: "user", next_action: "Choose"}});
@@ -187,7 +187,8 @@ test("inbox row menus offer Dismiss from Attention and Mark as read only where t
   c.WorkingSet = WorkingSet;
   vm.runInContext(source.slice(source.indexOf("async function markThreadRead("), source.indexOf("async function toggleThreadLater(")), c);
   const labels = (thread, options) => Array.from(c.threadMenuItems(thread, options), entry => entry.label);
-  assert.deepEqual(labels(item, {inbox: true}).slice(0, 2), ["Dismiss from Attention", "Mark as read"]);
+  assert.equal(labels(item, {inbox: true})[0], "Dismiss from Attention");
+  assert.ok(!labels(item, {inbox: true}).includes("Mark as read"));
   assert.ok(!labels(item).includes("Dismiss from Attention"), "cards keep their own Dismiss button");
   assert.ok(!labels(item).includes("Mark as read"));
   assert.ok(!labels({...item, unread_result: false, unread: false}, {inbox: true}).includes("Mark as read"));
@@ -202,6 +203,5 @@ test("inbox row menus offer Dismiss from Attention and Mark as read only where t
   await menu.find(entry => entry.label === "Dismiss from Attention").run();
   assert.equal(calls[0][1].handled, true, "Dismiss uses the thread view's handled receipt");
   assert.equal(calls[0][1].handled_checkpoint_id, 12);
-  await menu.find(entry => entry.label === "Mark as read").run();
-  assert.equal(JSON.stringify(calls.at(-1)), JSON.stringify(["threads/one", {seen: true, seen_checkpoint_id: 12, seen_completion_id: 8}]));
+  assert.equal(calls.length, 1);
 });

@@ -365,6 +365,7 @@ test("the header menu lists visible thread actions and runs the original control
     {textContent: "Move to Later", hidden: true, disabled: false, click() {}},
     {textContent: "Close thread", title: "", hidden: false, disabled: false, clicks: 0, click() { this.clicks++; }},
   ];
+  for (const button of buttons) button.getAttribute = () => null;
   const c = {document: {querySelectorAll: selector => selector === ".session-actions .thread-menu-action" ? buttons : []}};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function headerMenuItems("), source.indexOf('$("thread-actions").onclick')), c);

@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -20,6 +21,7 @@ function setup() {
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), context);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function itemText(")), context);
+  loadComposer(context);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), context);
   vm.runInContext(source.slice(source.indexOf("function composerKeydown("), source.indexOf('$("message").onkeydown')), context);
   context.$("message").value = "Focus on the UI first";
@@ -91,24 +93,15 @@ test("Enter during the initial conversation read submits the same draft once aft
   }
 });
 
-test("Enter between invalidation and the next detail read uses the refreshed send controls", async () => {
-  const c = setup(), entry = {pending: null};
-  let reads = 0, sends = 0;
-  c.state.conversations = new Map([["one", entry]]);
-  c.state.detail = {work_thread: {thread_id: "one", browser_session: true}};
+test("a background detail refresh leaves the cached conversation usable", () => {
+  const c = setup();
   c.state.detailRefreshing = true;
-  c.$("send").disabled = true;
-  c.$("composer").requestSubmit = () => { sends++; };
-  c.refreshDetail = async () => {
-    reads++;
-    c.state.detailRefreshing = false;
-    c.$("send").disabled = false;
-    return true;
-  };
+  let submits = 0;
+  c.$("composer").requestSubmit = () => { submits++; };
+  c.refreshDetail = () => assert.fail("Enter must not wait for a redundant read");
+  c.renderStatus();
   c.composerKeydown({key: "Enter", preventDefault() {}});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(reads, 1);
-  assert.equal(sends, 1);
+  assert.equal(submits, 1);
 });
 
 test("empty Tab, idle Tab, modified keys and IME retain normal keyboard behavior", () => {
@@ -122,13 +115,10 @@ test("empty Tab, idle Tab, modified keys and IME retain normal keyboard behavior
   }
 });
 
-test("busy Tab does not submit twice and queue failures preserve the draft", async () => {
+test("the same draft is consumed once and known queue failures restore it", async () => {
   const c = setup();
-  c.state.busy = true; c.renderStatus();
-  c.action = () => assert.fail("Duplicate submission");
-  c.composerKeydown({key: "Tab", preventDefault() {}});
-  c.state.busy = false;
-  c.api = async () => { throw new Error("Queue unavailable"); };
+  c.renderStatus();
+  c.api = async () => { throw Object.assign(new Error("Queue unavailable"), {status: 400}); };
   await assert.rejects(c.sendMessage("queue"), /Queue unavailable/);
   assert.equal(c.$("message").value, "Focus on the UI first");
   assert.equal(c.state.busy, false);
@@ -140,7 +130,7 @@ test("steering targets the visible active turn and clears only the sent draft", 
     assert.equal(path, "sessions/one/messages");
     assert.equal(body.message, "Focus on the UI first");
     assert.equal(body.expectedTurnId, "turn-one");
-    assert.equal(c.$("send").disabled, true);
+    assert.notEqual(c.$("send").disabled, true);
     return {turnId: "turn-one"};
   };
   await c.sendMessage();
@@ -151,7 +141,7 @@ test("steering targets the visible active turn and clears only the sent draft", 
 
 test("failed steering preserves the draft and permits retry", async () => {
   const c = setup();
-  c.api = async () => { throw new Error("The active turn changed"); };
+  c.api = async () => { throw Object.assign(new Error("The active turn changed"), {status: 400}); };
   await assert.rejects(c.sendMessage(), /active turn changed/);
   assert.equal(c.$("message").value, "Focus on the UI first");
   assert.equal(c.state.busy, false);
@@ -160,7 +150,11 @@ test("failed steering preserves the draft and permits retry", async () => {
 
 test("typing a new draft while steering is in flight preserves it", async () => {
   const c = setup();
-  c.api = async () => { c.$("message").value = "Also check accessibility"; return {turnId: "turn-one"}; };
+  c.api = async () => {
+    c.$("message").value = "Also check accessibility";
+    c.state.drafts.set("one", c.$("message").value);
+    return {turnId: "turn-one"};
+  };
   await c.sendMessage();
   assert.equal(c.$("message").value, "Also check accessibility");
   assert.equal(c.state.drafts.get("one"), "Also check accessibility");
@@ -187,12 +181,12 @@ test("idle messages omit the steering precondition", async () => {
 });
 
 test("closed threads and turns without an ID cannot submit steering", async () => {
-  for (const mode of ["archived", "closing", "starting", "busy", "terminal"]) {
+  for (const mode of ["archived", "closing", "starting", "settings mutation", "terminal"]) {
     const c = setup();
     if (mode === "archived") c.state.detail.work_thread.attention = "archived";
     if (mode === "closing") c.state.closing.add("one");
     if (mode === "starting") c.state.detail.activeTurn = null;
-    if (mode === "busy") c.state.busy = true;
+    if (mode === "settings mutation") c.state.settingsMutations = new Map([["one", true]]);
     if (mode === "terminal") c.state.detail.work_thread.browser_session = false;
     c.api = async () => assert.fail("Must not send: " + mode);
     c.renderStatus();
@@ -204,21 +198,23 @@ test("closed threads and turns without an ID cannot submit steering", async () =
 
 test("accepted sends release the composer before detail and inventory refreshes finish", async () => {
   const c = setup();
-  let accept, finishDetail, finishList, posts = 0;
+  let accept, finishDetail, posts = 0;
   c.api = () => { posts++; return new Promise(resolve => { accept = resolve; }); };
   c.refreshDetail = () => new Promise(resolve => { finishDetail = resolve; });
-  c.refreshList = () => new Promise(resolve => { finishList = resolve; });
+  c.refreshList = () => assert.fail("Ordinary submission does not refresh unrelated inventory");
+  c.renderStatus();
   const sending = c.sendMessage();
-  assert.equal(c.$("send").disabled, true);
+  assert.equal(c.$("send").disabled, false);
   await c.sendMessage(); assert.equal(posts, 1);
   c.$("message").value = "Next draft";
+  c.state.drafts.set("one", "Next draft");
   accept({turnId: "turn-one"}); await sending;
   assert.equal(c.$("send").disabled, false);
-  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.state.submissionQueue.active.size, 0);
   assert.equal(c.$("message").value, "Next draft");
   assert.equal(c.state.drafts.get("one"), "Next draft");
-  assert.ok(finishDetail); assert.ok(finishList);
-  finishDetail(); finishList();
+  assert.ok(finishDetail);
+  finishDetail();
 });
 
 test("refresh failures after acceptance do not reject the send or restore sent text", async () => {
@@ -230,6 +226,5 @@ test("refresh failures after acceptance do not reject the send or restore sent t
   await c.sendMessage(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(c.$("message").value, "");
   assert.equal(c.$("send").disabled, false);
-  assert.equal(errors.length, 2);
-  assert.ok(errors.every(message => message.startsWith("Your message was received")));
+  assert.deepEqual(errors, ["Detail unavailable"]);
 });

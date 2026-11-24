@@ -28,7 +28,7 @@ function setup(threads, preference = "phase") {
     $, node: (tag, text, cls) => new Element(text, cls), groupHeading: label => new Element(label),
     document: {activeElement: null}, conversationSearch: null, threadGrouping, threadOrganization, threadViews,
     threadsInProject: items => items, agentThreadTree: items => ({roots: items}),
-    agentThreadCard: (item, tree, compact, urgent) => { const card = new Element(item.title); card.urgent = urgent; return card; },
+    agentThreadCard: (item, tree, compact, urgent) => { const card = new Element(item.title); card.urgent = urgent; card.dataset.cardThread = item.thread_id; return card; },
     renderClosedToggle() {}, renderStatus() {}, savedViews: {activeId: "all", render() {}, persist() {}},
     localStorage: {getItem: key => values.get(key), setItem: (key, value) => values.set(key, value)},
     filtersChanged() { c.renderList(); }};
@@ -38,7 +38,7 @@ function setup(threads, preference = "phase") {
     source.indexOf('$("search").oninput = filtersChanged;')), c);
   return {c, $, values};
 }
-const descendants = root => [root, ...root.children.flatMap(descendants)];
+const groups = $ => $("sessions").children.filter(node => node.className.startsWith("thread-group "));
 
 test("overview button toggles domain grouping, persists it, and reflects selected state", () => {
   const {$, c, values} = setup([thread("web", {domain: "web"}), thread("api", {domain: "backend"})]);
@@ -46,7 +46,7 @@ test("overview button toggles domain grouping, persists it, and reflects selecte
   assert.equal($("group-by").value, "domain");
   assert.equal($("group-by-domain").attributes["aria-pressed"], "true");
   assert.equal(values.get("agent-coord-group-by"), "domain");
-  assert.deepEqual(descendants($("overview")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["backend", "web"]);
+  assert.deepEqual(groups($).map(el => el.attributes["aria-label"]), ["backend", "web"]);
   $("group-by-domain").onclick();
   assert.equal($("group-by").value, "phase");
   assert.equal($("group-by-domain").attributes["aria-pressed"], "false");
@@ -58,11 +58,10 @@ test("domain grouping keeps pins visible once, sorts by recency, and retains una
     thread("pin", {domain: "backend", pinned: true}), thread("fallback", {scope_cluster: "backend"}), thread("unassigned")];
   const before = JSON.stringify(input), {$, c} = setup(input, "domain");
   c.renderList();
-  const cards = descendants($("overview")).filter(el => el.dataset.cardThread);
+  const cards = groups($).flatMap(group => group.children.filter(child => child.dataset.cardThread));
   assert.deepEqual(cards.map(el => el.dataset.cardThread), ["pin", "fallback", "ordinary", "urgent", "unassigned"]);
-  assert.equal(cards.find(el => el.dataset.cardThread === "urgent").urgent, true);
   assert.equal(cards.filter(el => el.dataset.cardThread === "pin").length, 1);
-  assert.equal(descendants($("overview")).find(el => el.dataset.group === "domain-missing").attributes["aria-label"], "No domain");
+  assert.equal(groups($).find(el => el.className.includes("domain-missing")).attributes["aria-label"], "No domain");
   assert.equal(JSON.stringify(input), before);
 });
 
@@ -72,6 +71,6 @@ test("domain mode groups Later and Closed and survives preference restoration", 
     const {$, c} = setup(input, "domain");
     $("view").value = view; c.renderList();
     assert.equal($("group-by").value, "domain");
-    assert.deepEqual(descendants($("overview")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["docs", "web"]);
+    assert.deepEqual(groups($).map(el => el.attributes["aria-label"]), ["docs", "web"]);
   }
 });

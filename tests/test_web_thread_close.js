@@ -334,11 +334,11 @@ test("partial failure reconciles closed children and preserves the parent and fa
 
 test("overview render cache rebuilds when a close or Undo changes button availability", () => {
   const c = setup(), rebuilding = new Error("Rebuilding overview");
-  Object.assign(c, {savedViews: null, conversationSearch: null, renderClosedToggle() {},
+  Object.assign(c, {document: {activeElement: null}, savedViews: null, conversationSearch: null, renderClosedToggle() {},
     threadsInProject: threads => threads, threadOrganization: {matches: () => true},
     threadViews: {matches: () => true}, upcomingSchedules: () => []});
-  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set(),
-    overviewMotion: {capture() { throw rebuilding; }}});
+  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set()});
+  c.$("sessions").replaceChildren = () => { throw rebuilding; };
   for (const id of ["search", "view", "group-by", "phase-filter", "repository", "project", "group-by-domain", "back-home", "results-count"]) {
     Object.assign(c.$(id), {value: "", setAttribute() {}});
   }

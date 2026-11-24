@@ -1,4 +1,5 @@
 'use strict';
+const {loadComposer} = require("./web_application_fixture.js");
 const test=require('node:test'), assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm');
 const {ThreadMentionDraft,ThreadMentions}=require('../plugins/agent-coord/scripts/agent_coord/web/thread-mentions.js');
 const one={thread_id:'one',title:'Chat UI',client:'codex',attention:'now',cwd:'/project/one'};
@@ -66,11 +67,14 @@ test('normal send and queue include selected references and failed submission re
     renderStatus(){},refreshDetail:async()=>{},refreshList:async()=>{},api:async(path,body)=>{calls.push({path,body});return{};}});
   ctx.DispatchUI=require('../plugins/agent-coord/scripts/agent_coord/web/dispatch.js');
   const storage=new Map();ctx.sessionStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
+  loadComposer(ctx);
   vm.runInContext(source.slice(source.indexOf('async function sendMessage('),source.indexOf('$("composer").onsubmit')),ctx);
-  const refs=d.snapshot();await ctx.sendMessage(mode);assert.deepEqual(calls[0].body.mentions,refs);
+  const refs=d.snapshot();
+  state.mentions.restore = (_id, text, mentions) => { d.text = text; d.refs = Array.from(mentions); };
+  await ctx.sendMessage(mode);assert.deepEqual(calls[0].body.mentions,refs);
   assert.equal(calls[0].path,mode==='queue'?'sessions/receiver/queue':'sessions/receiver/messages');
   input.value='@Chat UI';d.text=input.value;d.refs=[{start:0,end:8,text:input.value,session_id:'one'}];
-  ctx.api=async()=>{throw Error('Send failed');};await assert.rejects(ctx.sendMessage(),/Send failed/);assert.equal(d.refs.length,1);
+  ctx.api=async()=>{throw Object.assign(new Error('Send failed'), {status: 400});};await assert.rejects(ctx.sendMessage(),/Send failed/);assert.equal(d.refs.length,1);
  }
 });
 test('appending letters to a selected name clears its identity while punctuation and surrounding instructions preserve it',()=>{

@@ -108,7 +108,7 @@ test("a synchronous completion or refreshed snapshot cancels the pending streame
 test("tool cache drops removed items and replaces changed rows while retaining others", () => {
   const h = harness(), first = descendants(h.timeline).find(node => node.dataset.id === "tool-0");
   const items = h.state.detail.thread.turns[0].items;
-  items[0].aggregatedOutput = "Changed output"; items.splice(1, 1);
+  items[0] = {...items[0], aggregatedOutput: "Changed output"}; items.splice(1, 1);
   h.c.renderTimeline();
   assert.notEqual(descendants(h.timeline).find(node => node.dataset.id === "tool-0"), first);
   assert.equal(descendants(h.timeline).some(node => node.dataset.id === "tool-1"), false);

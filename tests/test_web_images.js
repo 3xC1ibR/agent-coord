@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -125,6 +126,7 @@ function appSetup() {
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function modelValue(")), c);
   vm.runInContext(source.slice(source.indexOf("function renderStatus("), source.indexOf("function requestButton(")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   vm.runInContext(source.slice(source.indexOf("function composerKeydown("), source.indexOf('$("message").onkeydown')), c);
   c.$("message").value = "";
@@ -154,7 +156,7 @@ test("image-only send, steering, and queue use attachment inputs and clear succe
 test("failed sends keep images and text available for retry; reads block incomplete submissions", async () => {
   const c = appSetup(); await c.attachments.add([file()]);
   c.$("message").value = "Review this screenshot";
-  c.api = async () => { throw new Error("Send failed"); };
+  c.api = async () => { throw Object.assign(new Error("Send failed"), {status: 400}); };
   await assert.rejects(c.sendMessage(), /Send failed/);
   assert.equal(c.attachments.items().length, 1);
   assert.equal(c.$("message").value, "Review this screenshot");

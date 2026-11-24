@@ -1,16 +1,32 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const {createHash} = require("node:crypto");
 const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
 const clone = value => JSON.parse(JSON.stringify(value));
+let revision = 0;
+const snapshots = new Map();
+function withRevisions(detail) {
+  if (!detail?.thread || !detail.work_thread) return detail;
+  const key = detail.work_thread.thread_id;
+  const fingerprint = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const history = fingerprint(detail.thread);
+  const metadata = fingerprint({work: detail.work_thread, requests: detail.requests, queue: detail.queuedMessages});
+  const previous = snapshots.get(key);
+  const historyRevision = previous?.history === history ? previous.historyRevision : ++revision;
+  const metadataRevision = previous?.metadata === metadata ? previous.metadataRevision : ++revision;
+  snapshots.set(key, {history, metadata, historyRevision, metadataRevision});
+  return {...detail, history_revision: historyRevision, metadata_revision: metadataRevision, stream_seq: detail.stream_seq || 0};
+}
 
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return {promise, resolve, reject};
+  return {promise, resolve: value => resolve(withRevisions(value)), reject};
 }
 function fixture(id, text = "Saved answer", checkpoint = 1) {
   return {session: {cwd: "/project", client: "codex"}, running: false, requests: [], queuedMessages: [],
@@ -34,7 +50,7 @@ function setup() {
     notifications: {syncFocus() {}, receive() {}}, savedViews: {remember() {}, restoreScroll() {}}, navigation: {remember() {}},
     setNavigation() {}, setChatExpanded() {}, isSessionDraft: () => c.state.selected === "new-session",
     renderTitle() {}, renderList() {}, renderThread() {}, renderRequests() {}, renderQueuedMessages() {}, renderStatus() {},
-    refreshList: async () => {}, loadSessionModels() {}, sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
+    refreshList: async () => {}, refreshDecisionsAndSchedules() {}, loadSessionModels() {}, sessionPath: id => "sessions/" + id, threadPath: id => "threads/" + id,
     scheduleDetail: () => { c.scheduled = (c.scheduled || 0) + 1; }, scheduleList() {}, showError() {},
     window: {addEventListener() {}}, EventSource: function (url) { c.events = this; this.url = url; },
     renderTimeline() {
@@ -50,7 +66,7 @@ function setup() {
       const detail = replies.get(id) || fixture(id);
       if (path.startsWith("threads/")) return clone(detail.work_thread);
       if (c.gate?.id === id) return c.gate.promise;
-      return clone(detail);
+      return withRevisions(clone(detail));
     }};
   c.state.timelineScroll = {following: false, position: () => c.$("timeline").scrollTop,
     reset() {}, afterRender() {}, latest: () => { c.$("timeline").scrollTop = 999; },
@@ -291,7 +307,7 @@ test("a cold conversation becomes usable while events continue during every read
   const first = await startRefresh(c, "one");
   c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: " initial"}});
   first.gate.resolve(fixture("one", "Saved answer initial")); await first.opening;
-  assert.equal(c.$("send").disabled, true, "the event arrived before any local detail could apply it");
+  assert.equal(c.$("send").disabled, false, "the known conversation remains usable while catching up");
   c.gate = {id: "one", ...deferred()};
   const refreshing = c.refreshDetail();
   c.applyEvent({method: "item/agentMessage/delta", params: {threadId: "one", turnId: "turn", itemId: "answer", delta: " next"}});
@@ -490,6 +506,7 @@ test("cached approvals wait for authoritative refresh while the composer stays u
   c.replies.set("one", {...fixture("one"), requests: [{key: "old", method: "unknown", params: {}}]});
   await c.select("one"); c.goHome();
   vm.runInContext(source.slice(source.indexOf("function renderRequests("), source.indexOf("function applyEvent(")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   const {opening, gate} = await startRefresh(c, "one");
   c.renderRequests(); assert.equal(c.$("requests").childNodes.length, 0);
@@ -704,29 +721,30 @@ test("a fresh live snapshot acknowledges a reply after a previously invalidated 
 
 test("the transcript cache evicts old conversations while retaining the current selection", async () => {
   const c = setup();
-  for (const id of ["one", "two", "three", "four", "five", "six"]) await c.select(id);
-  assert.equal(c.state.conversations.size, 4);
-  assert.equal(c.state.conversations.has("one"), false);
-  assert.equal(c.state.conversations.get("six").detail, c.state.detail);
+  for (let index = 1; index <= 65; index++) await c.select("thread-" + index);
+  assert.equal(c.state.conversations.size, 64);
+  assert.equal(c.state.conversations.has("thread-1"), false);
+  assert.equal(c.state.conversations.get("thread-65").detail, c.state.detail);
 });
 
 test("tab navigation preserves drafts and reading positions beyond the transcript cache limit", async () => {
   const c = setup();
   const tabs = c.state.threadTabs = new ThreadTabs({onSelect: id => id ? c.select(id) : c.goHome()});
   tabs.setProject("/project");
-  for (const [index, id] of ["one", "two", "three", "four", "five", "six"].entries()) {
+  const ids = ["one", "two", ...Array.from({length: 63}, (_, index) => "thread-" + index)];
+  for (const [index, id] of ids.entries()) {
     await c.select(id);
     c.$("message").value = "Draft " + id;
     c.$("timeline").scrollTop = 100 + index;
   }
   assert.equal(c.state.conversations.has("one"), false);
-  assert.equal(tabs.items.length, 6);
+  assert.equal(tabs.items.length, ids.length);
   await tabs.activate(null);
   assert.equal(c.$("welcome").hidden, false);
   await tabs.activate("one");
   assert.equal(c.$("message").value, "Draft one");
   assert.equal(c.$("timeline").scrollTop, 100);
-  assert.equal(tabs.items.length, 6);
+  assert.equal(tabs.items.length, ids.length);
   await tabs.close("one");
   assert.equal(c.state.selected, "two");
   assert.equal(c.$("message").value, "Draft two");
@@ -879,7 +897,7 @@ test("project tabs respect Overview and the replacement selected after closing a
   assert.equal(c.state.selected, null, "choosing Overview is remembered even with open tabs");
 });
 
-test("missing tabs, unavailable threads and moved threads fall back to Overview", async () => {
+test("missing tabs and unavailable threads fall back to Overview; moved threads remain open", async () => {
   for (const reason of ["closed-tab", "missing", "moved", "moved-during-refresh"]) {
     const c = projectSetup(); await c.select("one"); await c.switchTo("/b");
     if (reason === "closed-tab") c.state.threadTabs.projects.get("/a").splice(0);
@@ -897,7 +915,9 @@ test("missing tabs, unavailable threads and moved threads fall back to Overview"
     }
     await c.switchTo("/a");
     assert.equal(c.state.projectCwd, "/a", reason);
-    assert.equal(c.state.selected, null, reason); assert.equal(c.$("welcome").hidden, false, reason);
+    const moved = reason.startsWith("moved");
+    assert.equal(c.state.selected, moved ? "one" : null, reason);
+    assert.equal(c.$("welcome").hidden, moved, reason);
   }
 });
 
@@ -908,13 +928,13 @@ test("temporary restoration failures remain visible and leave a usable Overview"
   assert.equal(c.state.selected, null); assert.equal(c.$("welcome").hidden, false);
 });
 
-test("explicit cross-project navigation bypasses remembered conversations", async () => {
+test("explicit cross-project navigation keeps the current workspace and bypasses remembered conversations", async () => {
   const c = projectSetup(); await c.select("one"); await c.switchTo("/b"); await c.select("three");
   c.calls.length = 0;
   await c.select("two");
-  assert.equal(c.state.projectCwd, "/a"); assert.equal(c.state.selected, "two");
+  assert.equal(c.state.projectCwd, "/b"); assert.equal(c.state.selected, "two");
   assert.equal(c.calls.some(call => call.path === "threads/one"), false);
-  await c.openProjectDirectory("/b");
+  await c.openProjectDirectory("/a");
   assert.equal(c.state.selected, null, "route callers choose their own destination after changing directory");
 });
 

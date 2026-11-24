@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -183,6 +184,7 @@ test("skill completion preserves native editing, dismisses with Escape, and reta
 function bindAppSlash(f, app, state) {
   state.newSessionDraft = state.detail;
   f.context.renderStatus = () => {};
+  loadComposer(f.context);
   vm.runInContext(app.slice(app.indexOf("function isSessionDraft()"),
     app.indexOf("function renderModelPicker()")), f.context);
   vm.runInContext(app.slice(app.indexOf("  state.slashCommands = new ChatSlashCommands("),
@@ -231,8 +233,8 @@ test("new-session composer completes commands, provider models and effort before
   assert.equal(f.key("Enter").defaultPrevented, undefined);
   f.type("/permissions yo"); f.key("Tab");
   assert.equal(state.drafts.get("new-session"), "/permissions yolo ");
-  for (const guard of ["busy", "hidden", "archived", "closing"]) {
-    state.busy = guard === "busy";
+  for (const guard of ["settings mutation", "hidden", "archived", "closing"]) {
+    state.settingsMutations = new Map(guard === "settings mutation" ? [[state.selected, true]] : []);
     elements.composer.hidden = guard === "hidden";
     state.detail.work_thread.attention = guard === "archived" ? "archived" : "now";
     state.closing = new Set(guard === "closing" ? [state.selected] : []);

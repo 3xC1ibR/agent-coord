@@ -1,4 +1,5 @@
 "use strict";
+const {loadComposer} = require("./web_application_fixture.js");
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), vm = require("node:vm");
@@ -36,6 +37,7 @@ function setup() {
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
   vm.runInContext(source.slice(source.indexOf("function isSessionDraft()"), source.indexOf("function filtersChanged()")), c);
+  loadComposer(c);
   vm.runInContext(source.slice(source.indexOf("async function sendMessage("), source.indexOf('$("composer").onsubmit')), c);
   return c;
 }
@@ -664,8 +666,8 @@ test("an existing send and its refresh cannot block another project's send or cl
   assert.equal(c.sessionBusy(), false, "A's refresh must not disable B's composer");
   assert.equal(c.$("message").value, "Next B");
   refresh.resolve(); await first;
-  assert.equal(c.state.drafts.has("a"), false);
-  assert.equal(c.state.sending.size, 0);
+  assert.equal(c.state.drafts.get("a") || "", "");
+  assert.equal(c.state.submissionQueue.active.size, 0);
 });
 
 test("first acceptance seeds a usable conversation and refreshes inventory only once in background", async () => {

@@ -140,11 +140,12 @@ test("conversation renders and refreshes agent Markdown while user text stays li
   assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<strong>Result<\/strong>/);
   assert.equal(timeline.childNodes[0].childNodes[1].dateTime, "2026-10-26T16:00:00.000Z");
   assert.equal(timeline.childNodes[1].childNodes[1].dateTime, "2026-10-26T16:01:00.000Z");
-  agent.text += "\n```\n\nFinished.";
+  const items = context.state.detail.thread.turns[0].items;
+  items[1] = {...agent, text: agent.text + "\n```\n\nFinished."};
   vm.runInContext("renderTimeline()", context);
   assert.match(timeline.childNodes[1].childNodes[0].innerHTML, /<\/pre><p>Finished\.<\/p>/);
   assert.equal(timeline.scrollTop, 100);
-  agent.text = "> ```openui\n> root = Card([])\n> ```";
+  items[1] = {...agent, text: "> ```openui\n> root = Card([])\n> ```"};
   vm.runInContext("renderTimeline()", context);
   assert.ok(timeline.childNodes[1].dataset.openuiKey, "nested OpenUI blocks receive a renderer identity");
 });
