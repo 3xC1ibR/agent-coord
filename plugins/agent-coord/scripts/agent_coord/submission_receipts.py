@@ -70,9 +70,7 @@ class SubmissionReceipts:
             result = callback()
         except Exception as error:
             from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
-            # Queue validation raises domain errors before committing an item.
-            rejected = (isinstance(error, (BrowserBusyError, BrowserNotSubmittedError))
-                        or (queued and isinstance(error, CoordinationError)))
+            rejected = isinstance(error, (BrowserBusyError, BrowserNotSubmittedError))
             state = "rejected" if rejected else "uncertain"
             try:
                 with self.store._connection() as db:

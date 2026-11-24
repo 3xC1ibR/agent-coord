@@ -119,6 +119,40 @@ class SubmissionOutcomeRouteTests(TestCase):
         self.assertEqual(set(result), {"error"})
         self.assertEqual(self.receipt_state(thread, "validation"), "rejected")
 
+    def test_queue_publication_failure_cannot_repeat_the_committed_insert(self):
+        thread = self.sessions.create({})["session"]["thread_id"]
+        body = {"requestId": "queue-original", "message": "Run the queued check"}
+        publish = self.sessions._publish
+        publications = []
+
+        def fail_after_insert(method, parameters, **extra):
+            if method == "browser/changed" and parameters.get("threadId") == thread:
+                items = self.sessions.queue.list(thread)
+                if items:
+                    publications.append([item["id"] for item in items])
+                    raise CoordinationError("Could not publish the committed queue change.")
+            return publish(method, parameters, **extra)
+
+        with patch.object(self.sessions, "_publish", side_effect=fail_after_insert), patch.object(self.sessions.queue, "wake"):
+            first = self.post(self.server.server_port, thread, body, operation="queue")
+            same = self.post(self.server.server_port, thread, body, operation="queue")
+
+        items = self.sessions.queue.list(thread)
+        self.assertEqual(len(items), 1, f"Publication attempts observed queue IDs {publications}")
+        self.assertEqual(publications, [[items[0]["id"]]])
+        self.assertEqual(self.receipt_state(thread, "queue-original"), "uncertain")
+        self.assert_unknown(first)
+        self.assert_unknown(same)
+
+        with patch.object(self.sessions.rpc, "request", wraps=self.sessions.rpc.request) as provider:
+            self.sessions.queue._dispatch(thread)
+            late = self.post(self.server.server_port, thread, body, operation="queue")
+            self.sessions.queue._dispatch(thread)
+        effects = [call.args[0] for call in provider.call_args_list if call.args[0] in {"turn/start", "turn/steer"}]
+        self.assertEqual(effects, ["turn/start"])
+        self.assertEqual(self.sessions.queue.list(thread), [])
+        self.assert_unknown(late)
+
     def test_proven_pre_submission_rejection_allows_same_identity_retry(self):
         thread = self.sessions.create({})["session"]["thread_id"]
         body = {"requestId": "original", "message": "Run the check"}
