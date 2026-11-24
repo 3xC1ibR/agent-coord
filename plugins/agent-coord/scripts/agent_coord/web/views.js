@@ -26,8 +26,33 @@ const threadViews = (() => {
   function needsYou(thread) {
     return grouping.awaitsUser(thread);
   }
-  function needsAction(thread) {
-    return needsYou(thread) && ["blocked", "review"].includes(grouping.reason(thread).key);
+  /*
+   * The one "needs you" indicator: the conversation tab dot and the agent tree
+   * badge. It is built on the inbox's requestOf (which honors dismissal) and
+   * escalates (the sub-agent rule), so dismissing a request clears every view.
+   * Order: a live approval or question; then running, which outranks a saved
+   * request; then the thread's own blocked or review need; then a direct child
+   * that escalates (stall, failure, approval). A child's question or saved
+   * request is not the parent's need.
+   */
+  function ownNeed(thread) {
+    if (typeof thread.needs_attention !== "boolean") return needsYou(thread) && ["blocked", "review"].includes(grouping.reason(thread).key);
+    if (!needsYou(thread)) return false;
+    // The backend rolls children's needs into their owner; only the owner's own item counts here.
+    const items = Array.isArray(thread.attention_items) ? thread.attention_items : null;
+    const own = items ? items.find(item => item.thread_id === thread.thread_id) : thread;
+    if (!own) return false;
+    const reason = items ? own.reason : grouping.reason(thread).key;
+    return ["blocked", "review"].includes(reason);
+  }
+  function needsAction(thread, threads = []) {
+    if (!thread || thread.attention === "archived" || thread.snoozed) return false;
+    const children = (Array.isArray(threads) ? threads : []).filter(child => child !== thread && child.thread_id !== thread.thread_id &&
+      child.attention_owner_thread_id === thread.thread_id && child.attention !== "archived" && !child.snoozed);
+    const request = overview.requestOf(thread);
+    if (["approval", "question"].includes(request) || children.some(child => overview.requestOf(child) === "approval")) return true;
+    if (grouping.status(thread).key === "running") return false;
+    return request === "needs-you" || ownNeed(thread) || children.some(child => overview.escalates(child));
   }
   function badges(threads, values, {layout, group, workspace = "all", now = Date.now() / 1000} = {}) {
     if (layout === "list") {
@@ -47,7 +72,7 @@ const threadViews = (() => {
     const visible = threads.filter(thread => matches(thread, values));
     const visibleIds = new Set(visible.map(thread => thread.thread_id));
     return {attention: visible.filter(thread => needsYou(thread) && !visibleIds.has(thread.attention_grouped_under)).length,
-      action: visible.some(needsAction),
+      action: visible.some(thread => needsAction(thread, visible)),
       active: visible.some(t => t.attention !== "archived" && t.response_state === "working"),
       completed: visible.some(t => t.attention === "now" && t.unhandled_response && (t.unread_result || t.unread))};
   }

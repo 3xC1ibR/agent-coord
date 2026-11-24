@@ -96,3 +96,8 @@ body.mobile-chat .mobile-thread-sheet .context-panel.agents-mode { height: 75dvh
   .agent-tree-card { transition: none; }
   .agent-tree-card[data-status="running"]::after { animation: none; background: #6099cd; }
 }
+/* A closed agent folded to its provider icon: Enter or a click opens its card in place. */
+.agent-tree-card.compact { width: 40px; height: 40px; padding: 0; border-radius: 10px; align-items: center; justify-content: center; color: var(--muted); background: var(--paper); box-shadow: none; } /* drift-ok: the layout's COMPACT size and the panel radius. */
+.agent-tree-card.compact svg, .agent-tree-card.compact img { width: 19px; height: 19px; opacity: .6; } /* drift-ok: the card identity icon size above. */
+.agent-tree-card.compact:hover svg, .agent-tree-card.compact:hover img, .agent-tree-card.compact:focus-visible svg { opacity: 1; }
+.agent-tree-compact-mark { font-size: 12px; font-weight: 600; } /* drift-ok: the card title size above. */

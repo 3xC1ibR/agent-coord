@@ -534,3 +534,32 @@ test("tab ownership includes saved project working sets this window has not disp
   assert.equal(reopened.has("other-window"), false);
   assert.equal(reopened.has(""), false);
 });
+
+test("a parent tab dot clears when its child's request is dismissed and stays blue while the parent works", () => {
+  const element = () => ({children: [], dataset: {}, attributes: {}, scrollLeft: 0, classList: {add() {}},
+    append(child) { this.children.push(child); }, replaceChildren() { this.children = []; },
+    setAttribute(key, value) { this.attributes[key] = value; }, contains: () => false, querySelectorAll: () => []});
+  const container = element(), tabs = new ThreadTabs({container, document: {createElement: element}});
+  tabs.setProject("/work");
+  // The backend rolls the child's request into the parent's needs_attention.
+  const parent = {...thread("parent"), response_state: "available", needs_attention: true, attention_reason: "review",
+    attention_items: [{thread_id: "child", reason: "review"}]};
+  const child = {...thread("child"), response_state: "input", needs_attention: true, attention_reason: "review",
+    attention_owner_thread_id: "parent", can_handle_response: true,
+    checkpoint: {id: 9, next_actor: "user", next_action: "Choose a plan"}};
+  tabs.open(parent);
+  const tab = () => container.children[1].children[0];
+  tabs.update([parent, child]);
+  assert.equal(tab().dataset.needsAction, "false", "a child's saved request is not the parent's need");
+  const dismissed = {...child, handled_checkpoint_id: 9, needs_attention: false, can_handle_response: false};
+  tabs.update([{...parent, needs_attention: false, attention_items: undefined}, dismissed]);
+  assert.equal(tab().dataset.needsAction, "false");
+  const failed = {...child, response_state: "failed", status: "idle", needs_attention: true};
+  tabs.update([parent, failed]);
+  assert.equal(tab().dataset.needsAction, "true", "a failed child escalates to its parent");
+  tabs.update([{...parent, response_state: "working", status: "running"}, failed]);
+  assert.equal(tab().dataset.needsAction, "false", "running outranks a child's failure");
+  assert.equal(tab().dataset.status, "working");
+  tabs.update([{...parent, response_state: "working", status: "running"}, {...child, status: "needs input"}]);
+  assert.equal(tab().dataset.needsAction, "true", "a child's live approval outranks the parent's running state");
+});

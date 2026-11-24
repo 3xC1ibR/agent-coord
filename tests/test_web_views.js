@@ -805,3 +805,35 @@ test("clearing and resetting group filters cannot clear membership; renaming pre
   assert.deepEqual(c.calls.filter(call => call.body), [{path: "projects/launch", body: {name: "Ship it"}}]);
   assert.deepEqual(c.errors, []);
 });
+
+test("one needs-you derivation: dismissal clears it, running beats a stale request, and children escalate only by rule", () => {
+  const Tree = require("../plugins/agent-coord/scripts/agent_coord/web/agent-tree.js");
+  const request = thread("request", {response_state: "input", needs_attention: true, attention_reason: "review",
+    can_handle_response: true, checkpoint: {id: 7, phase: "planning", next_actor: "user", next_action: "Pick one"}});
+  assert.equal(threadViews.needsAction(request), true);
+  assert.equal(Tree.status(request).label, "Needs you");
+  assert.equal(WorkingSet.requestOf(request), "needs-you");
+  const handled = {...request, handled_checkpoint_id: 7, needs_attention: false, can_handle_response: false};
+  assert.equal(threadViews.needsAction(handled), false, "Dismiss clears the tab dot");
+  assert.notEqual(Tree.status(handled).key, "waiting", "Dismiss clears the tree badge");
+  assert.equal(WorkingSet.requestOf(handled), null, "Dismiss clears the inbox request");
+
+  // Running outranks a saved request whose checkpoint predates the current turn.
+  const working = {...request, status: "running", response_state: "working", needs_attention: true,
+    attention_items: [{thread_id: "child", reason: "review"}]};
+  assert.equal(threadViews.needsAction(working), false);
+  assert.equal(Tree.status(working).key, "running");
+  assert.equal(threadViews.needsAction({...working, open_ask: {id: 1}}), true, "a pending question still needs the user");
+  assert.equal(threadViews.needsAction({...working, status: "needs input"}), true, "a live approval still needs the user");
+
+  const parent = thread("parent", {response_state: "available", needs_attention: true, attention_reason: "review",
+    attention_items: [{thread_id: "child", reason: "review"}]});
+  const child = {...request, thread_id: "child", attention_owner_thread_id: "parent"};
+  assert.equal(threadViews.needsAction(parent, [parent, child]), false, "a child's needs-you does not propagate");
+  assert.equal(threadViews.needsAction(parent, [parent, {...child, open_ask: {id: 2}}]), false, "nor does its question");
+  for (const escalation of [{status: "stalled"}, {status: "needs input"}, {response_state: "failed"}])
+    assert.equal(threadViews.needsAction(parent, [parent, {...child, ...escalation}]), true, JSON.stringify(escalation));
+  assert.equal(threadViews.needsAction(parent, [parent, {...child, status: "stalled", attention: "archived"}]), false);
+  const own = {...parent, attention_items: [{thread_id: "parent", reason: "blocked"}, {thread_id: "child", reason: "review"}]};
+  assert.equal(threadViews.needsAction(own, [own, child]), true, "the parent's own item still counts");
+});

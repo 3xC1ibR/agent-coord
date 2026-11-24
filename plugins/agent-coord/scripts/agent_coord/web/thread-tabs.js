@@ -104,6 +104,8 @@ class ThreadTabs {
   }
   suspend() { this.selected = undefined; this.save(true); this.render(); }
   update(threads) {
+    // The tab dot also reflects children that escalate, so it keeps the inventory.
+    this.threads = threads;
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
     for (const item of this.items) {
       if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
@@ -186,7 +188,7 @@ class ThreadTabs {
     const signature = JSON.stringify([this.selected ?? null, this.selected === undefined, this.scratchpadOpen,
       this.items.map(item => { const shown = this.displayed(item);
         return [item.thread_id, item.title, item.conversation_id, shown.title, shown.response_state, shown.unread_result,
-          tabViews.needsAction(shown), shown === item ? null : tabViews.needsAction(item)]; })]);
+          tabViews.needsAction(shown, this.threads), shown === item ? null : tabViews.needsAction(item, this.threads)]; })]);
     if (signature === this.signature) return;
     this.signature = signature;
     const focused = this.container.contains(this.document.activeElement) ? this.document.activeElement?.dataset.threadTab : undefined;
@@ -200,9 +202,9 @@ class ThreadTabs {
       tab.setAttribute("aria-selected", String(this.selected === id));
       tab.setAttribute("aria-controls", scratchpad ? "project-scratchpad-page" : id ? "conversation" : "welcome");
       tab.tabIndex = this.selected === id || this.selected === undefined && id === null ? 0 : -1;
-      const shown = id ? this.displayed(item) : item, needsAction = tabViews.needsAction(shown);
+      const shown = id ? this.displayed(item) : item, needsAction = tabViews.needsAction(shown, this.threads);
       const label = item.title + (shown !== item && shown.title ? " · Showing " + shown.title : "") + (needsAction ? " · Action required" : "")
-        + (shown !== item && tabViews.needsAction(item) ? " · " + item.title + " needs action in its own conversation" : "");
+        + (shown !== item && tabViews.needsAction(item, this.threads) ? " · " + item.title + " needs action in its own conversation" : "");
       tab.title = scratchpad ? "Project scratchpad · ⌘⇧S to toggle floating notes" : label + (!needsAction && shown.unread_result ? " · New response" : "") + (id ? " · Alt+Shift+←/→ to reorder" : "");
       tab.setAttribute("aria-label", label);
       tab.dataset.needsAction = String(needsAction);

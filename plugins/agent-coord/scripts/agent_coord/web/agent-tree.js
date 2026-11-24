@@ -5,6 +5,9 @@
 const AgentTree = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
   const CARD_W = 232, CARD_H = 152, ROW_GAP = 24, INDENT = 28, COLUMN_GAP = 32;
+  // A closed agent folds to its provider icon until the user opens its card.
+  const COMPACT = 40;
+  const size = (compact, id) => compact.has(id) ? {w: COMPACT, h: COMPACT} : {w: CARD_W, h: CARD_H};
   function graph(threads) {
     const nodes = new Map(threads.filter(t => t?.thread_id).map(t => [t.thread_id, t]));
     const parents = new Map(), children = new Map(), relationships = new Map();
@@ -43,11 +46,11 @@ const AgentTree = (() => {
     }
     return {nodes, parents, children, relationships, root, family};
   }
-  function layout(tree, root, collapsed = new Set()) {
+  function layout(tree, root, collapsed = new Set(), compact = new Set()) {
     if (!tree.nodes.has(root)) return {nodes: [], edges: [], width: 0, height: 0};
     const nodes = [], edges = [], positions = new Map();
     const add = (id, x, y, level, parent = null) => {
-      const item = {id, x, y, level, parent}; nodes.push(item); positions.set(id, item);
+      const item = {id, x, y, level, parent, ...size(compact, id)}; nodes.push(item); positions.set(id, item);
       if (parent) edges.push({from: parent, to: id, relationship: tree.relationships.get(id)});
     };
     const first = collapsed.has(root) ? [] : tree.children.get(root) || [];
@@ -61,18 +64,20 @@ const AgentTree = (() => {
         width = Math.max(width, left - COLUMN_GAP + 28);
         left = 28; rowTop = bottom + 64;
       }
-      let y = rowTop, maxDepth = 0;
+      let y = rowTop, maxDepth = 0, branchWidth = 0;
       const pending = [{id, depth: 0, parent: root}];
       while (pending.length) {
         const item = pending.pop();
         add(item.id, left + item.depth * INDENT, y, item.depth + 2, item.parent);
         maxDepth = Math.max(maxDepth, item.depth);
-        y += CARD_H + ROW_GAP;
+        branchWidth = Math.max(branchWidth, item.depth * INDENT + size(compact, item.id).w);
+        y += size(compact, item.id).h + ROW_GAP;
         if (!collapsed.has(item.id)) for (const child of (tree.children.get(item.id) || []).slice().reverse())
           pending.push({id: child, depth: item.depth + 1, parent: item.id});
       }
       bottom = Math.max(bottom, y - ROW_GAP);
-      left += CARD_W + maxDepth * INDENT + COLUMN_GAP;
+      // A branch of folded closed agents is only as wide as its icons.
+      left += branchWidth + COLUMN_GAP;
     }
     if (first.length) width = Math.max(width, left - COLUMN_GAP + 28);
     add(root, (width - CARD_W) / 2, 28, 1);
@@ -80,25 +85,27 @@ const AgentTree = (() => {
     for (const edge of edges) {
       const a = positions.get(edge.from), b = positions.get(edge.to);
       if (edge.from === root) {
-        const x1 = a.x + CARD_W / 2, y1 = a.y + CARD_H, x2 = b.x + CARD_W / 2, y2 = b.y;
+        const x1 = a.x + a.w / 2, y1 = a.y + a.h, x2 = b.x + b.w / 2, y2 = b.y;
         edge.path = first.length > columns
           ? `M${x1},${y1} V${y1 + 16} H14 V${y2 - 32} H${x2} V${y2}`
           : `M${x1},${y1} V${y1 + 32} H${x2} V${y2}`;
       } else {
-        const x = b.x - 14, y = b.y + 24;
+        const x = b.x - 14, y = b.y + Math.min(24, b.h / 2);
         // The vertical child rail stays to the left of its own card.
-        edge.path = `M${x},${a.y + CARD_H} V${y} H${b.x}`;
+        edge.path = `M${x},${a.y + a.h} V${y} H${b.x}`;
       }
     }
     return {nodes, edges, width, height: bottom + 28};
   }
+  // The tab dot and this badge share one "needs you" derivation, which honors dismissal.
+  const views = () => typeof module !== "undefined" ? require("./views.js").threadViews : threadViews;
   function status(t) {
     const value = grouping.status(t);
-    if (value.key === "running") return {key: "running", label: "Running"};
+    // Each card describes its own agent; children escalate on their own cards.
+    const needs = views().needsAction(t);
+    if (value.key === "running" && !needs) return {key: "running", label: "Running"};
     if (t.response_state === "failed" || t.turn_completion?.status === "failed") return {key: "failed", label: "Failed"};
-    if (t.response_state === "input" || t.status === "needs input" ||
-        !t.checkpoint_stale && t.checkpoint?.next_actor === "user" && t.checkpoint.next_action)
-      return {key: "waiting", label: "Needs you"};
+    if (needs) return {key: "waiting", label: "Needs you"};
     if (t.attention === "archived") return {key: "closed", label: "Closed"};
     if (t.turn_completion?.status === "interrupted") return {key: "idle", label: "Stopped"};
     if (grouping.phase(t) === "finished") return {key: "done", label: "Done"};
@@ -174,8 +181,9 @@ const AgentTree = (() => {
     update(threads, root, selected) {
       const changedSelection = this.selected !== selected || this.root !== root;
       this.tree = graph(threads); this.root = root; this.selected = selected;
-      if (!this.views.has(root)) this.views.set(root, {x: 0, y: 0, scale: 1, collapsed: new Set(), fitted: true, fullFit: false});
+      if (!this.views.has(root)) this.views.set(root, {x: 0, y: 0, scale: 1, collapsed: new Set(), opened: new Set(), fitted: true, fullFit: false});
       this.view = this.views.get(root);
+      this.view.opened ||= new Set();
       // A selected agent must stay visible, even when selected outside the tree.
       if (changedSelection) for (let parent = this.tree.parents.get(selected); parent; parent = this.tree.parents.get(parent)) this.view.collapsed.delete(parent);
       this.render();
@@ -188,7 +196,10 @@ const AgentTree = (() => {
       this.attention.hidden = !needs.length; this.attention.textContent = needs.length + " need attention";
       this.empty.hidden = !!family.length; this.viewport.hidden = !family.length;
       this.controls.hidden = !family.length; this.toolbar.hidden = !family.length;
-      const positioned = layout(this.tree, this.root, this.view.collapsed);
+      // Closed agents fold to an icon unless they are the root, selected, or opened by the user.
+      this.compact = new Set(family.filter(id => id !== this.root && id !== this.selected &&
+        !this.view.opened.has(id) && status(this.tree.nodes.get(id)).key === "closed"));
+      const positioned = layout(this.tree, this.root, this.view.collapsed, this.compact);
       this.positioned = positioned;
       const signature = JSON.stringify([this.root, positioned.nodes, positioned.edges]);
       if (signature !== this.signature) {
@@ -208,10 +219,14 @@ const AgentTree = (() => {
           let card = this.cardEls.get(item.id);
           if (!card) {
             card = this.el("article", "agent-tree-card"); card.dataset.agentId = item.id; card.setAttribute("role", "treeitem");
-            card.onclick = e => { if (!e.target.closest("button")) this.onSelect(item.id); };
+            card.onclick = e => {
+              if (e.target.closest("button")) return;
+              if (this.compact.has(item.id)) this.openClosed(item.id); else this.onSelect(item.id);
+            };
             this.cardEls.set(item.id, card);
           }
           card.style.left = item.x + "px"; card.style.top = item.y + "px";
+          card.classList.toggle("compact", this.compact.has(item.id));
           card.setAttribute("aria-level", item.level);
           const siblings = item.parent ? this.tree.children.get(item.parent) : [item.id];
           card.setAttribute("aria-posinset", siblings.indexOf(item.id) + 1); card.setAttribute("aria-setsize", siblings.length);
@@ -239,10 +254,10 @@ const AgentTree = (() => {
       if (!from || !to || from.id === to.id) return;
       const dx = to.x - from.x, dy = to.y - from.y, horizontal = Math.abs(dx) > Math.abs(dy);
       const direction = Math.sign(horizontal ? dx : dy);
-      const x1 = from.x + CARD_W / 2 + (horizontal ? direction * CARD_W / 2 : 0);
-      const y1 = from.y + CARD_H / 2 + (horizontal ? 0 : direction * CARD_H / 2);
-      const x2 = to.x + CARD_W / 2 - (horizontal ? direction * CARD_W / 2 : 0);
-      const y2 = to.y + CARD_H / 2 - (horizontal ? 0 : direction * CARD_H / 2);
+      const x1 = from.x + from.w / 2 + (horizontal ? direction * from.w / 2 : 0);
+      const y1 = from.y + from.h / 2 + (horizontal ? 0 : direction * from.h / 2);
+      const x2 = to.x + to.w / 2 - (horizontal ? direction * to.w / 2 : 0);
+      const y2 = to.y + to.h / 2 - (horizontal ? 0 : direction * to.h / 2);
       const bend = Math.max(24, Math.abs(horizontal ? x2 - x1 : y2 - y1) / 2);
       const cx = horizontal ? direction * bend : 0, cy = horizontal ? 0 : direction * bend;
       const d = `M${x1},${y1} C${x1 + cx},${y1 + cy} ${x2 - cx},${y2 - cy} ${x2},${y2}`;
@@ -275,6 +290,8 @@ const AgentTree = (() => {
     renderCard(id) {
       const card = this.cardEls.get(id), t = this.tree.nodes.get(id), value = status(t), kids = this.tree.children.get(id) || [];
       const selected = id === this.selected;
+      if (this.compact.has(id)) return this.renderCompact(card, id, t, kids);
+      card.title = "";
       card.classList.toggle("selected", selected); card.dataset.status = value.key;
       card.tabIndex = selected || !this.cardEls.has(this.selected) && id === this.root ? 0 : -1;
       const source = this.tree.relationships.get(id) === "fork" ? this.tree.nodes.get(this.tree.parents.get(id)) : null;
@@ -287,7 +304,8 @@ const AgentTree = (() => {
         || t.checkpoint?.summary || t.original_request || "No update yet.";
       const model = t.model || t.session?.model || t.client || "Agent";
       const footer = [duration(t), !t.browser_session ? "Read only" : "", t.unread_result ? "Unread reply" : ""].filter(Boolean).join(" · ");
-      const signature = JSON.stringify([t.title, model, value, summary, footer, kids.length, this.view.collapsed.has(id)]);
+      const opened = value.key === "closed" && this.view.opened.has(id) && id !== this.root;
+      const signature = JSON.stringify([t.title, model, value, summary, footer, kids.length, this.view.collapsed.has(id), opened]);
       if (signature === card.dataset.content) return;
       card.dataset.content = signature;
       const focused = card.contains(this.document.activeElement), onFold = this.document.activeElement?.classList?.contains("agent-tree-fold");
@@ -305,8 +323,37 @@ const AgentTree = (() => {
           () => this.fold(id));
         fold.classList.add("agent-tree-fold"); fold.setAttribute("aria-expanded", String(!folded)); foot.append(fold);
       }
+      if (opened) {
+        const minimize = this.button("Minimize", "Minimize closed agent " + (t.title || "agent"), () => this.minimizeClosed(id));
+        minimize.classList.add("agent-tree-fold"); foot.append(minimize);
+      }
       card.replaceChildren(heading, task, foot);
       if (focused) (onFold ? card.querySelector(".agent-tree-fold") || card : card).focus({preventScroll: true});
+    }
+    renderCompact(card, id, t, kids) {
+      const title = t.title || "Untitled agent";
+      card.classList.toggle("selected", false); card.dataset.status = "closed";
+      card.tabIndex = -1;
+      card.setAttribute("aria-selected", "false");
+      // aria-expanded keeps its tree meaning (the children); the label says how to open the card.
+      card.setAttribute("aria-label", title + ": Closed. Press Enter to show its card.");
+      if (kids.length) card.setAttribute("aria-expanded", String(!this.view.collapsed.has(id)));
+      else card.removeAttribute("aria-expanded");
+      card.title = title + " · Closed";
+      const signature = JSON.stringify(["compact", t.client, title]);
+      if (signature === card.dataset.content) return;
+      card.dataset.content = signature;
+      const logo = this.providerLogo?.(t.client) || this.el("span", "agent-tree-compact-mark", (title.trim()[0] || "·").toUpperCase());
+      card.replaceChildren(logo);
+    }
+    // Opening a folded closed agent shows its full card in place; Minimize folds it again.
+    openClosed(id) {
+      this.view.opened.add(id); this.render();
+      this.cardEls.get(id)?.focus({preventScroll: true});
+    }
+    minimizeClosed(id) {
+      this.view.opened.delete(id); this.render();
+      this.cardEls.get(id)?.focus({preventScroll: true});
     }
     fold(id) {
       if (this.view.collapsed.has(id)) this.view.collapsed.delete(id); else this.view.collapsed.add(id);
@@ -341,8 +388,8 @@ const AgentTree = (() => {
     reveal(id, focus = true) {
       const item = this.positioned.nodes.find(n => n.id === id); if (!item) return;
       const w = this.viewport.clientWidth, h = this.viewport.clientHeight, s = this.view.scale;
-      Object.assign(this.view, {x: w / 2 - (item.x + CARD_W / 2) * s,
-        y: h / 2 - (item.y + CARD_H / 2) * s, fitted: false}); this.transform();
+      Object.assign(this.view, {x: w / 2 - (item.x + item.w / 2) * s,
+        y: h / 2 - (item.y + item.h / 2) * s, fitted: false}); this.transform();
       if (focus) this.cardEls.get(id)?.focus({preventScroll: true});
     }
     findAttention() {
@@ -356,7 +403,11 @@ const AgentTree = (() => {
       if (!card || e.target.closest("button")) return;
       const id = card.dataset.agentId, order = this.tree.family(this.root).filter(id => this.cardEls.has(id));
       let target;
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.onSelect(id); return; }
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        if (this.compact.has(id)) this.openClosed(id); else this.onSelect(id);
+        return;
+      }
       if (e.key === "ArrowDown") target = order[Math.min(order.length - 1, order.indexOf(id) + 1)];
       if (e.key === "ArrowUp") target = order[Math.max(0, order.indexOf(id) - 1)];
       if (e.key === "Home") target = this.root;

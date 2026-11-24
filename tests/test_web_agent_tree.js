@@ -68,7 +68,7 @@ test("large sibling groups wrap without overlapping nested branches or losing ed
 });
 test("current running state supersedes a historical failure; stale asks do not require intervention", () => {
   assert.equal(Tree.status(thread("running", null, {response_state: "working", turn_completion: {status: "failed"}})).key, "running");
-  assert.equal(Tree.status(thread("ask", null, {checkpoint: {next_actor: "user", next_action: "Approve"}})).key, "waiting");
+  assert.equal(Tree.status(thread("ask", null, {checkpoint: {id: 4, next_actor: "user", next_action: "Approve"}})).key, "waiting");
   assert.equal(Tree.status(thread("stale", null, {checkpoint_stale: true, checkpoint: {next_actor: "user", next_action: "Approve"}})).key, "idle");
   assert.equal(Tree.duration(thread("idle")), "");
 });
@@ -595,4 +595,40 @@ test("inventory records follow the current supervisor rather than the creator", 
   assert.deepEqual(tree.children.get("lead"), ["kept"]);
   assert.deepEqual(tree.children.get("next"), ["moved"]);
   assert.equal(tree.parents.has("orphan"), false);
+});
+
+test("closed children fold to an icon that opens in place, with connected connectors and keyboard access", () => {
+  const {panel, selected, doc} = setup();
+  const records = [thread("root"), thread("open", "root"), thread("closed", "root", {attention: "archived", client: "claude"}),
+    thread("closed-child", "closed", {attention: "archived"})];
+  const compact = new Set(["closed", "closed-child"]);
+  const placed = Tree.layout(Tree.graph(records), "root", new Set(), compact);
+  const at = id => placed.nodes.find(n => n.id === id);
+  assert.deepEqual([at("closed").w, at("closed").h], [40, 40]);
+  assert.deepEqual([at("open").w, at("open").h], [Tree.CARD_W, Tree.CARD_H]);
+  assert.equal(at("closed-child").y, at("closed").y + 40 + 24, "the next row follows the compact height");
+  const rail = placed.edges.find(e => e.to === "closed-child").path;
+  assert.match(rail, new RegExp("^M" + (at("closed-child").x - 14) + "," + (at("closed").y + 40) + " "), "the rail leaves the icon's lower edge");
+  const fromRoot = placed.edges.find(e => e.to === "closed").path;
+  assert.ok(fromRoot.endsWith("H" + (at("closed").x + 20) + " V" + at("closed").y), "the root connector meets the icon's centre");
+
+  panel.update(records, "root", "root");
+  const card = panel.cardEls.get("closed");
+  assert.ok(card.classList.contains("compact"));
+  assert.equal(card.title, "closed · Closed");
+  assert.match(card.attrs["aria-label"], /closed: Closed\. Press Enter to show its card\./);
+  assert.equal(card.querySelector(".agent-tree-task"), null, "the icon carries no card body");
+  card.onclick({target: card});
+  assert.deepEqual(selected, [], "opening a folded card does not navigate");
+  assert.equal(card.classList.contains("compact"), false);
+  assert.ok(card.querySelector(".agent-tree-task"));
+  const minimize = card.children.at(-1).children.find(n => n.attrs["aria-label"] === "Minimize closed agent closed");
+  assert.ok(minimize, "an opened closed card can fold again");
+  card.onclick({target: card}); assert.deepEqual(selected, ["closed"], "a full card navigates");
+  minimize.onclick(); assert.ok(card.classList.contains("compact"));
+  panel.keydown({key: "Enter", target: card, preventDefault() {}});
+  assert.equal(card.classList.contains("compact"), false); assert.equal(doc.activeElement, card);
+  panel.update(records, "root", "closed-child");
+  assert.equal(panel.cardEls.get("closed-child").classList.contains("compact"), false, "a selected closed agent shows its card");
+  assert.equal(panel.cardEls.get("open").classList.contains("compact"), false);
 });
