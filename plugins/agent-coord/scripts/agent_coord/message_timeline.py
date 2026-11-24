@@ -60,13 +60,14 @@ def _timeline_rows(db, session_id):
 
 
 def message_timeline(store, session_id, cwd=None, *, limit=None):
-    session = store.get_session(session_id)
-    if not matches_workspace(session["cwd"], cwd):
-        raise CoordinationError("Conversation not found in this workspace.")
     with store.reading(), store._connection() as db:
-        # Reply linkage, titles, creation receipts, and every batch belong to
-        # one observation, even if another connection publishes during a read.
+        # Workspace admission and the displayed rows share the same observation.
         db.execute("BEGIN")
+        session = db.execute("SELECT cwd FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+        if session is None:
+            raise CoordinationError(f"Session {session_id} is not registered.")
+        if not matches_workspace(session["cwd"], cwd):
+            raise CoordinationError("Conversation not found in this workspace.")
         targets = []
         if limit is None:
             rows = _timeline_rows(db, session_id)
