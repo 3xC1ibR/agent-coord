@@ -24,7 +24,9 @@ def ensure_schema(db):
     db.execute("""CREATE TABLE IF NOT EXISTS transcript_generations (
         thread_id TEXT PRIMARY KEY, generation TEXT NOT NULL, metadata TEXT NOT NULL,
         turn_count INTEGER NOT NULL, item_count INTEGER NOT NULL,
-        source_root TEXT, active INTEGER NOT NULL DEFAULT 0, checkpoint INTEGER NOT NULL DEFAULT 0)""")
+        source_root TEXT, active INTEGER NOT NULL DEFAULT 0, checkpoint INTEGER NOT NULL DEFAULT 0, source_instance TEXT)""")
+    if "source_instance" not in {row[1] for row in db.execute("PRAGMA table_info(transcript_generations)")}:
+        db.execute("ALTER TABLE transcript_generations ADD COLUMN source_instance TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS thread_turns (
         thread_id TEXT NOT NULL, turn_seq INTEGER NOT NULL, turn_id TEXT,
         compact_offset INTEGER NOT NULL, compact_length INTEGER NOT NULL,
@@ -58,7 +60,7 @@ class TranscriptStore:
         finally:
             os.close(fd)
 
-    def save(self, thread_id, history, *, source_root=None, activate=False, checkpoint=None, on_publish=None):
+    def save(self, thread_id, history, *, source_root=None, activate=False, checkpoint=None, on_publish=None, source_instance=None, expected_source_instance=None):
         """Publish a complete generation. Caller must serialize logical revisions.
 
         A journal consumer supplies its monotonically increasing checkpoint;
@@ -68,10 +70,11 @@ class TranscriptStore:
         return self.save_turns(thread_id, dict(enumerate(turns)),
                                metadata={k: v for k, v in history.items() if k != "turns"},
                                turn_count=len(turns), source_root=source_root, activate=activate,
-                               checkpoint=checkpoint, on_publish=on_publish)
+                               checkpoint=checkpoint, on_publish=on_publish, source_instance=source_instance,
+                               expected_source_instance=expected_source_instance)
 
     def save_turns(self, thread_id, turns, *, metadata, turn_count, source_root=None,
-                   activate=False, checkpoint=None, on_publish=None):
+                   activate=False, checkpoint=None, on_publish=None, source_instance=None, expected_source_instance=None):
         """Publish only explicitly changed turns (mapping of sequence to turn).
 
         Use this at finalization; save() is the complete-reconciliation interface.
@@ -90,11 +93,17 @@ class TranscriptStore:
             with self.store._connection() as db:
                 ensure_schema(db)
             with self.store.reading(), self.store._connection() as db:
-                old = db.execute("SELECT generation, active, checkpoint FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
+                old = db.execute("SELECT generation, active, checkpoint, source_instance FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
                 previous = {r[1]: tuple(r) for r in db.execute("SELECT * FROM thread_turns WHERE thread_id=?", (thread_id,))}
+            previous_instance = old[3] if old else None
+            if source_instance is None:
+                source_instance = previous_instance
+            changed_instance = source_instance != previous_instance
+            if changed_instance and expected_source_instance != previous_instance:
+                raise ValueError("Transcript source instance fence changed")
             if checkpoint is None:
-                checkpoint = old[2] if old else 0
-            if old and checkpoint < old[2]:
+                checkpoint = old[2] if old and not changed_instance else 0
+            if old and not changed_instance and checkpoint < old[2]:
                 raise ValueError("Transcript checkpoint would move backwards")
             changed = {seq: value for seq, value in prepared.items()
                        if seq not in previous or previous[seq][7] != value[3]}
@@ -130,20 +139,20 @@ class TranscriptStore:
                     ON CONFLICT(thread_id,turn_seq) DO UPDATE SET turn_id=excluded.turn_id,
                     compact_offset=excluded.compact_offset, compact_length=excluded.compact_length,
                     full_offset=excluded.full_offset, full_length=excluded.full_length, digest=excluded.digest, item_count=excluded.item_count""", offsets)
-                db.execute("""INSERT INTO transcript_generations VALUES (?,?,?,?,?,?,?,?)
+                db.execute("""INSERT INTO transcript_generations VALUES (?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(thread_id) DO UPDATE SET generation=excluded.generation,
                     metadata=excluded.metadata, turn_count=excluded.turn_count,
                     item_count=excluded.item_count, source_root=excluded.source_root,
-                    active=excluded.active, checkpoint=excluded.checkpoint""",
+                    active=excluded.active, checkpoint=excluded.checkpoint, source_instance=excluded.source_instance""",
                     (thread_id, generation, metadata, turn_count,
                      sum(changed[seq][4] if seq in changed else previous[seq][8]
                          for seq in range(turn_count)),
-                     source_root, int(activate or bool(old and old[1])), checkpoint))
+                     source_root, int(activate or bool(old and old[1])), checkpoint, source_instance))
                 if on_publish is not None:
                     on_publish(db)
         return generation
 
-    def _read(self, thread_id, *, before_seq=None, limit=None, turn_id=None, full=False, require_active=True):
+    def _read(self, thread_id, *, before_seq=None, limit=None, turn_id=None, full=False, require_active=True, with_checkpoint=False, target_turn=None):
         with self.store.reading(), self.store._connection() as db:
             db.execute("BEGIN")
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_generations'").fetchone():
@@ -155,6 +164,12 @@ class TranscriptStore:
                 legacy = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
                 if not legacy or legacy[0] != row[5]:
                     return None  # An older build wrote the retained legacy generation.
+            if target_turn is not None:
+                target = db.execute("SELECT turn_seq FROM thread_turns WHERE thread_id=? AND turn_id=?",
+                                    (thread_id, target_turn)).fetchone()
+                if target is None:
+                    return None
+                before_seq = target[0] + 1
             query = "SELECT * FROM thread_turns WHERE thread_id=?"
             args = [thread_id]
             if before_seq is not None:
@@ -199,12 +214,18 @@ class TranscriptStore:
         if not full:
             result.update(view="recent", earlierTurns=entries[0][1] if entries else 0,
                           beforeSeq=entries[0][1] if entries else None, totalTurns=row[3])
+        if with_checkpoint:
+            return {"generation": row[1], "checkpoint": row[7], "source_instance": row[8] if len(row) > 8 else None, "history": result}
         return result
 
-    def read_window(self, thread_id, *, before_seq=None, limit=40):
+    def read_checkpoint(self, thread_id):
+        """Read a coherent transcript and cursor for projection recovery."""
+        return self._read(thread_id, full=True, with_checkpoint=True)
+
+    def read_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
         if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
             raise ValueError("Invalid transcript window")
-        return self._read(thread_id, before_seq=before_seq, limit=limit)
+        return self._read(thread_id, before_seq=before_seq, limit=limit, target_turn=turn_id)
 
     def read_full(self, thread_id, *, require_active=True):
         return self._read(thread_id, full=True, require_active=require_active)

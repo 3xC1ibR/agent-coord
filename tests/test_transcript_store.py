@@ -42,6 +42,12 @@ class TranscriptStoreTests(unittest.TestCase):
         self.assertTrue(page["turns"][0]["items"][0]["abridged"])
         second = self.transcripts.read_window("thread", before_seq=page["beforeSeq"])
         self.assertEqual(second["beforeSeq"], 3)
+        target = self.transcripts.read_window("thread", turn_id="20", limit=5)
+        self.assertEqual([t["id"] for t in target["turns"]], [str(i) for i in range(16, 21)])
+        self.assertIsNone(self.transcripts.read_window("thread", turn_id="absent"))
+        checkpoint = self.transcripts.read_checkpoint("thread")
+        self.assertEqual(checkpoint["history"], self.history)
+        self.assertEqual(checkpoint["checkpoint"], 0)
         self.assertEqual(self.transcripts.read_full_turn("thread", "0"), self.history["turns"][0])
         legacy = {"id": "thread", "turns": []}
         with self.store._connection() as db:
@@ -122,6 +128,14 @@ class TranscriptStoreTests(unittest.TestCase):
             file.write(b"X")
         with self.assertRaisesRegex(ValueError, "digest mismatch"):
             restarted.read_full("thread")
+
+    def test_source_instance_fence_allows_only_expected_reset(self):
+        self.transcripts.save("thread", self.history, activate=True, checkpoint=10, source_instance="first")
+        self.transcripts.save("thread", self.history, checkpoint=1, source_instance="second", expected_source_instance="first")
+        state = self.transcripts.read_checkpoint("thread")
+        self.assertEqual((state["source_instance"], state["checkpoint"]), ("second", 1))
+        with self.assertRaisesRegex(ValueError, "fence changed"):
+            self.transcripts.save("thread", self.history, checkpoint=11, source_instance="first")
 
     def test_cursor_failure_rolls_back_publication(self):
         self.transcripts.migrate(activate=True)

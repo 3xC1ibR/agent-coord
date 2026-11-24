@@ -2522,17 +2522,22 @@ class BrowserSessions:
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
-    def read_history_window(self, thread_id, *, before_seq=None, limit=40):
+    def read_history_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
         """Read an indexed page, falling back for untouched legacy histories."""
         from .transcript_store import TranscriptStore
         if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
             raise CoordinationError("Invalid transcript window")
         self._record(thread_id)
-        window = TranscriptStore(self.store).read_window(thread_id, before_seq=before_seq, limit=limit)
+        window = TranscriptStore(self.store).read_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
         if window is not None:
             return self.reviews.public_history(thread_id, window)
         saved = read_history(self.store, thread_id) or {"id": thread_id, "turns": []}
         turns = saved.get("turns") or []
+        if turn_id is not None:
+            position = next((i for i, turn in enumerate(turns) if turn.get("id") == turn_id), None)
+            if position is None:
+                return None
+            before_seq = position + 1
         end = min(len(turns), before_seq if before_seq is not None else len(turns))
         start = max(0, end - limit)
         from .history_window import _abridged_item
