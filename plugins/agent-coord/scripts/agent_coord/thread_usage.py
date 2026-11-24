@@ -358,11 +358,24 @@ class ThreadUsageStore:
         return totals, models, complete, note
 
     def summary(self, thread_id, provider=None):
-        with self.store._connection() as db:
-            session = db.execute("SELECT client FROM sessions WHERE session_id=?", (thread_id,)).fetchone()
+        with self.store.reading(), self.store._connection() as db:
+            # Most saved threads have no telemetry. Prove that absence in one
+            # indexed observation rather than fetching six empty row sets.
+            session = db.execute("""WITH requested AS (
+                SELECT session_id, client, COALESCE(?,client) AS provider FROM sessions WHERE session_id=?)
+                SELECT r.client, r.provider,
+                    EXISTS(SELECT 1 FROM thread_usage_samples WHERE thread_id=r.session_id AND provider=r.provider) AS samples,
+                    EXISTS(SELECT 1 FROM thread_usage_context WHERE thread_id=r.session_id AND provider=r.provider) AS context,
+                    EXISTS(SELECT 1 FROM thread_usage_notes WHERE thread_id=r.session_id AND provider=r.provider) AS notes,
+                    EXISTS(SELECT 1 FROM thread_usage_epochs WHERE thread_id=r.session_id AND provider=r.provider) AS epochs
+                FROM requested r""", (provider or None, thread_id)).fetchone()
             if not session:
                 raise CoordinationError("Work thread not found.")
             provider = provider or session["client"]
+            if not any(session[key] for key in ("samples", "context", "notes", "epochs")):
+                return {"provider": provider, "status": "unavailable", "scope": "direct", "totals": {},
+                        "models": [], "context": None, "observed_at": None,
+                        "note": "Token consumption telemetry is unavailable."}
             rows = read_rows(db, "SELECT * FROM thread_usage_samples WHERE thread_id=? AND provider=?", (thread_id, provider))
             baselines = {r["native_id"]: json.loads(r["totals_json"]) if r["totals_json"] is not None else None
                          for r in read_rows(db, "SELECT * FROM thread_usage_baselines WHERE thread_id=? AND provider=?", (thread_id, provider))}

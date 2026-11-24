@@ -57,3 +57,14 @@ class ForegroundProjectionTests(unittest.TestCase):
                 recovery.assert_called_once_with(identity)
             finally:
                 sessions.close()
+
+    def test_absent_usage_uses_one_indexed_read_without_writer_admission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CoordinationStore(Path(directory) / 'state.sqlite3')
+            store.register(session_id='without-telemetry', client='codex', cwd=directory)
+            before = store.database_metrics()['completed_scopes']
+            with patch('agent_coord.thread_usage.read_rows', side_effect=AssertionError('Fetched empty telemetry sets')):
+                summary = store.usage.summary('without-telemetry')
+            self.assertEqual(summary['status'], 'unavailable')
+            self.assertIsNone(summary['observed_at'])
+            self.assertEqual(store.database_metrics()['completed_scopes'], before)
