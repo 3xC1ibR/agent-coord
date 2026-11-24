@@ -1,7 +1,8 @@
 // Browser-level conversation regression with a disposable server, real app assets,
 // and deterministic large histories. RIBBON_WEB_DIST may identify a packaged build.
 import assert from "node:assert/strict";
-import {spawn} from "node:child_process";
+import {spawn, execFileSync} from "node:child_process";
+import {createHash} from "node:crypto";
 import {createServer, request as forwardRequest} from "node:http";
 import {readFile, mkdir, writeFile} from "node:fs/promises";
 import {createRequire} from "node:module";
@@ -48,9 +49,75 @@ f.main()
   {cwd: root, env, stdio: ["ignore", "pipe", "pipe"]},
 );
 let browser, server;
-const report = {engine, switches: [], optimistic: [], errors: [], requests: {}, polling: []};
+const report = {engine, assets: [...index.matchAll(/\/dist\/(app-[a-f0-9]{20}\.(?:css|js))/g)].map(match => match[1]),
+  switches: [], optimistic: [], errors: [], requests: {}, polling: []};
+const provenanceFile = process.env.RIBBON_BUILD_PROVENANCE;
+report.buildProvenance = provenanceFile ? JSON.parse(await readFile(provenanceFile, "utf8")) : {
+  checkoutRevision: execFileSync("git", ["rev-parse", "HEAD"], {cwd: root, encoding: "utf8"}).trim(),
+  checkoutDirty: !!execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {cwd: root, encoding: "utf8"}).trim(),
+};
+report.assetHashes = {};
+for (const asset of report.assets) {
+  const digest = createHash("sha256").update(await readFile(join(dist, asset))).digest("hex");
+  assert.ok(asset.includes(digest.slice(0, 20)));
+  if (report.buildProvenance.assets) assert.equal(report.buildProvenance.assets[asset], digest);
+  report.assetHashes[asset] = digest;
+}
 const quantile = (values, percentile) =>
   [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.ceil(values.length * percentile) - 1)];
+// Timing begins at the trusted browser event. Observe the normal handler's DOM
+// mutation, then report the first matching frame and a task after rendering.
+async function measureInteraction(page, type, expected) {
+  await page.evaluate(({type, expected}) => {
+    window.measuredInteraction = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error("Interaction did not display " + expected)), 5000);
+      document.addEventListener(type, function begin(event) {
+        if (!event.isTrusted || (type === "keydown" && event.key !== "Enter")) return;
+        document.removeEventListener(type, begin, true);
+        const started = performance.now();
+        const elapsed = () => performance.now() - started;
+        const visible = () => {
+          const input = document.getElementById("message");
+          const timeline = document.getElementById("timeline");
+          const viewport = timeline.getBoundingClientRect();
+          const intersects = node => {
+            const box = node.getBoundingClientRect();
+            return box.width > 0 && box.height > 0 && box.bottom > Math.max(0, viewport.top) &&
+              box.top < Math.min(innerHeight, viewport.bottom);
+          };
+          if (type === "click") return state.selected === expected && state.timelineThread === expected &&
+            document.activeElement === input && !input.disabled && [...timeline.querySelectorAll("article:not([hidden])")].some(intersects);
+          return !input.value && [...timeline.querySelectorAll("[data-outgoing]")].some(node =>
+            node.textContent.includes(expected) && intersects(node));
+        };
+        let domMs;
+        const observe = () => { if (domMs === undefined && visible()) domMs = elapsed(); };
+        const observer = new MutationObserver(observe);
+        observer.observe(document.getElementById("conversation"), {childList:true, attributes:true, subtree:true});
+        requestAnimationFrame(function frame() {
+          observe();
+          if (!visible()) {
+            if (elapsed() < 5000) requestAnimationFrame(frame);
+            else observer.disconnect();
+            return;
+          }
+          const firstFrame = elapsed();
+          observer.disconnect();
+          const channel = new MessageChannel();
+          channel.port1.onmessage = () => {
+            clearTimeout(timer);
+            channel.port1.close(); channel.port2.close();
+            resolve({trusted:event.isTrusted, domMs, firstFrame, afterRenderingOpportunity:elapsed()});
+          };
+          channel.port2.postMessage(0);
+        });
+      }, true);
+    });
+  }, {type, expected});
+  if (type === "click") await page.locator('#conversation-tabs [role=tab][data-thread-tab="' + expected + '"]').click();
+  else await page.locator("#message").press("Enter");
+  return page.evaluate(() => window.measuredInteraction);
+}
 try {
   const upstream = await new Promise((resolve, reject) => {
     let logs = "";
@@ -76,6 +143,7 @@ try {
       ? {channel: process.env.RIBBON_BROWSER_CHANNEL}
       : {}),
   });
+  report.browserVersion = browser.version();
   const context = await browser.newContext({viewport: {width: 1440, height: 900}});
   const page = await context.newPage();
   page.on("pageerror", (error) => report.errors.push(String(error)));
@@ -136,7 +204,7 @@ try {
           text:
             message +
             (i === 330
-              ? '\n\n\x60\x60\x60openui\nroot = TextContent("Retained response")\n\x60\x60\x60'
+              ? '\n\n\x60\x60\x60openui\nroot = Tabs([TabItem("initial", "Summary", [TextContent("Retained response")]), TabItem("review", "Review state", [TextContent("Selected response")])])\n\x60\x60\x60'
               : ""),
         },
       ],
@@ -175,6 +243,7 @@ try {
     conversationCacheScope: "integration-test",
     conversationRevisionEpoch: "fixture",
     ordinarySubmissionReceipts: 1,
+    sessionCreationReceipts: 1,
     quietSubmissions: 1,
     conversationMetadataEvents: 1,
     conversationMetadataCursor: 0,
@@ -182,10 +251,11 @@ try {
   let submitting = false,
     maximum = 0,
     active = 0,
-    interruptAttachmentReply = true;
+    interruptAttachmentReply = true,
+    interruptFirstMessage = true;
   const accepted = new Set(),
     submissions = [];
-  const newId = "created-conversation";
+  const newId = "created-conversation", creationRequests = [];
   let coldOpen, releaseColdOpen;
   // Serve the fixture using real browser requests, including WebKit keepalive
   // delivery on reload. Only the composite and submission contracts are simulated.
@@ -223,8 +293,16 @@ try {
       });
     }
     if (route === "/api/browser/sessions" && request.method === "POST" && snapshots.has(newId)) {
-      request.resume();
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      creationRequests.push(JSON.parse(Buffer.concat(chunks)));
+      assert.ok(creationRequests[0].requestId);
+      assert.deepEqual(creationRequests.at(-1), creationRequests[0]);
       await new Promise((resolve) => setTimeout(resolve, 150));
+      if (creationRequests.length === 1) {
+        response.writeHead(502, {"Content-Type": "application/json"});
+        return response.end(JSON.stringify({error: "Lost creation response"}));
+      }
       return send({session: snapshots.get(newId).session, thread: snapshots.get(newId).recent_turns});
     }
     if (/^\/api\/browser\/sessions\/[^/]+\/messages$/.test(route) && request.method === "POST") {
@@ -243,7 +321,12 @@ try {
         response.writeHead(502, {"Content-Type": "application/json"});
         return response.end(JSON.stringify({error: "Lost intake response"}));
       }
-      const newTurn = body.message === "First ordered input";
+      if (body.message === "First input in new conversation" && interruptFirstMessage) {
+        interruptFirstMessage = false;
+        response.writeHead(502, {"Content-Type": "application/json"});
+        return response.end(JSON.stringify({error: "Lost first-message response"}));
+      }
+      const newTurn = body.message === "Second ordered input";
       return send({
         acceptedMessage: {
           threadId: id,
@@ -258,7 +341,12 @@ try {
     const headers = {...request.headers, host: new URL(upstream).host};
     if (headers.origin === base) headers.origin = upstream;
     const upstreamRequest = forwardRequest(url, {method: request.method, headers}, (upstreamResponse) => {
-      response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
+      const resultHeaders = {...upstreamResponse.headers};
+      // The opaque frame's allowlist names the serving origin. Translate its
+      // exact fixture authority at the reverse proxy, preserving its isolation.
+      if (route === "/openui-frame.html" && resultHeaders["content-security-policy"])
+        resultHeaders["content-security-policy"] = resultHeaders["content-security-policy"].replaceAll(upstream, base);
+      response.writeHead(upstreamResponse.statusCode, resultHeaders);
       upstreamResponse.pipe(response);
     });
     upstreamRequest.on("error", () => response.destroy());
@@ -302,6 +390,16 @@ try {
   const iframe = page.locator("#timeline article:not([hidden]) iframe[title='Interactive agent response']");
   await iframe.waitFor();
   const responseFrame = page.frames().find((frame) => new URL(frame.url()).pathname === "/openui-frame.html");
+  try {
+    await responseFrame.getByText("Summary", {exact: true}).click();
+    await responseFrame.getByText("Retained response", {exact: true}).waitFor();
+  } catch (error) {
+    const diagnostics = await responseFrame.evaluate(() => ({text: document.body.innerText.slice(0, 300),
+      library: !!window.__OpenUI, scripts: [...document.scripts].map(script => script.src)}));
+    throw Error("OpenUI response did not render " + JSON.stringify({diagnostics, errors: report.errors}), {cause: error});
+  }
+  await responseFrame.getByText("Review state", {exact: true}).click();
+  await responseFrame.getByText("Selected response", {exact: true}).waitFor();
   await responseFrame.evaluate(() => {
     window.savedFormSentinel = "retained";
   });
@@ -317,30 +415,13 @@ try {
     ),
   );
   assert.equal(await responseFrame.evaluate(() => window.savedFormSentinel), "retained");
+  assert.ok(await responseFrame.getByText("Selected response", {exact: true}).isVisible());
   report.retainedOpenUIDocument = true;
   report.moveBefore = await page.evaluate(() => typeof Element.prototype.moveBefore === "function");
   await page.waitForTimeout(150);
   for (let iteration = 0; iteration < 40; iteration++) {
     const id = ids[1 - (iteration % 2)];
-    const sample = await page.evaluate(async (id) => {
-      const tab = [...document.querySelectorAll("#conversation-tabs [data-thread-tab]")].find(
-        (el) => el.dataset.threadTab === id,
-      );
-      const selectTab = tab?.querySelector("button") || tab;
-      if (!selectTab) throw Error("Missing conversation tab for " + id);
-      const started = performance.now();
-      selectTab.click();
-      await Promise.resolve();
-      const elapsed = performance.now() - started;
-      await new Promise(requestAnimationFrame);
-      if (
-        !document.querySelector("#timeline article") ||
-        document.querySelector("#message").disabled ||
-        state.selected !== id
-      )
-        throw Error("Cached tab did not display its conversation");
-      return {synchronous: elapsed, beforePaint: performance.now() - started};
-    }, id);
+    const sample = await measureInteraction(page, "click", id);
     report.switches.push(sample);
   }
   await page.evaluate(() => {
@@ -354,23 +435,12 @@ try {
     () => window.originalOpenUI.isConnected && !window.originalOpenUI.closest("[hidden]"),
   );
   assert.equal(await responseFrame.evaluate(() => window.savedFormSentinel), "retained");
+  assert.ok(await responseFrame.getByText("Selected response", {exact: true}).isVisible());
   report.virtualizedOpenUIDocument = true;
   submitting = true;
   for (const text of ["First ordered input", "Second ordered input"]) {
-    const sample = await page.evaluate((text) => {
-      const input = document.getElementById("message");
-      input.focus();
-      input.value = text;
-      input.dispatchEvent(new Event("input", {bubbles: true}));
-      const begin = performance.now();
-      input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true, cancelable: true}));
-      if (
-        input.value ||
-        ![...document.querySelectorAll("#timeline [data-outgoing]")].some((n) => n.textContent.includes(text))
-      )
-        throw Error("Optimistic input was not visible before returning from Enter");
-      return performance.now() - begin;
-    }, text);
+    await page.locator("#message").fill(text);
+    const sample = await measureInteraction(page, "keydown", text);
     report.optimistic.push(sample);
   }
   await page.waitForFunction(() => document.querySelectorAll("#timeline [data-status='sent']").length >= 2);
@@ -389,9 +459,9 @@ try {
   const newTurn = {
     id: ids[0] + "-turn-331",
     status: "completed",
-    items: [userItem("user", submissions[0].text)],
+    items: [userItem("user", submissions[1].text)],
   };
-  acceptedTurn.items.push(userItem("additional-user", submissions[1].text));
+  acceptedTurn.items.push(userItem("additional-user", submissions[0].text));
   histories.get(ids[0]).push(newTurn);
   Object.assign(acceptedThread.recent_turns, {
     turns: [...acceptedThread.recent_turns.turns.slice(1), newTurn],
@@ -402,10 +472,10 @@ try {
   acceptedThread.acceptedMessages = submissions.map((row, index) => ({
     threadId: ids[0],
     requestId: row.requestId,
-    turnId: index ? acceptedTurn.id : newTurn.id,
+    turnId: index ? newTurn.id : acceptedTurn.id,
     message: row.text,
     imageCount: 0,
-    afterItemId: index ? "a330" : null,
+    afterItemId: index ? null : "a330",
   }));
   acceptedThread.history_revision++;
   await page.evaluate(
@@ -443,7 +513,8 @@ try {
   report.panes = await page.locator("[data-pane-timeline]").count();
   assert.ok(report.panes >= 2 && report.panes <= 6);
   assert.equal(await page.locator("iframe.conversation-pane-frame").count(), 0);
-  assert.equal(await page.evaluate(() => window.streamCount), 1);
+  report.streamsPerTiledWorkspace = await page.evaluate(() => window.streamCount);
+  assert.equal(report.streamsPerTiledWorkspace, 1);
   if (output) {
     await mkdir(output, {recursive: true});
     for (const scheme of ["light", "dark"]) {
@@ -471,30 +542,8 @@ try {
     await state.durableDrafts.write(state.selected, {text: input.value, images, mentions: []});
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
-  report.attachment = await page.evaluate(async () => {
-    const input = document.getElementById("message");
-    const started = performance.now();
-    input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true, cancelable: true}));
-    const synchronous = performance.now() - started;
-    assertVisible();
-    await new Promise(requestAnimationFrame);
-    assertVisible();
-    return {
-      synchronous,
-      firstFrame: performance.now() - started,
-      images: 4,
-      bytesPerImage: 5 * 1024 * 1024 - 3,
-    };
-    function assertVisible() {
-      if (
-        input.value ||
-        !Array.from(document.querySelectorAll("#timeline [data-outgoing]")).some((node) =>
-          node.textContent.includes("Stored image attachments"),
-        )
-      )
-        throw Error("Missing optimistic image submission");
-    }
-  });
+  report.attachment = {...await measureInteraction(page, "keydown", "Stored image attachments"),
+    images: 4, bytesPerImage: 5 * 1024 * 1024 - 3};
   await page.waitForFunction(
     () => document.querySelector("#timeline [data-status='uncertain']"),
     {},
@@ -507,7 +556,7 @@ try {
   await page.reload({waitUntil: "domcontentloaded"});
   try {
     await page.waitForFunction(
-      () => state.detail?.thread?.turns?.length === 40 && document.querySelector("#timeline article"),
+      () => !state.detail && document.querySelector("#timeline [data-provisional-thread] article"),
     );
     report.indexedSnapshotOnColdOpen = true;
   } finally {
@@ -533,6 +582,17 @@ try {
   await page.waitForTimeout(Number(process.env.RIBBON_IDLE_SAMPLE_MS || 60000));
   measureIdle = false;
   report.idleSampleMs = Number(process.env.RIBBON_IDLE_SAMPLE_MS || 60000);
+  assert.equal(await page.locator("dialog iframe").count(), 0);
+  for (const name of ["settings", "usage", "activity"]) {
+    await page.locator("#open-" + name).click();
+    const dialog = page.locator("#" + name + "-dialog[open]");
+    const frame = dialog.locator("iframe");
+    await frame.waitFor();
+    assert.equal(await frame.getAttribute("src"), "/" + name + "?embedded=1");
+    await dialog.evaluate(element => element.close());
+    await page.waitForFunction(id => !document.getElementById(id).hasAttribute("src"), name + "-frame");
+  }
+  report.deferredDialogFrames = 3;
   const sample = snapshots.get(ids[0]);
   snapshots.set(newId, {
     ...sample,
@@ -545,19 +605,20 @@ try {
   await page.waitForFunction(
     () => state.selected === "new-session" && !document.getElementById("send").disabled,
   );
-  report.firstMessage = await page.evaluate(() => {
-    const input = document.getElementById("message"),
-      begin = performance.now();
-    input.value = "First input in new conversation";
-    input.dispatchEvent(new Event("input", {bubbles: true}));
-    input.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true, cancelable: true}));
-    if (input.value || !document.querySelector("#timeline [data-outgoing]"))
-      throw Error("New-session input did not appear on Enter");
-    const elapsed = performance.now() - begin;
-    input.value = "Next unsent input";
-    input.dispatchEvent(new Event("input", {bubbles: true}));
-    return elapsed;
-  });
+  await page.locator("#message").fill("First input in new conversation");
+  report.firstMessage = await measureInteraction(page, "keydown", "First input in new conversation");
+  await page.locator("#message").fill("Next unsent input");
+  await page.waitForFunction(() => document.querySelector("#timeline [data-status='uncertain']"));
+  await page.evaluate(() => window.agentCoordDrainComposerWrites());
+  const creation = await page.evaluate(async () => (await state.durableDrafts.pending(state.newSessionDraft.draftId))[0]);
+  assert.equal(creation.requestId, creationRequests[0].requestId);
+  assert.notEqual(creation.body.creationIntent.firstMessageId, creation.requestId);
+  await page.reload({waitUntil: "domcontentloaded"});
+  await page.waitForFunction(id => state.outgoing?.list(id).some(row => row.status === "uncertain"), newId);
+  assert.equal(creationRequests.length, 2);
+  assert.equal(submissions.at(-1).requestId, creation.body.creationIntent.firstMessageId);
+  await page.evaluate(id => select(id, {refreshInventory: false}), newId);
+  await page.reload({waitUntil: "domcontentloaded"});
   await page.waitForFunction(
     (id) =>
       state.selected === id &&
@@ -566,6 +627,10 @@ try {
     newId,
   );
   assert.equal(submissions.at(-1).text, "First input in new conversation");
+  const firstRequests = submissions.filter(row => row.text === "First input in new conversation");
+  assert.deepEqual(firstRequests.map(row => row.requestId), [creation.body.creationIntent.firstMessageId, creation.body.creationIntent.firstMessageId]);
+  report.firstCreationRecovery = {creations: creationRequests.length, creationIdentities: new Set(creationRequests.map(row => row.requestId)).size,
+    firstMessageAttempts: firstRequests.length, firstMessageIdentities: new Set(firstRequests.map(row => row.requestId)).size, draft: "preserved"};
   report.cacheLimits = await page.evaluate(async () => {
     const cache = new ConversationSnapshotCache("bounded-fixture"),
       detail = {thread: {turns: []}, snapshotBytes: 4096};
@@ -589,14 +654,14 @@ try {
   assert.deepEqual(report.cacheLimits, {disk: 64, memory: 64, oldestEvicted: true, newestRetained: true});
   report.summary = {
     switchP50: quantile(
-      report.switches.map((v) => v.beforePaint),
+      report.switches.map((v) => v.afterRenderingOpportunity),
       0.5,
     ),
     switchP99: quantile(
-      report.switches.map((v) => v.beforePaint),
+      report.switches.map((v) => v.afterRenderingOpportunity),
       0.99,
     ),
-    optimisticMax: Math.max(...report.optimistic),
+    optimisticMax: Math.max(...report.optimistic.map(v => v.domMs)),
     idleGets: report.polling.filter((r) => r.method === "GET").length,
   };
   if (process.env.RIBBON_SCREENSHOTS && output) {
@@ -617,6 +682,9 @@ try {
               performance.getEntriesByName("workspace-ready").length &&
               document.querySelector("#timeline article"),
           );
+          const response = screen.frameLocator("#timeline article:not([hidden]) iframe");
+          await response.getByText("Summary", {exact: true}).click();
+          await response.getByText("Retained response", {exact: true}).waitFor();
           await screen.screenshot({path: join(output, `conversation-${width}-${colorScheme}.png`)});
         } finally {
           await capture.close();
