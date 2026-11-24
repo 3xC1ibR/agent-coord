@@ -439,6 +439,75 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(self.owner.channel_readers, {})
         self.assertEqual(self.owner.readers, [])
 
+    def test_close_after_natural_exit_and_status_reap_is_idempotent(self):
+        self.command("open", "open", {"args": [sys.executable, "-u", "-c",
+            "import sys; sys.stdin.readline()"], "env": dict(os.environ)})
+        process = self.owner.processes["provider"]
+        self.assertEqual(self.command("finish", "write", {"data": "finish\n"})["outcome"], "written")
+        deadline = time.monotonic() + 5
+        while self.owner.processes and time.monotonic() < deadline:
+            status = self.owner.dispatch({"action": "status"})
+            time.sleep(.01)
+        self.assertEqual(self.owner.processes, {})
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(status["channels"][0]["state"], "closed")
+        receipts = [tuple(row) for row in self.owner.journal.db.execute("SELECT * FROM commands ORDER BY command_id")]
+        events = self.owner.journal.events(0)
+        with patch("agent_coord.provider_transport.os.kill") as signals, \
+                patch("agent_coord.provider_transport.os.killpg") as group_signals, \
+                patch.object(self.owner, "_command", wraps=self.owner._command) as deliver:
+            expected = {"outcome": "written", "result": {"closed": True}}
+            self.assertEqual(self.command("close", "close", {}), expected)
+            self.assertEqual(self.command("close", "close", {}), expected)
+            self.assertEqual(self.command("close-again", "close", {}), expected)
+            self.assertEqual(deliver.call_count, 2)
+            signals.assert_not_called()
+            group_signals.assert_not_called()
+        self.assertEqual([tuple(row) for row in self.owner.journal.db.execute(
+            "SELECT * FROM commands WHERE command_id IN ('open','finish') ORDER BY command_id")], receipts)
+        self.assertEqual(self.owner.journal.events(0), events)
+
+    def test_close_without_handle_refuses_unconfirmed_channel_states(self):
+        with patch("agent_coord.provider_transport.os.kill") as signals, \
+                patch("agent_coord.provider_transport.os.killpg") as group_signals:
+            for state in (None, "opening", "running", "lost", "write-uncertain", "unknown"):
+                with self.subTest(state=state), self.owner.journal.db:
+                    self.owner.journal.db.execute("DELETE FROM channels")
+                    if state is not None:
+                        # A stale stored PID may now belong to an unrelated process.
+                        self.owner.journal.db.execute("INSERT INTO channels VALUES ('provider','{}',?,?)",
+                                                      (os.getpid(), state))
+                    identity = "close-" + str(state)
+                    result = self.command(identity, "close", {})
+                    self.assertEqual(result["outcome"], "uncertain")
+                    self.assertIn("requires review", result["result"]["error"])
+                    self.assertEqual(self.command(identity, "close", {}), result)
+                    row = self.owner.journal.db.execute("SELECT state FROM channels").fetchone()
+                    self.assertEqual(row["state"] if row else None, state)
+            signals.assert_not_called()
+            group_signals.assert_not_called()
+
+    def test_closed_channel_preserves_prior_uncertain_command_receipts(self):
+        with self.owner.journal.db:
+            self.owner.journal.db.execute("INSERT INTO channels VALUES ('provider','{}',?,'lost')", (os.getpid(),))
+        previous = {operation: self.command("old-" + operation, operation, value)
+                    for operation, value in (("write", {"data": "once\n"}), ("close", {}))}
+        self.assertTrue(all(result["outcome"] == "uncertain" for result in previous.values()))
+        receipts = [tuple(row) for row in self.owner.journal.db.execute("SELECT * FROM commands ORDER BY command_id")]
+        with self.owner.journal.db:
+            self.owner.journal.db.execute("UPDATE channels SET state='closed',specification=''")
+        with patch("agent_coord.provider_transport.os.kill") as signals, \
+                patch("agent_coord.provider_transport.os.killpg") as group_signals:
+            self.assertEqual(self.command("new-close", "close", {}),
+                             {"outcome": "written", "result": {"closed": True}})
+            for operation, value in (("write", {"data": "once\n"}), ("close", {})):
+                self.assertEqual(self.command("old-" + operation, operation, value), previous[operation])
+            self.assertEqual(self.command("new-write", "write", {"data": "later\n"})["outcome"], "uncertain")
+            signals.assert_not_called()
+            group_signals.assert_not_called()
+        self.assertEqual([tuple(row) for row in self.owner.journal.db.execute(
+            "SELECT * FROM commands WHERE command_id IN ('old-write','old-close') ORDER BY command_id")], receipts)
+
     def test_large_history_frame_is_not_truncated_at_the_old_eight_megabyte_limit(self):
         import os
         size = 9 * 1024 * 1024

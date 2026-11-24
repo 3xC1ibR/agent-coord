@@ -579,6 +579,13 @@ class Owner:
             return {"pid": process.pid, "attached": False}
         process = self.processes.get(channel)
         if process is None:
+            if operation == "close":
+                with self.journal.lock:
+                    state = self.journal.db.execute("SELECT state FROM channels WHERE channel=?", (channel,)).fetchone()
+                    if state is not None and state["state"] == "closed":
+                        # Status may already have reaped a naturally exited
+                        # provider. Its stored PID no longer establishes ownership.
+                        return {"closed": True}
             raise TransportError("Provider transport is unavailable; delivery requires review.")
         if operation == "write":
             data = value["data"].encode("utf-8")
