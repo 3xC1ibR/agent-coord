@@ -25,7 +25,8 @@ from agent_coord.store import CoordinationStore
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.coordinator_projection import CoordinatorProjection
 from agent_coord.provider_transport import Journal
-from agent_coord.transcript_store import TranscriptStore
+from agent_coord.transcript_store import TranscriptStore, ensure_schema
+from agent_coord.search_publication import install_change_capture, read_metadata, _search_history
 from agent_coord.database_writer import _distribution
 from measure_backend_latency import SyntheticProvider
 
@@ -65,6 +66,8 @@ def turn(sequence):
 
 def gates(report):
     failures = []
+    if report['mixed_stream_deltas'] < 10: failures.append('mixed streaming made no progress')
+    if min(report['open_paths'].values()) < 1: failures.append('managed/external opens not covered')
     if report['error_count']: failures.append('workload errors')
     expected = report['workload']
     if report['seeded'] != {'threads': expected['threads'], 'turns': expected['threads'] * expected['turns_per_thread']}:
@@ -80,6 +83,7 @@ def gates(report):
             failures.append(name + ' insufficient throughput')
     if report['durable_receipts'] != report['send_accept']['count']: failures.append('durable receipt mismatch')
     if report['finalized_writes'] < 1: failures.append('finalized writer made no progress')
+    if not report['search'].get('new_transcript_published'): failures.append('new transcript publication missing')
     if report['search']['indexed'] < 1: failures.append('isolated search made no progress')
     stream = report['streaming']
     if stream['turns'] != 10 or stream['projected_deltas'] < 10: failures.append('ten streaming turns not observed')
@@ -116,6 +120,11 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             resources['search'] = search
         except ImportError:
             search = None
+        sessions = BrowserSessions(store, directory, rpc_factory=ControlledProvider)
+        resources['sessions'] = sessions
+        with store._connection() as db:
+            ensure_schema(db)
+            install_change_capture(db)
         histories = [turn(n) for n in range(turns)]
         pending_search = deque()
         for n in range(threads):
@@ -124,8 +133,12 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             store.threads.ensure(thread)
             history = {'id': thread, 'cwd': directory, 'turns': histories}
             transcripts.save(thread, history, activate=True)
+            if n % 2:
+                with store._connection() as db:
+                    db.execute('INSERT INTO browser_sessions(thread_id,cwd,name,created_at,updated_at) VALUES (?,?,?,?,?)',
+                               (thread, directory, 'Generated managed thread', store.clock(), store.clock()))
             if search:
-                pending_search.append(search.enqueue_history(thread, history, revision=1, metadata={'title': 'Generated workload'}))
+                pending_search.append(search.enqueue_history(thread, history, revision=0, metadata={'title': 'Generated workload'}))
                 if len(pending_search) >= 16:
                     pending_search.popleft().result(timeout=120)
         if search: search.flush()
@@ -133,8 +146,23 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             seeded = {'threads': db.execute('SELECT count(*) FROM transcript_generations').fetchone()[0],
                       'turns': db.execute('SELECT count(*) FROM thread_turns').fetchone()[0]}
             storage_settings = {key: db.execute('PRAGMA ' + key).fetchone()[0] for key in ('journal_mode', 'synchronous')}
-        sessions = BrowserSessions(store, directory, rpc_factory=ControlledProvider)
-        resources['sessions'] = sessions
+        composer = sessions.create({})['session']['thread_id']
+        streams = [sessions.create({})['session']['thread_id'] for _ in range(10)]
+        for thread in streams:
+            sessions.send(thread, {'message': 'generated stream'})
+        sessions.persistence.flush()
+        def baseline_records():
+            with store.reading(), store._connection() as db:
+                identities = [row[0] for row in db.execute('SELECT thread_id FROM work_threads ORDER BY thread_id')]
+            for thread in identities:
+                with store.reading(), store._connection() as db:
+                    metadata = read_metadata(db, thread)
+                yield {'thread_id': thread, 'history': _search_history(store, thread), 'metadata': metadata, 'revision': 0}
+        if search:
+            list(search.rebuild_steps(baseline_records()))
+            verified = search.verify(baseline_records())
+            if verified['failures']: raise ValueError('Search baseline verification failed')
+            search.activate()
         server = ui.make_ui_server(store, port=0, cwd=directory, browser_sessions=sessions)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
@@ -151,11 +179,8 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             with urllib.request.urlopen(req, timeout=30) as response:
                 result = json.load(response)
             return (time.perf_counter() - start) * 1000, result
-        composer = sessions.create({})['session']['thread_id']
-        streams = [sessions.create({})['session']['thread_id'] for _ in range(10)]
-        for thread in streams:
-            sessions.send(thread, {'message': 'generated stream'})
-        sessions.persistence.flush()
+        publisher = server.search_publications
+        if publisher is None: raise ValueError('Search publication worker not installed')
         journal_options = {'file_events': True} if 'file_events' in inspect.signature(Journal).parameters else {}
         journal = Journal(root / 'retained', **journal_options)
         resources['journal'] = journal
@@ -226,19 +251,38 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
             store._writer.waits.clear()
         initial_timeouts = store.database_metrics()['admission_timeouts']
         samples = {'open': [], 'send_accept': []}
+        open_paths = {'managed': 0, 'external': 0}
+        mixed_deltas = 0
+        publication_targets = []
         receipts = []
         counts = {'finalized': 0, 'indexed': 0}
         stop = threading.Event()
         def foreground(kind):
             index = 0
+            composer_turn = None
             while not stop.is_set():
                 try:
                     if kind == 'open':
                         elapsed, result = request(f'/api/browser/sessions/fixture-{index % threads:05d}')
-                        if not result.get('thread', {}).get('turns'): raise ValueError('empty')
+                        thread = result['thread']
+                        total = thread.get('totalTurns')
+                        if not isinstance(total, int) or total < turns:
+                            raise ValueError('Seeded transcript total missing')
+                        if index % threads != 0 and total != turns:
+                            raise ValueError('Unmutated transcript total changed')
+                        expected_before = max(0, total - 40)
+                        if ([value['id'] for value in thread['turns']] !=
+                                [f'turn-{sequence}' for sequence in range(expected_before, total)] or
+                                thread.get('earlierTurns') != expected_before or
+                                thread.get('beforeSeq') != expected_before or thread.get('view') != 'recent'):
+                            raise ValueError('Seeded transcript page mismatch')
+                        open_paths['managed' if index % threads % 2 else 'external'] += 1
                     else:
                         key = f'composer-{index}'
-                        elapsed, _ = request(f'/api/browser/sessions/{composer}/messages', {'message': 'generated composer request', 'requestId': key})
+                        body = {'message': 'generated composer request', 'requestId': key}
+                        if composer_turn: body['expectedTurnId'] = composer_turn
+                        elapsed, result = request(f'/api/browser/sessions/{composer}/messages', body)
+                        composer_turn = result.get('acceptedMessage', {}).get('turnId') or result.get('turn', {}).get('id') or composer_turn
                         receipts.append(key)
                     samples[kind].append(elapsed)
                 except Exception as error:
@@ -253,35 +297,65 @@ def measure(seconds=15, threads=2000, turns=350, rounds=10):
                     value = turn(turns + index)
                     transcripts.save_turns(thread, {turns + index: value}, metadata={'id': thread, 'cwd': directory}, turn_count=turns + index + 1, activate=True)
                     counts['finalized'] += 1
-                    if search:
-                        search.enqueue_history(thread, {'id': thread, 'turns': histories + [turn(turns + i) for i in range(index + 1)]}, revision=index + 2, metadata={'title': 'Generated workload'}).result(timeout=30)
-                        counts['indexed'] += 1
+                    if index == 0:
+                        store.register(session_id='new-publication', client='codex', cwd=directory)
+                        transcripts.save('new-publication', {'id': 'new-publication', 'cwd': directory, 'turns': [turn(0)]}, activate=True)
+                        with store.reading(), store._connection() as db:
+                            new_sequence = db.execute("SELECT sequence FROM search_publications WHERE thread_id='new-publication' AND kind='history'").fetchone()[0]
+                        publication_targets.append(('new-publication', new_sequence))
+                    # Normal source commits must drive the installed asynchronous worker.
+                    with store.reading(), store._connection() as db:
+                        sequence = db.execute("SELECT sequence FROM search_publications WHERE thread_id=? AND kind='history'", (thread,)).fetchone()[0]
+                    publication_targets.append((thread, sequence))
                 except Exception as error:
                     errors.append({'operation': 'finalize', 'type': type(error).__name__})
                 index += 1
                 stop.wait(.1)
+        def stream_mixed():
+            nonlocal mixed_deltas
+            with ThreadPoolExecutor(max_workers=10) as producers:
+                while not stop.is_set():
+                    try:
+                        list(producers.map(lambda thread: emit('item/agentMessage/delta', thread,
+                            itemId='agent', delta='generated token '), streams))
+                        batch = journal.events(projection.cursor)
+                        projection.project_batch(batch)
+                        mixed_deltas += len(batch)
+                    except Exception as error:
+                        errors.append({'operation': 'mixed_stream', 'type': type(error).__name__})
+                    stop.wait(.125)
         start = time.monotonic()
         try:
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                futures = [pool.submit(foreground, kind) for kind in samples] + [pool.submit(finalize)]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(foreground, kind) for kind in samples] + [pool.submit(finalize), pool.submit(stream_mixed)]
                 stop.wait(seconds)
                 stop.set()
                 for future in futures: future.result(timeout=60)
             elapsed = time.monotonic() - start
             with store.reading(), store._connection() as db:
                 durable = sum(db.execute('SELECT count(*) FROM browser_submission_receipts WHERE thread_id=? AND request_id=? AND state=?', (composer, key, 'completed')).fetchone()[0] for key in receipts)
+            # Drain source outbox through its installed worker, never direct enqueue.
+            deadline = time.monotonic() + 10
+            applied = {}
+            while publication_targets and time.monotonic() < deadline:
+                with search.connection(readonly=True) as db:
+                    applied = dict(db.execute("SELECT thread_id,sequence FROM applied_publications WHERE kind='history'"))
+                if all(applied.get(thread, -1) >= sequence for thread, sequence in publication_targets): break
+                time.sleep(.02)
+            counts['indexed'] = sum(sequence <= applied.get(thread, -1) for thread, sequence in publication_targets)
+            new_publication_applied = 'new-publication' in applied
             metrics = store.database_metrics()
             report = {'schema_version': 1, 'workload': {'threads': threads, 'turns_per_thread': turns, 'streaming_turns': 10, 'delta_rounds': rounds, 'seconds': seconds},
                 'seeded': seeded, 'storage_settings': storage_settings, 'setup_seconds': round(setup_seconds, 3), 'elapsed_seconds': round(elapsed, 3),
                 'open': {**_distribution(samples['open']), 'count': len(samples['open'])}, 'send_accept': {**_distribution(samples['send_accept']), 'count': len(samples['send_accept'])},
-                'writer_hold': metrics['writer_hold'], 'writer_wait': metrics['writer_wait'], 'admission_timeouts': metrics['admission_timeouts'] - initial_timeouts,
+                'request_operations': metrics['requests'], 'writer_hold': metrics['writer_hold'], 'writer_wait': metrics['writer_wait'], 'admission_timeouts': metrics['admission_timeouts'] - initial_timeouts,
                 'durable_receipts': durable, 'finalized_writes': counts['finalized'],
-                'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'durable_coverage': search.coverage() if search else None},
-                'streaming': stream_result, 'error_count': len(errors), 'errors': errors[:20],
+                'search': {'available': search is not None, 'indexed': counts['indexed'], 'database_isolated': bool(search and search.path != store.database_path), 'new_transcript_published': new_publication_applied, 'durable_coverage': search.coverage() if search else None},
+                'streaming': stream_result, 'mixed_stream_deltas': mixed_deltas, 'open_paths': open_paths, 'projection_lock_hold': _distribution(projection.stream_metrics['lock_holds_ms']), 'error_count': len(errors), 'errors': errors[:20],
                 'throughput_per_second': {kind: round(len(values) / elapsed, 2) for kind, values in samples.items()},
                 'runtime': {'python': platform.python_version(), 'executable': sys.executable, 'sqlite': sqlite3.sqlite_version, 'platform': platform.platform(), 'revision': revision, 'harness_sha256': harness_sha256},
                 'coverage': {'http_recent_open': True, 'durable_composer_receipt': True, 'retained_transport_journal': True, 'live_provider_process': False,
-                             'search_unavailable': search is None, 'search_http_query': False, 'search_async_finalized_indexing': search is not None, 'streaming_interval': 'delta-only interval precedes mixed HTTP/finalization interval'}}
+                             'search_unavailable': search is None, 'normal_search_publication_worker': publisher is not None, 'verified_search_active': search.active, 'search_http_query': False, 'search_async_finalized_indexing': search is not None, 'streaming_interval': 'isolated zero-write interval plus simultaneous streaming/HTTP/finalization' }}
             report['budget_failures'] = gates(report)
             return report
         finally:
