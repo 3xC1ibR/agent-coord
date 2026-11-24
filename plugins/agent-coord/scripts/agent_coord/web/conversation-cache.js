@@ -4,16 +4,23 @@
 // and rendered elements stay with the document that owns the conversation.
 class ConversationSnapshotCache {
   constructor(scope, database = globalThis.indexedDB) {
-    this.ready = new Promise(resolve => {
-      if (!scope || !database) { resolve(null); return; }
-      const request = database.open("ribbon-field-conversations:" + scope, 1);
+    this.scope = scope;
+    this.database = database;
+  }
+
+  get ready() {
+    return this.opening ||= new Promise(resolve => {
+      if (!this.scope || !this.database) { resolve(null); return; }
+      let request;
+      try { request = this.database.open("ribbon-field-conversations:" + this.scope, 1); }
+      catch { resolve(null); return; }
       request.onupgradeneeded = () => {
         request.result.createObjectStore("recent", {keyPath: "id"}).createIndex("visited", "visited");
         request.result.createObjectStore("sizes", {keyPath: "id"}).createIndex("visited", "visited");
       };
       request.onsuccess = () => {
         const db = request.result;
-        db.onversionchange = () => db.close();
+        db.onversionchange = () => { db.close(); this.opening = null; };
         resolve(db);
       };
       request.onerror = request.onblocked = () => resolve(null);

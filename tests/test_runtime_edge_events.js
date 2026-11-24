@@ -21,6 +21,27 @@ test("the opaque response realm provides the vendor's primitives before its scri
   assert.equal(vm.runInContext("Object.hasOwn({value: 1}, 'value') && [1, 2].at(-1) === 2", child), true);
 });
 
+test("an inventory-only workspace does not open transcript storage and shares the first opener", async () => {
+  const script = fs.readFileSync(path.join(__dirname, "../plugins/agent-coord/scripts/agent_coord/web/conversation-cache.js"), "utf8");
+  let attempts = 0;
+  const db = {close() {}};
+  const cache = vm.runInNewContext(script + "\nnew ConversationSnapshotCache('workspace', database)", {
+    database: {open() {
+      attempts++;
+      const request = {result: db};
+      queueMicrotask(() => request.onsuccess());
+      return request;
+    }},
+  });
+  assert.equal(attempts, 0);
+  assert.equal(cache.ready, cache.ready);
+  assert.equal(await cache.ready, db);
+  assert.equal(attempts, 1);
+  db.onversionchange();
+  assert.equal(await cache.ready, db);
+  assert.equal(attempts, 2);
+});
+
 test("a rejected activity batch retains its event IDs and backs off before trying again", async () => {
   const {VisitRecorder} = require("../plugins/agent-coord/scripts/agent_coord/web/activity-collector.js");
   let clock = 100, sequence = 0;

@@ -154,7 +154,7 @@ async function loadThreadList(view, request, {background = false, priority = "au
   // background refresh reads them at most once a minute.
   const companions = !background || !state.organization || Date.now() - (state.organizationReadAt || 0) >= ORGANIZATION_REFRESH_INTERVAL;
   // Open threads feed every tab's badges, including while browsing a Closed view.
-  const [open, closed, organization, views] = await Promise.all([api("threads?archived=false", undefined, {entity: entities.open, priority}),
+  const [open, closed, organization, views] = await Promise.all([initialDefinitions?.open || api("threads?archived=false", undefined, {entity: entities.open, priority}),
     view === "archived" ? api("threads?archived=true", undefined, {entity: entities.closed, priority}) : null,
     companions ? initialDefinitions?.organization || api("organization", undefined, {priority}) : null,
     companions ? initialDefinitions?.views || api("views", undefined, {priority}) : null]);
@@ -5044,6 +5044,12 @@ async function boot() {
   // the right history filter. Reuse those exact reads for the first inventory.
   let initialDefinitions = {};
   const definitionRevision = listRequest;
+  // All views, including Closed, use the open inventory for tab indicators.
+  // Workspace validation has finished, so run this read alongside definitions.
+  const inventoryEntities = state.inventoryEntities ||= {open: {}, closed: {}};
+  initialDefinitions.open = api("threads?archived=false", undefined,
+    {entity: inventoryEntities.open, priority: initialThread ? "low" : "auto"});
+  initialDefinitions.open.catch(() => {}); // Consumed by refreshList unless startup is superseded.
   const viewApi = (path, body, options) => {
     const result = api(path, body, options);
     if (initialDefinitions && body === undefined && (path === "views" || path === "organization"))
