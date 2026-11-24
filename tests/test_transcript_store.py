@@ -164,7 +164,7 @@ class TranscriptStoreTests(unittest.TestCase):
         self.assertEqual(browser.read_history_window("thread", turn_id="20", limit=5)["turns"][-1]["id"], "20")
         self.assertEqual(browser.read_history_turn("thread", "20"), self.history["turns"][20])
         self.assertIsNone(browser.read_history_window("thread", turn_id="missing"))
-        outside = str(self.store.database_path.parent / "elsewhere")
+        outside = str(self.store.database_path.parent.with_name(self.store.database_path.parent.name + "-outside"))
         with self.store._connection() as db:
             db.execute("CREATE TABLE browser_sessions(thread_id TEXT PRIMARY KEY, cwd TEXT)")
             db.execute("INSERT INTO browser_sessions VALUES ('thread', ?)", (outside,))
