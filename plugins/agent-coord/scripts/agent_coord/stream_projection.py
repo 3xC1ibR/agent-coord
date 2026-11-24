@@ -15,6 +15,7 @@ class MutationLedger:
         self.objects = []
         self.seen = set()
         self.entries = []
+        self.members = []
 
     def capture(self, value):
         if id(value) in self.seen or not isinstance(value, (dict, list, set, deque)):
@@ -25,12 +26,17 @@ class MutationLedger:
     def entry(self, mapping, key):
         self.entries.append((mapping, key, key in mapping, mapping.get(key)))
 
+    def member(self, values, identity):
+        self.members.append((values, identity, identity in values))
+
     def item(self, item):
         if isinstance(item, dict):
             self.capture(item)
             self.capture(item.get('summary'))
 
     def restore(self):
+        for values, identity, existed in reversed(self.members):
+            values.add(identity) if existed else values.discard(identity)
         for value, saved in reversed(self.objects):
             if isinstance(value, dict):
                 value.clear()
@@ -142,7 +148,7 @@ def ledger(sessions, target, entry):
     undo.capture(turn)
     undo.item(native)
     undo.entry(sessions.history_revisions, identity)
-    undo.capture(sessions.dirty_histories)
+    undo.member(sessions.dirty_histories, identity)
     watchdog = sessions.watchdog.observed.get(identity)
     undo.capture(watchdog)
     if watchdog:

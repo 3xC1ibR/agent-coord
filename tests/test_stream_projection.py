@@ -130,3 +130,10 @@ class StreamProjectionTests(unittest.TestCase):
         self.assertEqual(self.client.commands[-1][1]['retain_after'], 1)
         self.projection.load()
         self.assertEqual(self.projection.quarantined['bad']['first_sequence'], 2)
+
+    def test_validated_delta_does_not_enter_raw_diagnostic_or_authorization_handlers(self):
+        self.projection.project(self.event(1, 'item/started', item={
+            'id': 'output', 'type': 'agentMessage', 'text': ''}))
+        self.projection.channels['codex']['stdout_callback'] = lambda raw: self.fail('Raw handler under delta lock')
+        self.projection.project(self.event(2, 'item/agentMessage/delta', itemId='output', delta='https://example.test/oauth'))
+        self.assertEqual(self.projection.stream_metrics['events'], 1)
