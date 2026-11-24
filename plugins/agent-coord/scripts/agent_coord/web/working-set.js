@@ -336,11 +336,13 @@ const WorkingSet = (() => {
       destroy() { document.removeEventListener("keydown", keydown); window.clearTimeout(wheelTimer); observer?.disconnect(); host?.replaceChildren(); },
     };
   }
-  // List: one row per thread in Attention, Working and Idle, grouped like Focus.
+  // List: one row per thread in Attention, Working, Quiet and Idle, grouped like Focus.
   // Opening a reply reads it, and reading moves it out of Attention; requests stay
   // until they are resolved. Rows are ordered by the user's own last message.
+  // A quiet thread's results never enter Attention; it is in Working while it
+  // runs and otherwise in Quiet, unless it fails, stalls or needs the user.
   const DAY = 86400, IDLE_CAP = 50;
-  const SECTIONS = [["attention", "Attention"], ["working", "Working"], ["idle", "Idle"]];
+  const SECTIONS = [["attention", "Attention"], ["working", "Working"], ["quiet", "Quiet"], ["idle", "Idle"]];
   const REQUEST_LABELS = {approval: "Approval needed", question: "Question", reminder: "Reminder", failed: "Failed", "needs-you": "Needs you"};
   const PROVIDERS = {codex: "OpenAI · Codex", claude: "Anthropic · Claude Code", muse: "Meta · Muse Code", kimi: "Moonshot · Kimi Code", antigravity: "Google · Antigravity"};
   // Until the payload carries the user's last message, the latest turn start stands in for it.
@@ -366,6 +368,11 @@ const WorkingSet = (() => {
     return null;
   }
   const interrupts = request => ["approval", "question", "reminder", "failed"].includes(request);
+  // What surfaces from a thread whose ordinary results stay out of Attention:
+  // failure, a stall, or a provider permission approval. A supervised agent's
+  // questions and checkpoint requests go to its supervisor; only a thread with
+  // no supervisor (including a quiet one) raises those to the user itself.
+  const escalates = t => t.status === "stalled" || ["approval", "failed"].includes(requestOf(t));
   function unreadNow(t, request, now) {
     // Unread replies and agent requests leave Attention once read, or after a day.
     const unread = request === "needs-you" ? t.unread || t.unread_result : !request && t.unread_result;
@@ -379,8 +386,12 @@ const WorkingSet = (() => {
     if (request === "approval" || request === "question") return "attention";
     if (request === "reminder") return "attention";
     if (t.attention === "later" || t.snoozed) return "later";
-    if (request === "failed") return "attention";
+    if (request === "failed" || t.status === "stalled") return "attention";
     if (running(t)) return "working";
+    if (t.quiet) {
+      if (request === "needs-you" && unreadNow(t, request, now)) return "attention";
+      return workingRoots.has(t.thread_id) ? "working" : "quiet";
+    }
     if (unreadNow(t, request, now)) return "attention";
     return workingRoots.has(t.thread_id) ? "working" : "idle";
   }
@@ -407,7 +418,7 @@ const WorkingSet = (() => {
       while (parents.has(t.thread_id)) t = byId.get(parents.get(t.thread_id));
       return t;
     };
-    const agents = new Map(), workingRoots = new Set(), attentionRoots = new Map();
+    const agents = new Map(), workingRoots = new Set(), escalated = [];
     const attentionOrder = (a, b) => Number(interrupts(requestOf(b))) - Number(interrupts(requestOf(a))) ||
       arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id);
     for (const t of visible) {
@@ -417,19 +428,18 @@ const WorkingSet = (() => {
       if (!agents.has(parent)) agents.set(parent, []);
       agents.get(parent).push(t);
       if (running(t)) workingRoots.add(root.thread_id);
-      const request = requestOf(t);
-      if (["approval", "question"].includes(request) || request === "needs-you" && unreadNow(t, request, now)) {
-        const previous = attentionRoots.get(root.thread_id);
-        if (!previous || attentionOrder(t, previous) < 0) attentionRoots.set(root.thread_id, t);
-      }
+      // The agent itself enters Attention, named as its supervisor's agent;
+      // its supervisor keeps its own place.
+      if (escalates(t) && t.attention !== "archived" && !t.snoozed && t.attention !== "later") escalated.push(t);
     }
     const parked = ["later", "archived"].includes(view);
     const rows = [];
     for (const t of visible) {
       if (parents.has(t.thread_id)) continue;
-      const place = parked ? "idle" : attentionRoots.has(t.thread_id) ? "attention" : placementOf(t, byId, now, workingRoots, false);
+      const place = parked ? "idle" : placementOf(t, byId, now, workingRoots, false);
       if (place && place !== "later") rows.push({thread: t, place, group: descriptor(t)});
     }
+    if (!parked) for (const t of escalated) rows.push({thread: t, place: "attention", group: descriptor(t)});
     const groups = new Map();
     for (const {thread, place, group} of rows) {
       if (!groups.has(group.key)) groups.set(group.key, {...group, attention: 0, touch: 0});
@@ -439,23 +449,19 @@ const WorkingSet = (() => {
     const ordered = [...groups.values()].sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
     const all = {key: ALL, name: "All groups", attention: rows.filter(r => r.place === "attention").length};
     const selected = pageKey;
-    const sections = {attention: [], working: [], idle: [], empty: []};
+    const sections = {attention: [], working: [], quiet: [], idle: [], empty: []};
     for (const {thread, place, group} of rows) {
       if (selected !== ALL && group.key !== selected) continue;
       const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
       sections[empty ? "empty" : place].push(thread);
     }
-    const attentionSource = t => {
-      const child = attentionRoots.get(t.thread_id);
-      return child && attentionOrder(child, t) < 0 ? child : t;
-    };
-    sections.attention.sort((a, b) => attentionOrder(attentionSource(a), attentionSource(b)));
-    for (const key of ["working", "idle", "empty"])
+    sections.attention.sort(attentionOrder);
+    for (const key of ["working", "quiet", "idle", "empty"])
       sections[key].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || engagedAt(b) - engagedAt(a) || a.thread_id.localeCompare(b.thread_id));
     // Agents waiting on you lead their orchestrator's list, then the ones still working.
     const agentOrder = t => ["approval", "question", "needs-you"].includes(requestOf(t)) ? 2 : running(t) ? 1 : 0;
     for (const list of agents.values()) list.sort((a, b) => agentOrder(b) - agentOrder(a) || arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id));
-    return {groups: [all, ...ordered], selected, sections, agents, byId, workingRoots};
+    return {groups: [all, ...ordered], selected, sections, agents, byId, parents, workingRoots};
   }
   function ago(at, now) {
     const s = Math.max(0, now - at);
@@ -488,16 +494,20 @@ const WorkingSet = (() => {
       li.append(el("span", "tl-mark"));
       const logo = globalThis.providerLogo?.(t.client, PROVIDERS[t.client]) || el("span", "provider-logo");
       const mark = el("span", "tl-logo"); mark.append(logo); li.append(mark);
+      // An agent shown on its own row in Attention names its supervisor.
+      const supervisor = !agent && data.parents?.has(t.thread_id) ? data.byId.get(data.parents.get(t.thread_id)) : null;
       const open = button(t.title, "tl-open", () => onOpen?.(t.thread_id));
       open.dataset.thread = t.thread_id; open.dataset.action = "open";
-      open.title = t.title;
+      open.title = supervisor ? t.title + " · App agent of " + supervisor.title : t.title;
       li.append(open);
       const summary = el("span", "tl-summary");
+      if (supervisor) summary.append(el("span", "tl-supervisor", "App agent of " + supervisor.title));
       const children = data.agents.get(t.thread_id) || [];
       if (children.length) {
         const descendants = [...children];
         for (let i = 0; i < descendants.length; i++) descendants.push(...data.agents.get(descendants[i].thread_id) || []);
-        const working = descendants.filter(running).length, waiting = descendants.filter(c => ["approval", "question", "needs-you"].includes(requestOf(c))).length;
+        // Only what escalates needs the user; agents' questions are for their supervisor.
+        const working = descendants.filter(running).length, waiting = descendants.filter(c => escalates(c) && requestOf(c) !== "failed").length;
         const failed = descendants.filter(c => requestOf(c) === "failed").length, isOpen = expanded.has(t.thread_id);
         const toggle = button("", "tl-agents", () => { isOpen ? expanded.delete(t.thread_id) : expanded.add(t.thread_id); paint(); });
         toggle.dataset.thread = t.thread_id; toggle.dataset.action = "agents";
@@ -566,7 +576,9 @@ const WorkingSet = (() => {
         parts.push(section(data, "parked", title, [...data.sections.idle, ...data.sections.empty], options.placement === "later" ? "Nothing set aside." : "No closed threads."));
       } else {
         const empty = {attention: "Nothing needs you right now.", working: "No agents are working.", idle: "No idle threads."};
-        for (const [name, title] of SECTIONS) parts.push(section(data, name, title, data.sections[name], empty[name]));
+        // Quiet is only shown when it holds threads; most inboxes never use it.
+        for (const [name, title] of SECTIONS)
+          if (name !== "quiet" || data.sections.quiet.length) parts.push(section(data, name, title, data.sections[name], empty[name]));
         const blank = data.sections.empty;
         if (blank.length) {
           if (shown.has("empty")) parts.push(section(data, "empty", "Empty", blank, ""));
@@ -599,6 +611,6 @@ const WorkingSet = (() => {
       },
     };
   }
-  return {create, derive, levelOf, columnOf, needsReply, groupFor, createList, listSections, placementOf, requestOf};
+  return {create, derive, levelOf, columnOf, needsReply, groupFor, createList, listSections, placementOf, requestOf, escalates};
 })();
 if (typeof module !== "undefined") module.exports = WorkingSet;

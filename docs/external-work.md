@@ -27,6 +27,16 @@ The conversation can still be renamed explicitly. The runtime validates settings
 through the same machinery used for an interactive session. It does not silently replace an
 unavailable model or reasoning setting.
 
+An optional `quiet: true` makes the new conversation quiet. It is a
+presentation option, not an execution setting. A quiet conversation sends no
+desktop, web push or phone notification when a turn finishes. Its results do not
+enter Attention; the inbox lists it under Quiet, and under Working while it runs.
+Failures, stalls, provider approvals, blocking questions and checkpoints that ask
+the user for something still notify and enter Attention. The user can change
+the mode later from the thread menu or with `agent-coord thread update
+--quiet|--no-quiet`. A routed assignment delivered to a role holder does not
+change the holder's mode. A fallback conversation for that assignment is quiet.
+
 The pair `(source, request_id)` identifies an assignment. Repeating the same
 request returns its existing receipt. Reusing the pair with different inputs is
 an error. Keep this identity stable after a timeout or a lost response.
@@ -34,7 +44,7 @@ an error. Keep this identity stable after a timeout or a lost response.
 The Python interface is:
 
 ```python
-runtime.submit(source, request_id, settings, prompt, name=None, route=None)
+runtime.submit(source, request_id, settings, prompt, name=None, route=None, quiet=False)
 runtime.get(source, request_id)
 runtime.list(source=None, limit=50)
 runtime.cancel(source, request_id)
@@ -62,7 +72,7 @@ agent-coord external-work provision-token
 
 Use `agent-coord external-work submit|get|list|cancel|resolve` for authenticated local
 execution. Submit takes `--source`, `--request-id`, `--settings` as JSON, an
-optional `--name`, an optional `--route` as JSON, and the prompt (or `-` for stdin). The optional `--url` selects
+optional `--name`, an optional `--route` as JSON, an optional `--quiet`, and the prompt (or `-` for stdin). The optional `--url` selects
 an RF runtime endpoint. The global `--db` selects the coordination database.
 
 Receipts contain `source`, `request_id`, `state`, `thread_id`, `turn_id`, `result`,
@@ -153,6 +163,12 @@ holder now, without delivering anything.
 Stoic job conversations append the occurrence's scheduled date in the Ribbon
 Field host's local time zone to the job name. For an unnamed run, Ribbon Field
 derives the title from the saved instructions.
+
+Stoic copies each definition's `notify` value into the run snapshot. A run
+with `notify: "failures"` is submitted with `quiet: true`, so its conversation
+reports only failures and requests that need the user. Any other value, or
+none, leaves the conversation ordinary. Stoic still delivers its own result
+notification.
 
 The adapter is disabled by default. Its configuration contains:
 

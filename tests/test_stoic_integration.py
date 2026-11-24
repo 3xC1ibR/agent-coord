@@ -29,13 +29,14 @@ class FakeExternalWork:
     def get(self, source, request_id):
         return copy.deepcopy(self.rows.get((source, request_id)))
 
-    def submit(self, source, request_id, settings, prompt, name=None, *, request_text=None):
+    def submit(self, source, request_id, settings, prompt, name=None, *, request_text=None, quiet=False):
         key = source, request_id
         if key not in self.rows:
             self.launches += 1
             self.rows[key] = {"state": "running", "thread_id": "thread-" + request_id,
                               "turn_id": "turn-1", "result": None, "error": None,
-                              "settings": settings, "prompt": prompt, "name": name, "request_text": request_text}
+                              "settings": settings, "prompt": prompt, "name": name, "request_text": request_text,
+                              "quiet": quiet}
         if self.lose_submission_response:
             self.lose_submission_response = False
             raise CoordinationError("Provider response lost")

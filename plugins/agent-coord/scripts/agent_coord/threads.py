@@ -80,6 +80,7 @@ class ThreadStore:
                     domain TEXT, domain_source TEXT, scope_cluster TEXT,
                     attention TEXT NOT NULL DEFAULT 'now',
                     pinned INTEGER NOT NULL DEFAULT 0,
+                    quiet INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL, updated_at REAL NOT NULL,
                     turn_started_at REAL, turn_id TEXT, turn_key TEXT,
                     seen_checkpoint_id INTEGER NOT NULL DEFAULT 0,
@@ -181,6 +182,9 @@ class ThreadStore:
                     db.execute(f"ALTER TABLE work_threads ADD COLUMN {field} INTEGER NOT NULL DEFAULT 0")
             if "pinned" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+            if "quiet" not in columns:
+                # Additive: an older runtime sharing the database ignores it.
+                db.execute("ALTER TABLE work_threads ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0")
             if "turn_key" not in columns:
                 db.execute("ALTER TABLE work_threads ADD COLUMN turn_key TEXT")
             if "seen_completion_id" not in columns:
@@ -306,6 +310,8 @@ class ThreadStore:
         result["snoozed"] = bool(deadline is not None and row["attention"] == "later" and deadline > self.store.clock())
         result["snooze_due"] = bool(deadline is not None and row["attention"] == "now" and deadline <= self.store.clock())
         result["pinned"] = bool(row["pinned"])
+        # A quiet thread reports only failures and requests that need the user.
+        result["quiet"] = bool(row.get("quiet"))
         latest = (inventory.latest.get(row["thread_id"]) if inventory is not None else
                   db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1", (row["thread_id"],)).fetchone())
         result["checkpoint"] = context_lifecycle.checkpoint_record(latest) if latest else None
@@ -484,7 +490,7 @@ class ThreadStore:
                                         AND t.snoozed_until = snooze_notifications.snoozed_until)""",
                               (self.store.clock(), notification_id, self.store.clock())).rowcount == 1
 
-    def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, seen=False,
+    def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, quiet=UNSET, seen=False,
                seen_checkpoint_id=None, seen_completion_id=None, handled=False,
                handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
                snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True) -> dict | None:
@@ -497,6 +503,8 @@ class ThreadStore:
             raise CoordinationError("Attention must be now, later, or archived.")
         if pinned is not UNSET and not isinstance(pinned, bool):
             raise CoordinationError("Pinned must be true or false.")
+        if quiet is not UNSET and not isinstance(quiet, bool):
+            raise CoordinationError("Quiet must be true or false.")
         if not seen and (seen_checkpoint_id is not None or seen_completion_id is not None):
             raise CoordinationError("Read markers require seen: true.")
         if not isinstance(handled, bool):
@@ -544,6 +552,8 @@ class ThreadStore:
                            (attention, self.store.clock() if attention == "later" else None, thread_id))
             if pinned is not UNSET:
                 db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
+            if quiet is not UNSET:
+                db.execute("UPDATE work_threads SET quiet = ? WHERE thread_id = ?", (int(quiet), thread_id))
         return self.get(thread_id, history=True) if return_thread else None
 
     @staticmethod

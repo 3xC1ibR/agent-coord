@@ -328,6 +328,11 @@ def _parser() -> argparse.ArgumentParser:
     domain_options.add_argument("--no-domain", dest="domain", action="store_const", const=None,
                                 default=argparse.SUPPRESS, help="Reset to automatic domain reporting or scope fallback.")
     thread_update.add_argument("--attention", choices=sorted(ATTENTION_STATES))
+    quiet_options = thread_update.add_mutually_exclusive_group()
+    quiet_options.add_argument("--quiet", dest="quiet", action="store_const", const=True, default=argparse.SUPPRESS,
+                               help="Notify and request attention only for failures, stalls and requests that need the user.")
+    quiet_options.add_argument("--no-quiet", dest="quiet", action="store_const", const=False, default=argparse.SUPPRESS,
+                               help="Restore ordinary notifications and attention.")
     for field in ("repository", "project"):
         options = thread_update.add_mutually_exclusive_group()
         options.add_argument("--" + field, dest=field + "_id", default=argparse.SUPPRESS, metavar="ID")
@@ -945,7 +950,8 @@ def run(arguments: argparse.Namespace, *, store=None) -> Any:
                 return control.cancel(arguments.session_id)
             return control.status(arguments.session_id)
         return store.threads.update(arguments.session_id, title=arguments.title, attention=arguments.attention,
-                                    **({"domain": arguments.domain} if hasattr(arguments, "domain") else {}), **associations)
+                                    **{key: getattr(arguments, key) for key in ("domain", "quiet") if hasattr(arguments, key)},
+                                    **associations)
     if command == "session-control":
         from .session_control import SessionControl
         control = AppControl(store)

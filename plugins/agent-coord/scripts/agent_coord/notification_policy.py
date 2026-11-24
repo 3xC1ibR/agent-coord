@@ -116,7 +116,12 @@ def decide(thread, *, waiting=False, owners=()):
     failed = bool(completion and completion["status"] == "failed")
     # A stopped/closed/failed owner cannot be relied on to recover a child.
     stranded = failed and (not owner or owner == thread["thread_id"] or owner not in owners)
-    quiet = not needs_user and ((internal and not delivered and not stranded) or waiting_for_agents and not failed)
+    # A thread the user made quiet (or external work submitted as quiet)
+    # reports only a failure or a request that needs the user. Stalls that
+    # alerted the user returned above; approvals and asks set needs_user.
+    muted = bool(thread.get("quiet")) and not failed
+    quiet = not needs_user and ((internal and not delivered and not stranded)
+                                or waiting_for_agents and not failed or muted)
     return {"quiet": quiet, "notify": not quiet,
             "owner_thread_id": owner if internal and owner in owners else thread["thread_id"],
             "needs_user": needs_user}

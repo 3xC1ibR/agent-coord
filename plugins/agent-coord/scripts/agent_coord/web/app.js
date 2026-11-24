@@ -337,6 +337,14 @@ async function toggleThreadPinned(thread) {
     state.pinning.delete(id); renderList();
   }
 }
+async function toggleThreadQuiet(thread) {
+  // Quiet threads notify and enter Attention only for failures and requests.
+  const id = thread.thread_id;
+  const updated = await api(threadPath(id), {quiet: !thread.quiet});
+  state.sessions = state.sessions.map(item => item.thread_id === id ? {...item, quiet: updated.quiet} : item);
+  if (state.detail?.work_thread.thread_id === id) state.detail.work_thread.quiet = updated.quiet;
+  await refreshList();
+}
 async function updateThreadAttention(thread, body) {
   const id = thread.thread_id;
   if (state.updatingThreads.has(id)) return false;
@@ -599,6 +607,7 @@ function threadMenuItems(thread) {
     {label: thread.project_id ? "Change group" : "Add to group", run: () => action(() => organizeThread(thread))},
     {label: "Move to project…", disabled: !!threadMoveUnavailable(thread), run: () => openThreadMove(thread)},
     {label: thread.pinned ? "Unpin" : "Pin", run: () => action(() => toggleThreadPinned(thread))},
+    {label: thread.quiet ? "Turn off quiet" : "Make quiet", run: () => action(() => toggleThreadQuiet(thread))},
     {label: thread.attention === "later" ? "Change return time…" : "Move to Later…", run: () => openThreadSnooze(thread)},
   ];
   if (["codex", "claude"].includes(thread.client)) items.unshift({label: "Fork", disabled: !thread.can_fork || state.forking,
@@ -1422,6 +1431,7 @@ function renderThread() {
   $("handle-response").hidden = !work.can_handle_response;
   $("handle-response").disabled = state.updatingThreads.has(work.thread_id);
   $("organize-thread").textContent = work.project_id ? "Change group" : "Add to group";
+  $("quiet-thread").textContent = work.quiet ? "Turn off quiet" : "Make quiet";
   const signature = JSON.stringify(work);
   if ($("checkpoint").dataset.signature === signature) return;
   const sameThread = $("checkpoint").dataset.thread === work.thread_id;
@@ -1689,6 +1699,7 @@ function renderStatus() {
   $("add-link").disabled = !state.detail;
   $("session-name").disabled = !state.detail || isSessionDraft();
   $("organize-thread").disabled = !state.detail;
+  $("quiet-thread").disabled = !state.detail;
   $("move-thread").disabled = !!threadMoveUnavailable(work) || state.detailRefreshing;
   $("move-thread").title = threadMoveUnavailable(work);
   $("composer-hint").textContent = archived ? "Reopen this thread to continue." : running ? (!["codex", "claude", "muse"].includes(work?.client) ? "Enter to queue after this turn · Shift + Enter for a new line" : "Enter to steer · Tab to queue after this turn · Shift + Enter for a new line") : "Enter to send · Shift + Enter for a new line · /cd · /model · /help";
@@ -2995,6 +3006,7 @@ $("move-thread-form").onsubmit = event => {
   action(submitThreadMove, $("save-thread-move"));
 };
 $("organize-thread").onclick = () => action(() => organizeThread(state.detail?.work_thread), $("organize-thread"));
+$("quiet-thread").onclick = () => action(() => toggleThreadQuiet(state.detail.work_thread), $("quiet-thread"));
 // Roles: the user names positions and appoints the conversations that hold them.
 let roleThread = null;
 async function openRoleDialog(thread) {

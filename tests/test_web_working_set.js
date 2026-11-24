@@ -591,24 +591,27 @@ test("list rows open, read, close and open the thread menu without opening the r
   row.onclick({target: row.children[0]}); row.onclick({target: c.control("quiet", "more")});
   assert.deepEqual(c.calls, [["read", "reply"], ["menu", "reply", "more"], ["close", "reply"], ["open", "reply"], ["open", "quiet"]]);
 });
-test("list agents start collapsed beneath their parent and keep requests in one Attention family", () => {
+test("list agents start collapsed beneath their parent; an approval gives the agent its own Attention row", () => {
   const c = listSetup();
   const agent = (id, extra) => listThread(id, {creation_mode: "orchestration", created_by_thread_id: "lead", ...extra});
   c.render([listThread("lead", {title: "Lead", checkpoint: {id: 1}}), agent("worker", {unread_result: true, checkpoint: {id: 2}}),
     agent("blocked", {status: "needs input", title: "Blocked agent", attention_since: NOW - 120})]);
-  assert.deepEqual(c.rows("attention"), ["lead"]); assert.deepEqual(c.rows("idle"), []);
+  assert.deepEqual(c.rows("attention"), ["blocked"]); assert.deepEqual(c.rows("idle"), ["lead"]);
+  assert.equal(c.control("blocked", "open").text, "Blocked agent");
+  assert.match(c.host.querySelectorAll(".tl-row").find(row => row.dataset.thread === "blocked").text, /App agent of Lead/);
+  assert.equal(c.host.querySelectorAll(".tl-row").find(row => row.dataset.thread === "blocked").querySelectorAll(".tl-time")[0].textContent, "2m");
   const toggle = c.control("lead", "agents"); assert.equal(toggle.attrs["aria-expanded"], "false");
   assert.match(toggle.text, /2 agents.*1 need you/);
   toggle.onclick({stopPropagation() {}});
-  assert.deepEqual(c.rows("attention"), ["lead", "blocked", "worker"]);
+  assert.deepEqual(c.rows("idle"), ["lead", "blocked", "worker"]);
   assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "true");
-  assert.equal(c.control("blocked", "open").text, "Blocked agent");
-  assert.equal(c.host.querySelectorAll(".tl-row").find(row => row.dataset.thread === "blocked").querySelectorAll(".tl-time")[0].textContent, "2m");
+  const nested = c.host.querySelectorAll(".tl-row").filter(row => row.dataset.thread === "blocked");
+  assert.equal(nested.length, 2); assert.doesNotMatch(nested[1].text, /App agent of/);
   c.control("blocked", "more").onclick({stopPropagation() {}});
   c.control("worker", "open").onclick({stopPropagation() {}});
   assert.deepEqual(c.calls, [["menu", "blocked", "more"], ["open", "worker"]]);
   c.control("lead", "agents").onclick({stopPropagation() {}});
-  assert.deepEqual(c.rows("attention"), ["lead"]);
+  assert.deepEqual(c.rows("idle"), ["lead"]);
   assert.equal(c.control("lead", "agents").attrs["aria-expanded"], "false");
 });
 test("list starts every depth collapsed and remembers expanded branches through refresh", () => {
@@ -678,20 +681,74 @@ test("list shows historical cycles, self links and missing parents exactly once 
   assert.deepEqual(c.rows("idle").sort(), ["a", "b", "deep", "missing", "self"]);
   assert.equal(JSON.stringify(records), before);
 });
-test("descendant requests promote their entire family and drain once resolved", () => {
+test("a descendant's question goes to its supervisor, not to Attention", () => {
   const c = listSetup();
   const records = [listThread("lead", {checkpoint: {id: 1}}), listThread("worker", {supervisor_thread_id: "lead"}),
     listThread("question", {supervisor_thread_id: "worker", open_ask: {id: 1, question: "Which target?"}}),
     listThread("reply", {unread_result: true, attention_since: NOW - 5})];
   c.render(records);
-  assert.deepEqual(c.rows("attention"), ["lead", "reply"]);
-  assert.match(c.control("lead", "agents").text, /1 need you/);
-  c.render(records.map(t => t.thread_id === "question" ? {...t, open_ask: null} : t));
   assert.deepEqual(c.rows("attention"), ["reply"]);
   assert.deepEqual(c.rows("idle"), ["lead"]);
+  assert.doesNotMatch(c.control("lead", "agents").text, /need you/);
   c.control("lead", "agents").onclick({stopPropagation() {}});
   c.control("worker", "agents").onclick({stopPropagation() {}});
   assert.deepEqual(c.rows("idle"), ["lead", "worker", "question"]);
+});
+test("app agents reach Attention only on failure, stall or approval, named as their supervisor's agent", () => {
+  const lead = listThread("lead", {title: "Lead", checkpoint: {id: 1}});
+  const agent = (id, extra) => listThread(id, {title: "Agent " + id, supervisor_thread_id: "lead", ...extra});
+  const cases = {
+    failed: [agent("failed", {response_state: "failed", attention_since: NOW - 30}), true],
+    stalled: [agent("stalled", {status: "stalled", attention_since: NOW - 30}), true],
+    approval: [agent("approval", {status: "needs input", attention_since: NOW - 30}), true],
+    question: [agent("question", {open_ask: {id: 3, question: "Which?"}}), false],
+    "needs-you": [agent("needs-you", {unread: true, attention_since: NOW - 30, checkpoint: {id: 2, next_actor: "user", next_action: "Approve"}}), false],
+    reply: [agent("reply", {unread_result: true, attention_since: NOW - 30}), false],
+  };
+  for (const [name, [child, surfaces]] of Object.entries(cases)) {
+    assert.equal(WorkingSet.escalates(child), surfaces, name);
+    const {sections} = WorkingSet.listSections([lead, child], {now: NOW, workspace: "/work"});
+    assert.deepEqual(sections.attention.map(t => t.thread_id), surfaces ? [name] : [], name);
+    assert.deepEqual(sections.idle.map(t => t.thread_id), ["lead"], name);
+  }
+  // A closed or deferred agent does not resurface.
+  const closed = WorkingSet.listSections([lead, agent("failed", {response_state: "failed", attention: "archived"})], {now: NOW, workspace: "/work"});
+  assert.deepEqual(closed.sections.attention, []);
+});
+test("quiet threads stay out of Attention except for failures, stalls and requests that need the user", () => {
+  const quiet = (id, extra) => listThread(id, {quiet: true, ...extra});
+  const threads = [
+    quiet("result", {unread_result: true, attention_since: NOW - 10, checkpoint: {id: 1, phase: "finished", next_actor: "nobody"}}),
+    quiet("running", {status: "running", response_state: "working"}),
+    quiet("failed", {response_state: "failed", attention_since: NOW - 10, checkpoint: {id: 2}}),
+    quiet("stalled", {status: "stalled", checkpoint: {id: 3}}),
+    quiet("approval", {status: "needs input"}),
+    quiet("question", {open_ask: {id: 4, question: "Which?"}}),
+    quiet("needs-you", {unread: true, attention_since: NOW - 10, checkpoint: {id: 5, next_actor: "user", next_action: "Choose"}}),
+    quiet("later", {attention: "later", unread_result: true}),
+    listThread("ordinary", {unread_result: true, attention_since: NOW - 20}),
+  ];
+  const {sections} = WorkingSet.listSections(threads, {now: NOW, workspace: "/work"});
+  assert.deepEqual(new Set(sections.attention.map(t => t.thread_id)),
+    new Set(["failed", "stalled", "approval", "question", "needs-you", "ordinary"]));
+  assert.deepEqual(sections.working.map(t => t.thread_id), ["running"]);
+  assert.deepEqual(sections.quiet.map(t => t.thread_id), ["result"]);
+  assert.deepEqual(sections.idle, []);
+  // A quiet orchestrator whose agents work stays in Working.
+  const family = WorkingSet.listSections([quiet("lead", {checkpoint: {id: 6}}),
+    listThread("agent", {supervisor_thread_id: "lead", status: "running", response_state: "working"})], {now: NOW, workspace: "/work"});
+  assert.deepEqual(family.sections.working.map(t => t.thread_id), ["lead"]);
+});
+test("the Quiet section appears between Working and Idle only when it holds threads", () => {
+  const c = listSetup();
+  const headings = () => c.host.querySelectorAll(".tl-section").map(node => node.dataset.section);
+  c.render([listThread("plain", {checkpoint: {id: 1}})]);
+  assert.deepEqual(headings(), ["attention", "working", "idle"]);
+  c.render([listThread("plain", {checkpoint: {id: 1}}), listThread("writer", {quiet: true, unread_result: true, checkpoint: {id: 2}})]);
+  assert.deepEqual(headings(), ["attention", "working", "quiet", "idle"]);
+  assert.deepEqual(c.rows("quiet"), ["writer"]); assert.deepEqual(c.rows("attention"), []);
+  const heading = c.host.querySelectorAll(".tl-section").find(node => node.dataset.section === "quiet").querySelectorAll(".tl-heading")[0];
+  assert.equal(heading.textContent, "Quiet"); assert.equal(heading.text, "1");
 });
 test("Later and Closed retain nested families without adding active sections", () => {
   for (const attention of ["later", "archived"]) {

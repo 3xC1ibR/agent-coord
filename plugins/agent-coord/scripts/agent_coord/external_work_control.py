@@ -74,8 +74,8 @@ def handle_http(handler, engine):
             body = json.loads(data)
             if not parts:
                 required = {"source", "request_id", "settings", "prompt"}
-                if not isinstance(body, dict) or not required <= set(body) <= required | {"name", "route"}:
-                    raise CoordinationError("Submit source, request_id, settings, prompt and optionally name and route.")
+                if not isinstance(body, dict) or not required <= set(body) <= required | {"name", "route", "quiet"}:
+                    raise CoordinationError("Submit source, request_id, settings, prompt and optionally name, route and quiet.")
                 result = engine.submit(**body)
             elif parts[2] == "resolve":
                 if not isinstance(body, dict):
@@ -106,6 +106,8 @@ def add_parser(commands):
     submit.add_argument("--settings", required=True, help="JSON object with provider creation settings.")
     submit.add_argument("--name")
     submit.add_argument("--route", help='JSON object naming who receives the assignment, such as {"role":"lead"}.')
+    submit.add_argument("--quiet", action="store_true",
+                        help="Make a new conversation quiet: notify only for failures and requests that need the user.")
     submit.add_argument("prompt", help="Assignment text or - for standard input.")
     get = operations.add_parser("get")
     cancel = operations.add_parser("cancel")
@@ -182,6 +184,8 @@ def _run(arguments):
                 "name": arguments.name, "settings": json.loads(arguments.settings)}
         if arguments.route is not None:
             body["route"] = json.loads(arguments.route)
+        if arguments.quiet:
+            body["quiet"] = True
     else:
         path += "/" + quote(identifier(arguments.source), safe=":") + "/" + quote(identifier(arguments.request_id), safe=":")
         if operation in {"cancel", "resolve"}:

@@ -98,7 +98,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Native update action | The existing update menu stages and applies backend updates; reuse the native confirmation, progress screen and error presentation |
 | Available update dialog | Native alert with Install and Skip for Now; show each staged version once per launch, keep skipped updates available from the update menu, and require consent before restarting work |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
-| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. App agents start collapsed beneath their current supervisor at each depth; expanding a branch survives refresh, and a descendant request puts the family in Attention once |
+| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. App agents start collapsed beneath their current supervisor at each depth; expanding a branch survives refresh. An app agent enters Attention on its own row only when it fails, stalls or needs a permission approval, and that row names it "App agent of <supervisor>"; its questions and checkpoint requests stay with its supervisor. Sections are Attention, Working, Quiet (only when it holds threads) and Idle |
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
 | Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
@@ -131,6 +131,10 @@ review or request. The user resolves an ask in the asks view or in its own
 conversation; resolving it tells the asking thread. The conversation shows a
 second view of the same asks, not another object. An ask belongs to its thread
 but is not a thread state.
+Quiet is a saved attribute of a thread, changed from the thread options menu.
+A quiet thread does not notify or enter Attention for ordinary results. It does
+for failures, stalls, approvals, blocking questions and checkpoints that need the
+user. Otherwise it is listed in Working while it runs and in Quiet afterwards.
 A reply is the user's own words about an open ask. It is a message in the asking
 conversation that names the ask, not a resolution: the ask stays open and shows
 the last reply. Text typed on an ask is a reply when sent alone and the note when
@@ -154,6 +158,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 | 2026-11-22 | Every ask has a reply field in view; resolved asks leave the conversation for its side panel | The owner had to copy an ask by hand to say something its buttons did not offer, and wanted no ask history above the composer. The earlier Add note control hid the only free text behind a click. |
 | 2026-11-22 | A conversation shows its own asks above its composer, and the navigation toggle carries the open count while the navigation is closed | The owner could not see a thread's asks in the thread, and on a phone the count was inside the drawer. Both are views of existing asks built from the asks view's rows and count, in the existing `asks.js` and `asks.css`. |
 | 2026-11-22 | Asks get a primary sidebar entry and a view that replaces the Decisions dialog | The dialog behind the question-mark button went unnoticed. Asks now have kinds and in-place resolutions. The view opens in a workspace dialog with the auxiliary-page grammar, and ships in the existing `asks.js` and `asks.css` so an older backend can serve it before its update is applied. |
+| 2026-11-24 | Quiet threads get their own List section; app agents reach Attention only on failure, stall or approval, named by supervisor | Background threads (scheduled writers, app agents) stop competing with work that needs the user, without hiding what goes wrong. |
 | 2026-11-21 | List inbox starts app-agent families collapsed at every depth | Keep the inbox compact by default while preserving explicit expansion and descendant attention counts. |
 | 2026-11-21 | Mobile conversations use a single header and a two-row composer; secondary actions move into thread options | Return reading space from repeated navigation and desktop instructions while preserving the existing actions. |
 | 2026-11-12 | List inbox shows app agents beneath their immediate supervisor, expanded by default | Keep parent-child context visible and bring descendant requests to Attention without duplicate rows. |

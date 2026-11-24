@@ -1734,7 +1734,9 @@ class BrowserSessions:
                                       "Review the stalled agent" if health and health["state"] == "stalled" else
                                       checkpoint["next_action"] if checkpoint_input else
                                       "Review the failed agent" if thread["response_state"] == "failed" else "")
-        if policy["quiet"] and not thread["snooze_due"]:
+        # A thread the user made quiet still surfaces a stall; internal agents
+        # keep reporting stalls through their owner and the stall alert.
+        if policy["quiet"] and not thread["snooze_due"] and not (thread["quiet"] and thread["status"] == "stalled"):
             thread.update(needs_attention=False, attention_reason=None, attention_key=None, attention_since=None,
                           can_handle_response=False)
         from .stall_notifications import apply_attention
@@ -1827,10 +1829,10 @@ class BrowserSessions:
             return result
 
     def _update_work_thread(self, thread_id: str, body: dict, *, minimal_receipt: bool) -> dict:
-        if set(body) - {"attention", "title", "domain", "pinned", "seen", "seen_checkpoint_id", "seen_completion_id",
+        if set(body) - {"attention", "title", "domain", "pinned", "quiet", "seen", "seen_checkpoint_id", "seen_completion_id",
                         "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
                         "snoozed_until", "resume_snooze"}:
-            raise CoordinationError("Thread update accepts attention, title, domain, pinned, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
+            raise CoordinationError("Thread update accepts attention, title, domain, pinned, quiet, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         if "attention" in body and not isinstance(body["attention"], str):
@@ -1846,6 +1848,8 @@ class BrowserSessions:
             raise BrowserBusyError("Answer or cancel live input and wait for the running turn before dismissing its response.")
         if "pinned" in body and not isinstance(body["pinned"], bool):
             raise CoordinationError("Pinned must be true or false.")
+        if "quiet" in body and not isinstance(body["quiet"], bool):
+            raise CoordinationError("Quiet must be true or false.")
         if "title" in body:
             self._text(body["title"], "Thread title", 160)
         if body.get("attention") is not None and body["attention"] not in {"now", "later", "archived"}:
@@ -1860,7 +1864,7 @@ class BrowserSessions:
                                   handled_completion_id=body.get("handled_completion_id"),
                                   **({"domain": body["domain"]} if "domain" in body else {}),
                                   **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
-                                  **({"pinned": body["pinned"]} if "pinned" in body else {}), **associations)
+                                  **{key: body[key] for key in ("pinned", "quiet") if key in body}, **associations)
         self._publish("browser/changed", {"threadId": thread_id})
         return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
 

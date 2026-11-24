@@ -516,9 +516,13 @@ class StoicIntegration:
                 # A route is passed only when the run names one; other runs use the unchanged call.
                 routing = ({"route": run["route"], "holder_policy": self._authorize_holder}
                            if run.get("route") is not None else {})
+                # Stoic's notify="failures" means the user wants to hear only
+                # about failures; RF expresses that as a quiet conversation.
+                presentation = {"quiet": True} if run.get("notify") == "failures" else {}
                 local = self.external_work.submit(source, run_id, run["settings"],
                                                   run.get("submission_prompt", self._prompt(run)), name=name,
-                                                  request_text=run["prompt"] if name is None else None, **routing)
+                                                  request_text=run["prompt"] if name is None else None,
+                                                  **routing, **presentation)
             except BrowserBusyError:
                 # Maintenance refuses work before durable admission. Retain
                 # ownership and retry after the runtime resumes.

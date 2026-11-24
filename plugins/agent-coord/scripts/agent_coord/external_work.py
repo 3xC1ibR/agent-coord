@@ -228,7 +228,7 @@ class ExternalWorkRuntime:
             self.holder_policies[identifier(source)] = policy
 
     def submit(self, source, request_id, settings, prompt, name=None, *, request_text=None, route=None,
-               holder_policy=None):
+               holder_policy=None, quiet=False):
         key = identifier(source), identifier(request_id)
         if not isinstance(settings, dict) or set(settings) - SETTING_NAMES:
             raise CoordinationError("Supply a settings object with supported provider creation fields.")
@@ -239,7 +239,14 @@ class ExternalWorkRuntime:
         if name is not None:
             self.sessions._text(name, "Session name", 160)
         mode = requested_mode(settings.get("client", "codex"), settings)
+        if not isinstance(quiet, bool):
+            raise CoordinationError("Quiet must be true or false.")
         inputs = {"settings": settings, "prompt": prompt, "name": name}
+        if quiet:
+            # Presentation only: the new conversation reports failures and
+            # requests that need the user, not ordinary results. Omitted when
+            # false so earlier assignments keep their idempotency digest.
+            inputs["quiet"] = True
         if request_text is not None:
             # Adapters may wrap the saved request in execution context.
             self.sessions._text(request_text, "Original request", 100_000)
@@ -268,7 +275,7 @@ class ExternalWorkRuntime:
                 if not inserted and db.execute("SELECT digest FROM external_work WHERE source=? AND request_id=?", key).fetchone()[0] != digest:
                     raise BrowserBusyError("This source and request ID were already used with different input.")
             if inserted and route is None:
-                self._launch(key, {**settings, "permission_mode": mode, "name": name}, prompt, request_text)
+                self._launch(key, {**settings, "permission_mode": mode, "name": name}, prompt, request_text, quiet=quiet)
             elif inserted:
                 self._route(key)
         return self.get(*key)
@@ -367,7 +374,8 @@ class ExternalWorkRuntime:
                 reason = self._deliver(key, inputs, role, holder, overdue=overdue)
             if reason is not None and self._report(key, route, FALLBACK, reason, launching=True):
                 self._launch(key, {**settings, "permission_mode": requested_mode(settings.get("client", "codex"), settings),
-                                   "name": inputs["name"]}, inputs["prompt"], inputs.get("request_text"))
+                                   "name": inputs["name"]}, inputs["prompt"], inputs.get("request_text"),
+                             quiet=inputs.get("quiet", False))
         finally:
             with self.lock:
                 self.routing["attempting"].discard(key)
@@ -520,7 +528,7 @@ class ExternalWorkRuntime:
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=5)
 
-    def _launch(self, key, settings, prompt, request_text):
+    def _launch(self, key, settings, prompt, request_text, *, quiet=False):
         thread_id = None
         stage = "validate"
         expected = {}
@@ -564,6 +572,9 @@ class ExternalWorkRuntime:
                     return
                 if request_text is not None:
                     self.store.threads.capture_request(thread_id, request_text)
+                if quiet:
+                    # Before the turn starts, so its completion is already quiet.
+                    self.store.threads.update(thread_id, quiet=True, return_thread=False)
                 with self.lock:
                     self.observers[thread_id] = {"turn": None, "final": None, "early": {}}
                 body = {"message": prompt, "requestId": key[1]}

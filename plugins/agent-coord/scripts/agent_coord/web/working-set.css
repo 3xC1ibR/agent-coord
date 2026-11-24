@@ -91,6 +91,8 @@
 .thread-list .tl-unread .tl-open { font-weight: 600; }
 .thread-list .tl-summary { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .thread-list .tl-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.thread-list .tl-supervisor { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.thread-list .tl-supervisor ~ .tl-text { flex: 1 1 0; }
 .thread-list .tl-agents { flex: none; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 0 6px; font-size: 12px; line-height: 18px; color: var(--muted); }
 .thread-list .tl-agents:hover { border-color: var(--hover-line); color: var(--ink); }
 .thread-list .tl-warm { color: var(--warm); }
@@ -117,6 +119,7 @@
   .thread-list .tl-summary { grid-column: 3 / 6; grid-row: 2; }
   .thread-list .tl-label, .thread-list .tl-phase { display: none; }
   .thread-list .tl-inline-label { display: inline; flex: none; }
+  .thread-list .tl-supervisor { flex: 0 1 auto; min-width: 0; }
   .thread-list .tl-actions { position: static; transform: none; display: flex; grid-column: 5; grid-row: 1; padding: 0; background: none; }
   .thread-list .tl-actions .tl-action:not(.tl-icon) { display: none; }
   .thread-list .tl-row:hover :is(.tl-label, .tl-phase) { visibility: visible; }

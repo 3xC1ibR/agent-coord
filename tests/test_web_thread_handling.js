@@ -65,7 +65,7 @@ test("Dismiss handles replies and saved blockers without opening the card", asyn
       let menu;
       c.state.threadActions = {notify() {}, showMenu: (trigger, title, items) => { menu = items; }};
       more.onclick({stopPropagation() {}});
-      assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Move to project…", "Pin", "Move to Later…"]);
+      assert.deepEqual(Array.from(menu, item => item.label), ["Add to group", "Move to project…", "Pin", "Make quiet", "Move to Later…"]);
       assert.ok(dismiss);
       assert.equal(dismiss.textContent, "Dismiss");
       assert.equal(dismiss.attributes["aria-label"], "Dismiss · Recommendation");
