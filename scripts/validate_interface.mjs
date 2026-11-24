@@ -112,7 +112,7 @@ async function shown(page, selector) {
 }
 
 async function browserOpen(page, fixture, directory = fixture.workspace, destination) {
-  await page.goto(address(fixture, directory, destination), {waitUntil: "domcontentloaded"});
+  return page.goto(address(fixture, directory, destination), {waitUntil: "domcontentloaded"});
 }
 
 async function expectContains(locator, text) {
@@ -124,8 +124,9 @@ async function selectTab(page, thread) {
 }
 
 async function openConversation(page, fixture, thread, directory = fixture.workspace) {
-  await browserOpen(page, fixture, directory, {thread});
+  const response = await browserOpen(page, fixture, directory, {thread});
   await readyConversation(page, thread);
+  return response;
 }
 
 async function readyConversation(page, thread) {
@@ -1107,7 +1108,11 @@ async function browserHistoryRecovery(page, fixture, requirePersisted = false) {
   const thread = fixture.threads.background;
   const text = "Keep this unsent until the calibration completes.";
   const preview = '#image-attachments img[alt="calibration-history.png"]';
-  await openConversation(page, fixture, thread);
+  const response = await openConversation(page, fixture, thread);
+  const documentCacheControl = response.headers()["cache-control"];
+  const directives = documentCacheControl.split(",").map(value => value.trim());
+  if (requirePersisted) assert.deepEqual(directives, ["private", "no-cache"]);
+  else assert(directives.includes("no-store"), documentCacheControl);
   await expectContains(page.locator("#timeline"), "Streaming inspection update");
   await page.locator("#message").fill(text);
   await page.locator("#image-picker").setInputFiles({name: "calibration-history.png", mimeType: "image/png",
@@ -1140,7 +1145,7 @@ async function browserHistoryRecovery(page, fixture, requirePersisted = false) {
   }
   assert.equal(sources.length, 3);
   if (requirePersisted) assert(traversals.every(item => item.persisted), JSON.stringify(traversals));
-  return {traversals, eventSourceRequests: sources.length, restoredText: true, restoredAttachment: true};
+  return {documentCacheControl, traversals, eventSourceRequests: sources.length, restoredText: true, restoredAttachment: true};
 }
 
 async function interactions(browser, fixture, report) {
