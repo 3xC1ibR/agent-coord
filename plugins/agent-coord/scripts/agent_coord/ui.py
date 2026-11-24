@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 import webbrowser
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import lru_cache
 from http import HTTPStatus
@@ -32,7 +31,8 @@ from .navigation import NavigationStore
 from .store import CoordinationError, CoordinationStore
 from .thread_control import ThreadControlWorker
 from .app_control import AppControlWorker
-from .message_timeline import message_timeline, message_cursor, message_changes, message_sends
+from .message_timeline import message_timeline
+from .notification_broadcast import NotificationBroadcast
 from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
@@ -370,7 +370,8 @@ def _handler(
             self._send(HTTPStatus.OK, content_type + "; charset=utf-8", body, cache_control=policy)
 
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
-                  entity_tag: str | None = None, cache_control: str = "no-store") -> None:
+                  entity_tag: str | None = None, cache_control: str = "no-store",
+                  extra_headers: dict[str, str] | None = None) -> None:
             operation = getattr(self, "_metric_operation", None)
             if operation:
                 processing_ms = (time.monotonic() - self._metric_started) * 1000
@@ -383,6 +384,8 @@ def _handler(
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", cache_control)
+                for name, value in (extra_headers or {}).items():
+                    self.send_header(name, value)
                 if entity_tag:
                     self.send_header("ETag", entity_tag)
                 self.send_header("X-Content-Type-Options", "nosniff")
@@ -580,39 +583,20 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
-        def _coordination_events(self, completion_sequence, message_sequence, send_sequence):
-            completions = browser_sessions.completions_after(completion_sequence)
-            message_sequence, changes = message_changes(store, message_sequence, browser_sessions.cwd)
-            send_sequence, sends = message_sends(store, send_sequence, browser_sessions.cwd)
-            notifications = {
-                "completions": completions["events"], "completionSeq": completions["seq"],
-                "snoozes": browser_sessions.snooze_notifications(),
-                "approvals": browser_sessions.approval_notifications(),
-            }
-            return message_sequence, send_sequence, changes + sends, notifications
-
         def _stream_events(self, sequence, completion_sequence):
-            message_sequence = message_cursor(store)
-            send_sequence, _ = message_sends(store)
-            # Keep one poll in flight per connection. Only this handler writes
-            # frames and advances the cursors advertised to this client.
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rf-notifications") as reader:
-                poll = None
-                next_poll = 0.0
+            broadcaster = self.server.notification_broadcast
+            with broadcaster.subscribe(completion_sequence) as client:
                 while not browser_sessions.closed:
-                    if poll is None and time.monotonic() >= next_poll:
-                        next_poll = time.monotonic() + 1
-                        poll = reader.submit(self._coordination_events, completion_sequence, message_sequence, send_sequence)
                     batch = browser_sessions.events_after(sequence, timeout=1)
                     if browser_sessions.closed or not self._authorized():
                         return
                     sequence = batch["seq"]
-                    batch.update(completions=[], completionSeq=completion_sequence)
-                    if poll is not None and poll.done():
-                        message_sequence, send_sequence, changes, notifications = poll.result()
-                        poll = None
-                        batch["events"].extend(changes)
-                        batch.update(notifications)
+                    notifications = broadcaster.take(client)
+                    if notifications is None:
+                        batch.update(completions=[], completionSeq=completion_sequence)
+                    else:
+                        batch["events"].extend(notifications["events"])
+                        batch.update((key, value) for key, value in notifications.items() if key != "events")
                         completion_sequence = batch["completionSeq"]
                     self._event_batch(batch)
 
@@ -678,6 +662,7 @@ def _handler(
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
+                                          "conversationHistoryPages": 1,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -839,6 +824,31 @@ def _handler(
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
+                parts = route.split("/")
+                if len(parts) != 5 or parts[2] != "turns" or not parts[1] or not parts[3]:
+                    raise CoordinationError("Choose a session and a turn.")
+                self._json(HTTPStatus.OK, {"turn": browser_sessions.read_history_turn(unquote(parts[1]), unquote(parts[3]))})
+            elif route.startswith("sessions/") and query.keys() & {"before_seq", "limit", "turn_id"}:
+                if "/" in route[9:] or not route[9:]:
+                    raise CoordinationError("Choose a session for transcript pagination.")
+                try:
+                    before = int(query["before_seq"][0]) if "before_seq" in query else None
+                    limit = int(query.get("limit", ["40"])[0])
+                    if any(len(query.get(key, ())) > 1 for key in ("limit", "turn_id", "before_seq")):
+                        raise ValueError
+                    target = query.get("turn_id", [None])[0]
+                    if target == "" or (before is not None and target is not None):
+                        raise ValueError
+                    if not 1 <= limit <= 200 or before is not None and not 0 <= before < 2**63:
+                        raise ValueError
+                except ValueError as exc:
+                    raise CoordinationError("Choose a valid transcript cursor and a limit between 1 and 200.") from exc
+                thread = browser_sessions.read_history_window(unquote(route[9:]), before_seq=before, limit=limit, turn_id=target)
+                if thread is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Saved turn was not found."})
+                else:
+                    self._json(HTTPStatus.OK, {"thread": thread})
             elif route.startswith("sessions/"):
                 # Opening a conversation asks for its recent view; other reads
                 # and older clients receive the complete history.
@@ -921,8 +931,17 @@ def _handler(
             self._start_metrics("POST")
             with browser_sessions.admission.enter() as admitted:
                 if not admitted:
-                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
-                        "Runtime maintenance is pausing new work. Try again shortly.")})
+                    generation = getattr(self.server, "edge_fenced_generation", None)
+                    if generation:
+                        # The stable edge may retry only this response, which
+                        # proves the request never entered mutation admission.
+                        from .runtime_edge import FENCED_HEADER
+                        data = json.dumps({"error": "Coordinator admission is switching."}).encode()
+                        self._send(HTTPStatus.SERVICE_UNAVAILABLE, "application/json; charset=utf-8",
+                                   data, extra_headers={FENCED_HEADER: generation})
+                    else:
+                        self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": browser_sessions.admission.message(
+                            "Runtime maintenance is pausing new work. Try again shortly.")})
                     return
                 try:
                     self._admitted_POST()
@@ -1439,6 +1458,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     coordination_metrics: CoordinationMetrics | None = None
 
     stoic_integration = None
+    notification_broadcast: NotificationBroadcast | None = None
+    search_publications = None
 
     def __init__(self, *args, **kwargs):
         self._worker_lock = threading.Lock()
@@ -1475,6 +1496,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 mailbox.put(None)
             self._idle_workers.clear()
         try:
+            if self.notification_broadcast is not None:
+                self.notification_broadcast.close()
             if self.stoic_integration is not None:
                 self.stoic_integration.close()
             if self.coordination_metrics is not None:
@@ -1494,7 +1517,11 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 if self.browser_sessions is not None:
                     self.browser_sessions.close()
             finally:
-                super().server_close()
+                try:
+                    if self.search_publications is not None:
+                        self.search_publications.close()
+                finally:
+                    super().server_close()
 
     def server_bind(self) -> None:
         # HTTPServer performs a reverse-DNS lookup only to populate a cosmetic
@@ -1519,6 +1546,7 @@ def make_ui_server(
     browser_sessions: BrowserSessions | None = None,
     remote_access: RemoteAccess | None = None,
     admission_paused: bool = False,
+    csrf_token: str | None = None,
 ) -> ThreadingHTTPServer:
     _validate_loopback(host)
     if not 0 <= port <= 65535:
@@ -1538,7 +1566,8 @@ def make_ui_server(
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions,
+            csrf_token or secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
     except Exception:
         coordination_metrics.close()
         push.close()
@@ -1547,6 +1576,7 @@ def make_ui_server(
         raise
     server.external_work = sessions.external_work
     server.browser_sessions = sessions
+    server.notification_broadcast = NotificationBroadcast(store, sessions)
     server.remote_access = remote
     server.web_push = push
     server.native_push = native
@@ -1561,7 +1591,10 @@ def make_ui_server(
     remote.restore(f"http://{target_host}:{bound_port}")
     try:
         sessions.start_database_checkpoint()
-        sessions.start_search_index()
+        from .search_publication import SearchPublicationWorker
+        server.search_publications = SearchPublicationWorker.start_if_active(store)
+        if server.search_publications is None:
+            sessions.start_search_index()
         push.start()
         native.start()
         server.thread_control.start()

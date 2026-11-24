@@ -17,6 +17,7 @@ import stat
 import tempfile
 import subprocess
 import threading
+import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
@@ -122,7 +123,7 @@ class ClaudeConnection:
         if projection is not None:
             self.readers = []
             self.process = projection.open(self.channel, args, env, options["cwd"], self._message,
-                                           provider="claude", thread_id=self.thread_id)
+                                           provider="claude", thread_id=self.thread_id, stderr_callback=self._on_stderr)
             return
         try:
             self.process = subprocess.Popen(args, cwd=options["cwd"], env=env,
@@ -168,7 +169,10 @@ class ClaudeConnection:
 
     def _stderr(self):
         for line in self.process.stderr:
-            self.errors.append(line.rstrip()[-1000:])
+            self._on_stderr(line)
+
+    def _on_stderr(self, line):
+        self.errors.append(line.rstrip()[-1000:])
 
     def _notify(self, message):
         try:
@@ -189,7 +193,7 @@ class ClaudeConnection:
         connection.errors, connection.closed, connection.readers = deque(maxlen=12), False, []
         connection.channel = channel
         connection.process = store.provider_projection.attach(channel, pid, connection._message,
-                                                               provider="claude", thread_id=thread_id)
+                                                               provider="claude", thread_id=thread_id, stderr_callback=connection._on_stderr)
         return connection
 
     def _message(self, message):
@@ -583,11 +587,18 @@ class ClaudeRPC:
             turn = self.turns.get(thread_id)
             if not turn or turn["id"] != params["turnId"]:
                 raise CoordinationError("The active Claude turn changed or finished.")
-            # Kill only this conversation's process: no shared server or other chat.
-            # Closing the transport bounds Stop even when an approval is outstanding.
-            connection = self.connections.pop(thread_id, None)
+            connection = self.connections.get(thread_id)
             if connection:
-                connection.close()
+                deadline = time.monotonic() + 2.0
+                try:
+                    connection.control("interrupt", timeout=2.0)
+                    while thread_id in self.turns and time.monotonic() < deadline:
+                        time.sleep(.01)
+                except (CoordinationError, TimeoutError):
+                    pass
+                finally:
+                    self.connections.pop(thread_id, None)
+                    connection.close()
             self._finish(thread_id, "interrupted")
             return {}
         raise CoordinationError(f"Claude does not support {method}.")
@@ -695,7 +706,12 @@ class ClaudeRPC:
                         self._emit("item/agentMessage/delta", thread_id, turnId=turn["id"], itemId=item["id"], delta=delta.get("text", ""))
                     elif delta.get("type") == "thinking_delta":
                         item["summary"][0] += delta.get("thinking", "")
-                        self._item(thread_id, item)
+                        from .acp_state import stream_deltas
+                        if stream_deltas(self):
+                            self._emit("item/reasoning/summaryTextDelta", thread_id, turnId=turn["id"],
+                                       itemId=item["id"], summaryIndex=0, delta=delta.get("thinking", ""))
+                        else:
+                            self._item(thread_id, item)
             elif event.get("type") == "content_block_stop":
                 item = self.blocks.get(thread_id, {}).get(index)
                 if item:

@@ -766,7 +766,11 @@ class BrowserSessions:
             # controlled shutdown is not an unexpected provider interruption.
             params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
-        public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
+        projection = getattr(self, "projection", None)
+        if projection is not None and getattr(projection.in_event, "streaming", False):
+            public, review_stage = projection.stream_public_event(method, params)
+        else:
+            public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
             if (method == "turn/completed" and self.active.get(thread_id)
@@ -1187,9 +1191,20 @@ class BrowserSessions:
                 existing.update(copy.deepcopy(item))
         item = next((i for i in turn["items"] if i["id"] == params.get("itemId")), None)
         if item and isinstance(params.get("delta"), str):
-            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput"}.get(method)
+            field = {"item/agentMessage/delta": "text", "item/commandExecution/outputDelta": "aggregatedOutput",
+                     "item/mcpToolCall/outputDelta": "visibleOutput"}.get(method)
             if field:
-                item[field] = (item.get(field) or "") + params["delta"]
+                previous = item.get(field)
+                if previous is None and field == "visibleOutput" and isinstance(item.get("result"), str):
+                    previous = item["result"]
+                item[field] = (previous or "") + params["delta"]
+            elif method == "item/reasoning/summaryTextDelta":
+                index = params.get("summaryIndex", 0)
+                if type(index) is int and 0 <= index < 1024:
+                    summary = item.setdefault("summary", [])
+                    while len(summary) <= index:
+                        summary.append("")
+                    summary[index] += params["delta"]
         if method in {"turn/started", "turn/completed"}:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
         if method in {"item/completed", "turn/completed"}:
@@ -2522,11 +2537,68 @@ class BrowserSessions:
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
+    def _authorize_history(self, thread_id):
+        """Use overview visibility without provider access or a browser row."""
+        with self.store.reading(), self.store._connection() as db:
+            browser = has_table(db, "browser_sessions")
+            fields = "s.cwd, b.thread_id, b.cwd" if browser else "s.cwd, NULL, NULL"
+            join = "LEFT JOIN browser_sessions b ON b.thread_id=t.thread_id" if browser else ""
+            row = db.execute(f"""SELECT {fields} FROM work_threads t JOIN sessions s ON s.session_id=t.thread_id
+                {join} WHERE t.thread_id=? AND NOT EXISTS (SELECT 1 FROM delegations d
+                JOIN work_threads parent ON parent.thread_id=d.parent_session_id WHERE d.child_session_id=t.thread_id)""",
+                (thread_id,)).fetchone()
+        if (row is None or not matches_workspace(row[0], self.cwd)
+                or (row[1] is not None and not matches_workspace(row[2], self.cwd))):
+            raise CoordinationError("Work thread not found in this workspace.")
+
+    def read_history_window(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
+        """Read an indexed page, falling back for untouched legacy histories."""
+        from .transcript_store import TranscriptStore
+        if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
+            raise CoordinationError("Invalid transcript window")
+        self._authorize_history(thread_id)
+        window = TranscriptStore(self.store).read_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+        if window is not None:
+            return self.reviews.public_history(thread_id, window)
+        saved = read_history(self.store, thread_id) or {"id": thread_id, "turns": []}
+        turns = saved.get("turns") or []
+        if turn_id is not None:
+            position = next((i for i, turn in enumerate(turns) if turn.get("id") == turn_id), None)
+            if position is None:
+                return None
+            before_seq = position + 1
+        end = min(len(turns), before_seq if before_seq is not None else len(turns))
+        start = max(0, end - limit)
+        from .history_window import _abridged_item
+        window = {**saved, "view": "recent", "turns": [
+            {**turn, "items": [_abridged_item(item) for item in turn.get("items") or []]}
+            if turn.get("status") != "inProgress" else turn for turn in turns[start:end]]}
+        window.update(earlierTurns=start, beforeSeq=start, totalTurns=len(turns))
+        return self.reviews.public_history(thread_id, window)
+
+    def read_history_turn(self, thread_id, turn_id):
+        from .transcript_store import TranscriptStore
+        self._authorize_history(thread_id)
+        turn = TranscriptStore(self.store).read_full_turn(thread_id, turn_id)
+        if turn is None:
+            saved = read_history(self.store, thread_id) or {}
+            turn = next((t for t in saved.get("turns", []) if t.get("id") == turn_id), None)
+        if turn is None:
+            raise CoordinationError("Saved turn was not found.")
+        public = self.reviews.public_history(thread_id, {"id": thread_id, "turns": [turn]})
+        return public["turns"][0]
+
     def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
-        thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
-        if work_thread["client"] == "codex":
+        self._authorize_history(thread_id)
+        from .transcript_store import TranscriptStore
+        transcripts = TranscriptStore(self.store)
+        thread = transcripts.read_window(thread_id) if recent else transcripts.read_full(thread_id)
+        indexed = thread is not None
+        if thread is None:
+            thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
+        if not indexed and work_thread["client"] == "codex":
             try:
                 # The HTTP observer stays query-only. Its serialized provider
                 # reader owns the durable transport command and receipt.
@@ -2538,8 +2610,9 @@ class BrowserSessions:
                 thread["historyUnavailable"] = False
             except (CoordinationError, OSError) as exc:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
-        if recent:
+        if recent and not indexed:
             thread = recent_view(thread)
+        thread["historyPagination"] = indexed
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),

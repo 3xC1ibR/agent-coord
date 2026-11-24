@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 
+from . import acp_state
 from .acp import ACPConnection
 from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
@@ -53,11 +54,19 @@ class MuseConnection(ACPConnection):
         self.notifications = queue.Queue()
         self.dispatcher = None
         try:
-            super().__init__(self.notifications.put, command=command, cwd=options["cwd"], env=env)
+            super().__init__(self.notifications.put, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="muse", thread_id=options.get("threadId"))
         except Exception:
             if self.configuration:
                 self.configuration.cleanup()
             raise
+        if self.channel:
+            # Broker callbacks must apply synchronously with the journal cursor.
+            self.callback = callback
+            if self.configuration:
+                self.resource_path = self.configuration.name
+                self.configuration._finalizer.detach()
+            return
         def dispatch():
             while True:
                 message = self.notifications.get()
@@ -95,11 +104,17 @@ class MuseConnection(ACPConnection):
         if self.closed:
             return
         super().close()
-        self.notifications.put(None)
+        if not self.closed:
+            return
+        if self.notifications:
+            self.notifications.put(None)
         if self.dispatcher and self.dispatcher is not threading.current_thread():
             self.dispatcher.join(timeout=3)
         if self.configuration:
             self.configuration.cleanup()
+        elif getattr(self, "resource_path", None):
+            import shutil
+            shutil.rmtree(self.resource_path, ignore_errors=True)
 
 
 class MuseRPC:
@@ -239,7 +254,7 @@ class MuseRPC:
             connection.initialize()
             if row:
                 result = self._command(connection, "session/resume", sessionId=row["native_id"],
-                                       excludeItems=True, permissionProfile=profile)
+                                       excludeItems=False, permissionProfile=profile)
                 if result["session"].get("activeTurnId"):
                     raise CoordinationError("Muse reports an existing active turn. Stop it in Muse before resuming here.")
             else:
@@ -250,6 +265,8 @@ class MuseRPC:
                     params["modelId"] = options["model"]
                 result = self._command(connection, "session/start", **params)
             session = result["session"]
+            if row:
+                acp_state.reconcile_muse(self, thread_id, result)
             native_id = session["sessionId"]
             if native_id != self.native[thread_id]:
                 raise CoordinationError("Muse returned a different session identity; refusing to replace the conversation.")
@@ -329,6 +346,19 @@ class MuseRPC:
             if method == "thread/archive":
                 self._shutdown(thread_id)
             return {}
+        if method == "turn/steer" and getattr(self.connections.get(thread_id), "channel", None):
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params.get("expectedTurnId"):
+                    raise CoordinationError("The active Muse turn changed or finished. Your message was not sent.")
+                connection = self.connections[thread_id]
+                native_params = {"commandId": command_id(), "sessionId": self.native[thread_id],
+                    "expectedTurnId": turn["id"], "input": self._input(params["input"])}
+                user = {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
+            future = connection.submit("turn/steer", native_params, context={"user": user})
+            # No browser/adapter lock may cover a native acknowledgement wait.
+            future.result(timeout=60)
+            return {"turnId": native_params["expectedTurnId"]}
         if method == "turn/steer":
             # Keep completion behind the acknowledgement and display update.
             # MuseConnection drains RPC responses independently of its events.
@@ -509,8 +539,15 @@ class MuseRPC:
                 return
             self.seen[thread_id].add(key)
         if method == "view/gap":
-            self._shutdown(thread_id)
-            self._finish(thread_id, "failed", "Muse lost conversation events. Stop and resume the session before continuing.")
+            connection = self.connections[thread_id]
+            if getattr(connection, "channel", None):
+                # Never wait for another native response from a projection callback.
+                # The command and its correlation commit with this gap event.
+                connection.submit("session/read", {"commandId": command_id(),
+                    "sessionId": self.native[thread_id], "excludeItems": False})
+            else:
+                self._shutdown(thread_id)
+                self._finish(thread_id, "failed", "Muse lost conversation events. Stop and resume the session before continuing.")
             return
         if method == "turn/started":
             identity = params.get("turnId")
@@ -575,6 +612,27 @@ class MuseRPC:
                     return
                 native["turnId"] = identity
                 items[native["itemId"]] = native
+            if method == "item/delta" and acp_state.stream_deltas(self):
+                rendered = next((item for item in turn["items"] if item["id"] == native["itemId"]), None)
+                delta = params["delta"]
+                if rendered is not None:
+                    normalized, extra = None, {}
+                    if field == "text" and rendered["type"] == "agentMessage":
+                        rendered["text"] = native["text"]
+                        normalized = "item/agentMessage/delta"
+                    elif field == "visibleOutput" and rendered["type"] == "mcpToolCall":
+                        rendered["result"] = native["visibleOutput"]
+                        normalized = "item/mcpToolCall/outputDelta"
+                    elif field.startswith("summary.") and rendered["type"] == "reasoning":
+                        index = int(field.split(".")[1])
+                        summary = rendered.setdefault("summary", [])
+                        while len(summary) <= index:
+                            summary.append("")
+                        summary[index] = native["summary"][index]
+                        normalized, extra = "item/reasoning/summaryTextDelta", {"summaryIndex": index}
+                    if normalized:
+                        self._emit(normalized, thread_id, turnId=turn["id"], itemId=rendered["id"], delta=delta, **extra)
+                        return
             item = self._item(native)
             index = next((i for i, old in enumerate(turn["items"]) if old["id"] == item["id"]), None)
             if index is None:
@@ -688,7 +746,13 @@ class MuseRPC:
                 raise CoordinationError("This decision is not offered by Muse.")
             method = "approval/decide"
             params.update(approvalId=pending["native_id"], requirementId=request["currentRequirementId"], choiceId=choice)
-        receipt = self._command(self.connections[thread_id], method, **params)
+        connection = self.connections[thread_id]
+        if getattr(connection, "channel", None):
+            # BrowserSessions.answer holds its lock. Commit the native command
+            # now; the retained reply resolves adapter/browser state later.
+            connection.submit(method, {"commandId": command_id(), **params})
+            return
+        receipt = self._command(connection, method, **params)
         identity = (thread_id, pending["native_id"])
         if pending["question"] or receipt.get("terminal"):
             self.settled.add(identity)
@@ -709,6 +773,10 @@ class MuseRPC:
                     self._emit("item/completed", thread_id, turnId=turn["id"], item=copy.deepcopy(item))
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.connections):
             self._shutdown(thread_id)

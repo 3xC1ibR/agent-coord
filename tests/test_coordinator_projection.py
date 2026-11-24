@@ -178,7 +178,7 @@ class ProjectionTests(unittest.TestCase):
                     self.assertFalse(value is history, "Copied the complete published history before a routine event")
                     return duplicate(value, *args, **kwargs)
 
-                event = self.event(1, "item/agentMessage/delta", itemId="output", delta="more")
+                event = self.event(1, "item/completed", item={"id": "output", "type": "agentMessage", "text": text + "more"})
                 with patch("agent_coord.coordinator_projection.copy.deepcopy", side_effect=count_copies), \
                      patch.object(self.projection, "_save", side_effect=sqlite3.OperationalError("failed checkpoint")), \
                      self.assertRaisesRegex(sqlite3.OperationalError, "failed checkpoint"):
@@ -553,6 +553,9 @@ class ProjectionTests(unittest.TestCase):
         turn = self.sessions.histories[self.identity]["turns"][-1]
         self.assertEqual(next(item["text"] for item in turn["items"] if item["id"] == "output"), "once")
         with self.store.reading(), self.store._connection() as db:
+            self.assertEqual(db.execute("SELECT cursor FROM coordinator_projection").fetchone()[0], 1)
+        self.projection.flush_stream()
+        with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT cursor FROM coordinator_projection").fetchone()[0], 2)
 
     def test_signed_legacy_watchdog_restores_approval_and_processes_next_event(self):
@@ -598,14 +601,18 @@ class ProjectionTests(unittest.TestCase):
         def failed(db, state, cursor):
             original(db, state, cursor)
             raise sqlite3.IntegrityError("injected after restored history write")
+        self.projection.project(delta)
         with patch.object(self.projection, "_save", side_effect=failed):
             with self.assertRaisesRegex(sqlite3.IntegrityError, "injected"):
-                self.projection.project(delta)
-        self.assertEqual(self.sessions.histories, {})
-        self.assertEqual(self.projection.cursor, 1)
+                self.projection.flush_stream()
+        self.assertEqual(self.projection.cursor, 2)
+        self.assertEqual(self.projection.checkpoint_cursor, 1)
         self.assertEqual(read_history(self.store, self.identity), saved)
+        # A crash restores the immutable boundary, then replays its durable tail.
+        self.projection.load()
         self.projection.project(delta)
         self.projection.project(delta)
+        self.projection.flush_stream()
         restored = read_history(self.store, self.identity)
         self.assertEqual(restored["turns"][-1]["items"][:-1], saved["turns"][-1]["items"][:-1])
         self.assertEqual(restored["turns"][-1]["items"][-1]["text"], "retained once")
@@ -879,7 +886,10 @@ class ProjectionTests(unittest.TestCase):
                 raise sqlite3.IntegrityError("Later output rolled back")
 
         with patch.object(self.projection, "_save", side_effect=fail_output), ThreadPoolExecutor(max_workers=1) as worker:
-            applying = worker.submit(self.projection.project_batch, batch)
+            def apply_and_flush():
+                self.projection.project_batch(batch)
+                self.projection.flush_stream()
+            applying = worker.submit(apply_and_flush)
             try:
                 self.assertTrue(writing_output.wait(3))
                 self.assertTrue(reply.done(), "A committed native reply waited for unrelated later output")
@@ -889,9 +899,11 @@ class ProjectionTests(unittest.TestCase):
                 release.set()
             with self.assertRaisesRegex(sqlite3.IntegrityError, "Later output"):
                 applying.result(timeout=3)
-        self.assertEqual(self.projection.cursor, 2)
+        self.assertEqual(self.projection.cursor, 3)
+        self.assertEqual(self.projection.checkpoint_cursor, 2)
         self.projection.project_batch(batch)
         self.projection.project_batch(batch)
+        self.projection.flush_stream()
         self.assertEqual(self.projection.cursor, 3)
         self.assertEqual(responses, [{"turnId": self.turn_id}])
         turn = self.sessions.histories[self.identity]["turns"][-1]

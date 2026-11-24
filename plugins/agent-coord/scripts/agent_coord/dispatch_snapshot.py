@@ -106,7 +106,33 @@ def read_snapshot(database_path, *, now=None, cwd=None):
                 "id": row["id"], "text": row["body"].split("User request:\n", 1)[-1][:4000],
                 "timestamp": row["created_at"], "pending": row["delivered_at"] is None})
 
-        if "browser_history" in tables:
+        from .search_store import search_path
+        index = search_path(path)
+        isolated = False
+        if index.is_file():
+            db.execute("ATTACH DATABASE ? AS isolated_search", (index.as_uri() + "?mode=ro",))
+            try:
+                isolated = db.execute("SELECT 1 FROM isolated_search.search_control WHERE key='active' AND value='1'").fetchone() is not None
+            except sqlite3.OperationalError as error:
+                if "no such table" not in str(error):
+                    raise
+        if isolated:
+            for row in db.execute(eligible + """SELECT h.thread_id,h.status,
+                    (SELECT COUNT(*) FROM isolated_search.search_turns t WHERE t.thread_id=h.thread_id) AS total,
+                    (SELECT json_group_array(json_object('turn_id',turn_id,'item_id',item_id,'role',role,
+                        'timestamp',created_at,'text',substr(excerpt,1,6000),'truncated',length(excerpt)>6000))
+                     FROM (SELECT * FROM isolated_search.search_turns t WHERE t.thread_id=h.thread_id
+                           ORDER BY turn_seq DESC LIMIT 200)) AS messages
+                FROM isolated_search.search_threads h JOIN eligible e ON e.thread_id=h.thread_id""", params):
+                if row['status'] == 'unavailable':
+                    continue
+                found = json.loads(row['messages'])
+                found.reverse()
+                for message in found:
+                    message['truncated'] = bool(message['truncated'])
+                inventory[row['thread_id']].update(messages=found, history_status=row['status'],
+                                                  history_truncated=row['total'] > 200)
+        elif "browser_history" in tables:
             triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
             routing = ("conversation_search_routing_index" if "conversation_search_routing_index" in tables
                        else "conversation_search_routing")

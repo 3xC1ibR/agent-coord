@@ -677,8 +677,10 @@ class CoordinationStore:
                                       operation=operation[0], priority=operation[1], named=named_operation):
                 self._bind_connection_diagnostics(connection, nested)
                 try:
+                    before = connection.total_changes
                     with connection:
                         yield connection
+                    changed = connection.total_changes != before
                     if (isinstance(connection, _StoreConnection) and connection.settings is not None
                             and not connection.in_transaction):
                         try:
@@ -705,6 +707,8 @@ class CoordinationStore:
                     finally:
                         connection.close()
                     raise
+        if changed and not nested:
+            self._writer.committed()
 
     @contextmanager
     def database_operation(self, name, *, priority="foreground"):

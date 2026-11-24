@@ -451,6 +451,10 @@ def decode_history(serialized, *, database_path=None, db=None):
 
 def saved_turn_status(store, thread_id, turn_id):
     """Look up an outcome in one published root without loading archived item bodies."""
+    from .transcript_store import TranscriptStore
+    turn = TranscriptStore(store).read_full_turn(thread_id, turn_id)
+    if turn is not None:
+        return turn.get("status")
     with store.reading(), store._connection() as db:
         db.execute("BEGIN")
         row = db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
@@ -477,8 +481,15 @@ def saved_turn_status(store, thread_id, turn_id):
 
 def read_history(store, thread_id, *, windows=None, live_turn=None):
     """Read the published history or its recent view in a single query-only snapshot."""
+    from .transcript_store import TranscriptStore
+    transcripts = TranscriptStore(store)
+    indexed = transcripts.read_window(thread_id) if windows is not None else transcripts.read_full(thread_id)
+    if indexed is not None:
+        return indexed
     with store.reading(), store._connection() as db:
         db.execute("BEGIN")
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='browser_history'").fetchone():
+            return None
         row = db.execute("SELECT CAST(history_json AS BLOB) FROM browser_history WHERE thread_id=?", (thread_id,)).fetchone()
         if not row:
             return None
@@ -636,6 +647,17 @@ class HistoryPersistence:
     def save_steps(self, thread_id, history):
         started = time.monotonic()
         try:
+            # A compact generation is writable by this same dual-reader build.
+            # Rollback keeps the current DB and accepted work, rather than
+            # selecting an obsolete time-of-copy database.
+            with self.store.reading(), self.store._connection() as db:
+                control = db.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_storage_control'").fetchone()
+                indexed = control and db.execute("SELECT 1 FROM transcript_storage_control WHERE mode='indexed'").fetchone()
+            if indexed:
+                from .transcript_store import TranscriptStore
+                TranscriptStore(self.store).save(thread_id, history, activate=True)
+                self._record({"snapshots": 1})
+                return {"snapshots": 1, "elapsed_seconds": time.monotonic() - started}
             with self.lock:
                 previous = self.prepared.get(thread_id)
             with self.store._writer.measure_request("history.prepare"):
@@ -678,6 +700,15 @@ class HistoryPersistence:
                          "source_bytes": prepared.source_bytes,
                          "published_bytes": len(prepared.serialized.encode("utf-8")) if changed else 0}
             self._record(published)
+            # Keep the previous build's reader valid. Indexed publication follows
+            # the legacy root; a crash in between falls back to that newer root.
+            from .transcript_store import TranscriptStore
+            transcripts = TranscriptStore(self.store)
+            with self.store.reading(), self.store._connection() as db:
+                exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_generations'").fetchone()
+                enabled = exists and db.execute("SELECT active FROM transcript_generations WHERE thread_id=?", (thread_id,)).fetchone()
+            if enabled and enabled[0]:
+                transcripts.save(thread_id, history, source_root=prepared.serialized)
             if self.on_saved is not None:
                 try:
                     self.on_saved(thread_id, prepared)

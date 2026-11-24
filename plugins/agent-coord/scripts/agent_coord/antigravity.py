@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import acp_state
 from .acp import ACPConnection
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
 from .antigravity_skills import prepare_skills
@@ -115,7 +116,11 @@ class AntigravityConnection(ACPConnection):
         self.temporary = tempfile.TemporaryDirectory(prefix="process-", dir=root)
         env.update({key: self.temporary.name for key in ("TMPDIR", "TMP", "TEMP")})
         try:
-            super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+            super().__init__(callback, command=command, cwd=options["cwd"], env=env,
+                store=store, provider="antigravity", thread_id=options.get("threadId"))
+            if self.channel:
+                self.resource_path = self.temporary.name
+                self.temporary._finalizer.detach()
         except Exception:
             self.temporary.cleanup()
             raise
@@ -149,10 +154,14 @@ class AntigravityConnection(ACPConnection):
         return self._authorization(line)
 
     def close(self):
-        try:
-            super().close()
-        finally:
+        super().close()
+        if not self.closed:
+            return
+        if self.temporary:
             self.temporary.cleanup()
+        elif getattr(self, "resource_path", None):
+            import shutil
+            shutil.rmtree(self.resource_path, ignore_errors=True)
 
 
 class AntigravityRPC:
@@ -306,7 +315,11 @@ class AntigravityRPC:
                 else:
                     raise CoordinationError("This Antigravity runtime cannot resume saved sessions. Update it before continuing.")
                 params["sessionId"] = row[0]
+            if method == "session/load":
+                acp_state.begin_replay(self, thread_id)
             session = connection.request(method, params)
+            if method == "session/load":
+                acp_state.finish_replay(self, thread_id)
             native_id = row[0] if row else session["sessionId"]
             # Save identity before settings requests; a failed selection must
             # never silently create a replacement native conversation.
@@ -449,13 +462,20 @@ class AntigravityRPC:
                     self.update_stopping.add(thread_id)
             # A backend update stops the turn itself; it is not the user's Stop.
             origin, reason = ("runtime", "backend_update") if params.get("runtimeUpdate") else ("user", "turn_interrupt")
-            self._finish(thread_id, "interrupted",
-                         termination={"origin": origin, "reason": reason, "execution": "unknown"})
-            connection = self.connections.pop(thread_id, None)
+            state = self.delivery_turns.get(thread_id)
+            if state:
+                state["user_cancel_requested"] = not params.get("runtimeUpdate")
+            connection = self.connections.get(thread_id)
             if connection:
                 try:
-                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
+                    if hasattr(connection, "cancel"):
+                        connection.cancel(self.native[thread_id], timeout=2.0)
+                    else:
+                        connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
                 finally:
+                    self.connections.pop(thread_id, None)
+                    self._finish(thread_id, "interrupted",
+                        termination={"origin": origin, "reason": reason, "execution": "unknown"})
                     connection.close()
             return {}
         raise CoordinationError(f"Antigravity does not support {method}.")
@@ -530,12 +550,21 @@ class AntigravityRPC:
             self.delivery.attempted(turn_id, batch, provider_turn_id=turn_id)
             state.update(batch=batch, accepted=False)
             future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-        future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
+        if not getattr(connection, "channel", None):
+            future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
 
     def _confirm_delivery(self, thread_id):
         state = self.delivery_turns.get(thread_id)
         if state and not state["accepted"]:
-            self.delivery.submitted(thread_id, state["id"], state["batch"])
+            from .browser_persistence import capturing_writes
+            projection = getattr(self.store, "provider_projection", None)
+            if projection is not None and capturing_writes():
+                turn_id, batch = state["id"], state["batch"]
+                projection.sessions.persistence.submit(
+                    lambda: self.delivery.submitted(thread_id, turn_id, batch),
+                    key=thread_id, required=True)
+            else:
+                self.delivery.submitted(thread_id, state["id"], state["batch"])
             state["accepted"] = True
 
     # ACP has no steering operation or safe in-prompt delivery boundary.
@@ -598,6 +627,8 @@ class AntigravityRPC:
             return
         update = params.get("update", {})
         kind = update.get("sessionUpdate")
+        if thread_id not in self.turns and acp_state.replay_update(self, thread_id, update):
+            return
         if kind == "usage_update":
             self._context_usage(thread_id, update)
             return
@@ -610,12 +641,19 @@ class AntigravityRPC:
                 # provider output. Throttle failed attempts too, so contention
                 # cannot make every streamed chunk wait on the same DB lock.
                 self.last_activity[thread_id] = now
-                try:
-                    self.store.touch(thread_id)
-                except (sqlite3.Error, CoordinationError):
-                    logging.getLogger(__name__).warning(
-                        "Could not refresh Antigravity activity for %s; continuing provider stream",
-                        thread_id, exc_info=True)
+                def touch():
+                    try:
+                        self.store.touch(thread_id)
+                    except (sqlite3.Error, CoordinationError):
+                        logging.getLogger(__name__).warning(
+                            "Could not refresh Antigravity activity for %s; continuing provider stream",
+                            thread_id, exc_info=True)
+                from .browser_persistence import capturing_writes
+                projection = getattr(self.store, "provider_projection", None)
+                if projection is not None and capturing_writes():
+                    projection.sessions.persistence.submit(touch, key=thread_id, required=False, coalesce="provider_activity")
+                else:
+                    touch()
         if kind == "config_option_update":
             self.catalog = model_catalog(update)
         with self.lock:
@@ -627,6 +665,9 @@ class AntigravityRPC:
                 if content.get("type") != "text":
                     return
                 item_type = "agentMessage" if kind == "agent_message_chunk" else "reasoning"
+                if acp_state.stream_deltas(self):
+                    acp_state.append_text_delta(self, thread_id, turn, item_type, content.get("text", ""))
+                    return
                 item = turn["items"][-1] if turn["items"] else {}
                 if item.get("type") != item_type:
                     item = {"id": str(uuid.uuid4()), "type": item_type, **({"text": ""} if item_type == "agentMessage" else {"summary": [""]})}
@@ -636,6 +677,8 @@ class AntigravityRPC:
                 else:
                     item["summary"][0] += content.get("text", "")
             elif kind in {"tool_call", "tool_call_update"}:
+                if acp_state.stream_deltas(self) and acp_state.append_tool_delta(self, thread_id, turn, update):
+                    return
                 item_id = update.get("toolCallId")
                 if not item_id:
                     return
@@ -735,6 +778,10 @@ class AntigravityRPC:
         self.requests.pop(message["id"], None)
 
     def close(self):
+        projection = getattr(self.store, "provider_projection", None)
+        if projection is not None and getattr(projection.sessions, "transport_handover", False):
+            self.closed = True
+            return
         self.closed = True
         for thread_id in list(self.turns):
             self._finish(thread_id, "interrupted",

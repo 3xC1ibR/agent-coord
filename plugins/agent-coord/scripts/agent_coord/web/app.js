@@ -1150,8 +1150,54 @@ function sameConversation(first, second) {
   if (first && first.transferReadSource !== second.transferReadSource) return false;
   if (first && JSON.stringify([first.work_thread.forked_from, first.work_thread.forked_from_turn_id, first.work_thread.forked_sessions]) !==
     JSON.stringify([second.work_thread.forked_from, second.work_thread.forked_from_turn_id, second.work_thread.forked_sessions])) return false;
-  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.reviews, first.work_thread.browser_session, first.work_thread.client]) ===
-    JSON.stringify([second.thread.historyUnavailable, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
+  return !!first && JSON.stringify([first.thread.historyUnavailable, first.thread.earlierTurns, first.thread.beforeSeq, first.thread.turns, first.coordinationMessages, first.dispatchRequests, first.reviews, first.work_thread.browser_session, first.work_thread.client]) ===
+    JSON.stringify([second.thread.historyUnavailable, second.thread.earlierTurns, second.thread.beforeSeq, second.thread.turns, second.coordinationMessages, second.dispatchRequests, second.reviews, second.work_thread.browser_session, second.work_thread.client]);
+}
+// Pages and requested output live with the bounded conversation cache. A recent
+// snapshot replaces its suffix; it must not discard turns the reader opened.
+function mergeHistoryWindow(entry, thread, older = false) {
+  const previous = entry.detail?.thread;
+  if (previous && (older || entry.historyLoaded)) {
+    const recent = older ? previous : thread, earlier = older ? thread : previous;
+    const ids = new Set((recent.turns || []).map(turn => turn.id));
+    const overlap = (earlier.turns || []).findIndex(turn => ids.has(turn.id));
+    const prefix = overlap < 0 ? earlier.turns || [] : earlier.turns.slice(0, overlap);
+    thread = {...recent, turns: [...prefix, ...recent.turns],
+      beforeSeq: prefix.length || older ? earlier.beforeSeq : recent.beforeSeq,
+      earlierTurns: prefix.length || older ? earlier.earlierTurns : recent.earlierTurns};
+  }
+  if (entry.expandedOutput) {
+    const retained = new Set();
+    thread = {...thread, turns: (thread.turns || []).map(turn => ({...turn, items: (turn.items || []).map(item => {
+      const key = JSON.stringify([turn.id, item.id]), full = entry.expandedOutput.get(key);
+      if (!full) return item;
+      if (item === full.item || JSON.stringify(item) === full.preview || JSON.stringify(item) === JSON.stringify(full.item)) {
+        retained.add(key); return full.item;
+      }
+      return item; // A changed preview invalidates an older full-output read.
+    })}))};
+    for (const key of entry.expandedOutput.keys()) if (!retained.has(key)) entry.expandedOutput.delete(key);
+  }
+  return thread;
+}
+function historyPage(result, id, before = null) {
+  const page = result?.thread;
+  if (!page || page.id !== id || !Array.isArray(page.turns) || !Number.isSafeInteger(page.beforeSeq) ||
+      page.beforeSeq < 0 || !Number.isSafeInteger(page.earlierTurns) || page.earlierTurns < 0 ||
+      before !== null && page.beforeSeq >= before) throw new Error("Could not read the requested conversation page. Try again.");
+  return page;
+}
+async function bridgeHistoryWindow(id, thread, target, options) {
+  // More than one page can arrive while this tab is away. Fill that gap before
+  // joining the retained prefix, so accepted turns never disappear between them.
+  while (thread.earlierTurns && !thread.turns.some(turn => turn.id === target)) {
+    const before = thread.beforeSeq;
+    const page = historyPage(await api(sessionPath(id) + "?before_seq=" + before + "&limit=40", undefined, options), id, before);
+    const ids = new Set(thread.turns.map(turn => turn.id));
+    thread = {...thread, beforeSeq: page.beforeSeq, earlierTurns: page.earlierTurns,
+      turns: [...page.turns.filter(turn => !ids.has(turn.id)), ...thread.turns]};
+  }
+  return thread;
 }
 async function select(id, {rollUp = false, dock = false, focus = true, stayInProject = false, refreshInventory = true, tabId = null} = {}) {
   // A conversation's tab belongs only to its own project, including a tab opened
@@ -1298,11 +1344,14 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const options = {signal: controller.signal, priority: background ? "low" : "auto"};
-    // Opening transfers the latest turns with shortened tool output. A search
-    // result or message link, earlier turns, or full output need everything;
-    // the conversation then keeps its complete history while it is cached.
-    if (state.searchTarget?.thread === id || state.messageTarget?.thread === id) entry.completeHistory = entry.allTurns = true;
-    const sessionOptions = entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
+    const paged = !!state.config?.conversationHistoryPages;
+    const searchTarget = state.searchTarget?.thread === id && state.searchTarget;
+    const messageTarget = state.messageTarget?.thread === id && state.messageTarget;
+    if (searchTarget || messageTarget) {
+      entry.allTurns = true;
+      if (!paged) entry.completeHistory = true;
+    }
+    const sessionOptions = !paged && entry.completeHistory ? options : {...options, headers: {"X-Agent-Coord-History-View": "recent"}};
     let work, detail;
     try {
       if (state.config?.conversationSnapshotControls) {
@@ -1320,6 +1369,25 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
       if (!work.browser_session && !work.can_read_history) {
         const coordinationMessages = detail?.coordinationMessages ?? (await api(threadPath(id) + "/messages", undefined, options)).data;
         detail = {session: {cwd: work.cwd}, thread: {turns: []}, requests: [], running: false, coordinationMessages};
+      }
+      if (paged && detail?.thread?.beforeSeq != null && !detail.thread.historyUnavailable) {
+        let thread = detail.thread;
+        if (searchTarget?.turn && !thread.turns.some(turn => turn.id === searchTarget.turn)) {
+          // Resolve the indexed target and join its context to the latest page.
+          const target = historyPage(await api(sessionPath(id) + "?turn_id=" + encodeURIComponent(searchTarget.turn) + "&limit=40", undefined, options), id);
+          thread = await bridgeHistoryWindow(id, thread, searchTarget.turn, options);
+          thread = mergeHistoryWindow({detail: {thread}}, target, true);
+          entry.historyLoaded = true;
+        }
+        if (messageTarget && thread.earlierTurns) {
+          // Coordination cards have no native turn sequence. Preserve their
+          // ordering by reading compact pages rather than a full transcript.
+          thread = await bridgeHistoryWindow(id, thread, null, options);
+          entry.historyLoaded = true;
+        }
+        const lastRetained = entry.historyLoaded && entry.detail?.thread.turns?.at(-1)?.id;
+        if (lastRetained) thread = await bridgeHistoryWindow(id, thread, lastRetained, options);
+        detail.thread = thread;
       }
     } catch (error) {
       if (controller.signal.aborted) error = new Error("Refreshing this conversation timed out.");
@@ -1358,6 +1426,7 @@ async function refreshDetail({markSeen = true, background = false} = {}) {
       }
     }
     if (entry.streamedUsage && entry.detail?.work_thread) detail.work_thread.usage = entry.detail.work_thread.usage;
+    if (paged) detail.thread = mergeHistoryWindow(entry, detail.thread);
     const recovering = !!entry.refreshError;
     const same = sameConversation(entry.detail, detail);
     entry.refreshError = null;
@@ -2235,10 +2304,71 @@ async function loadCompleteHistory(button, loadingText) {
     showError(error);
   }
 }
+async function readConversationContent(button, loadingText, read) {
+  const id = state.selected, entry = conversationEntry(id), text = button.textContent;
+  const focused = document.activeElement === button;
+  button.disabled = true; button.textContent = loadingText; button.setAttribute("aria-busy", "true");
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    await read(id, entry, {signal: controller.signal}, focused);
+  } catch (error) {
+    if (id === state.selected && state.conversations?.get(id) === entry) {
+      showError(controller.signal.aborted ? new Error("Reading this conversation timed out. Try again.") : error);
+    }
+  } finally {
+    clearTimeout(timeout);
+    button.disabled = false; button.textContent = text; button.setAttribute("aria-busy", "false");
+  }
+}
+function renderConversationContent(id, entry, button, {prepend = false, turnId, itemId, focus} = {}) {
+  entry.nodes = null; entry.revision = (entry.revision || 0) + 1;
+  if (id !== state.selected || state.conversations.get(id) !== entry) return;
+  const el = $("timeline"), focused = focus ?? document.activeElement === button;
+  const fromBottom = el.scrollHeight - el.scrollTop;
+  const scroller = state.timelineScroll?.scroller();
+  const viewport = scroller?.getBoundingClientRect();
+  // The earlier-turn button is replaced by a different page's button. Anchor
+  // to the first visible retained row instead of that disappearing control.
+  const anchor = prepend && viewport ? [...el.children].find(child => child !== button &&
+    child.getBoundingClientRect().bottom > viewport.top && child.getBoundingClientRect().top < viewport.bottom) : null;
+  const offset = anchor?.getBoundingClientRect().top;
+  state.timelineScroll?.hold();
+  state.detail = entry.detail;
+  renderTimeline();
+  if (anchor?.isConnected) state.timelineScroll.restore(scroller.scrollTop + anchor.getBoundingClientRect().top - offset);
+  if (!state.timelineScroll && prepend) el.scrollTop = el.scrollHeight - fromBottom;
+  if (focused) {
+    const replacement = prepend ? el.querySelector?.(".timeline-earlier") :
+      entry.toolNodes?.get(JSON.stringify([turnId, itemId]))?.node.querySelector?.("summary");
+    (replacement || el).focus?.({preventScroll: true});
+  }
+}
+async function loadEarlierHistory(button) {
+  const entry = conversationEntry(state.selected);
+  if (entry.historyPending) return entry.historyPending;
+  entry.historyPending = readConversationContent(button, "Loading earlier turns…", async (id, entry, options, focused) => {
+    const before = entry.detail?.thread.beforeSeq ?? state.detail?.thread.beforeSeq;
+    if (!Number.isSafeInteger(before) || before <= 0) throw new Error("Reopen this conversation to read its earlier turns.");
+    const page = historyPage(await api(sessionPath(id) + "?before_seq=" + before + "&limit=40", undefined, options), id, before);
+    if (state.conversations.get(id) !== entry) return;
+    // A recent refresh can finish while the older page is being read.
+    if (entry.detail.thread.beforeSeq > before) {
+      const revision = entry.revision;
+      const thread = await bridgeHistoryWindow(id, entry.detail.thread, page.turns.at(-1)?.id, options);
+      if (state.conversations.get(id) !== entry || entry.revision !== revision) return;
+      entry.detail.thread = thread;
+    }
+    entry.detail.thread = mergeHistoryWindow(entry, page, true);
+    entry.historyLoaded = entry.allTurns = true;
+    renderConversationContent(id, entry, button, {prepend: true, focus: focused});
+  }).finally(() => { entry.historyPending = null; });
+  return entry.historyPending;
+}
 function earlierTurnsControl(count) {
   const button = node("button", "Show " + count + " earlier " + (count === 1 ? "turn" : "turns"), "quiet timeline-earlier");
   button.type = "button";
   button.onclick = async () => {
+    if (state.config?.conversationHistoryPages && state.detail?.thread?.earlierTurns) return loadEarlierHistory(button);
     // Keep the reader's place while earlier turns are inserted above it.
     const el = $("timeline"), fromBottom = el.scrollHeight - el.scrollTop;
     conversationEntry(state.selected).allTurns = true;
@@ -2249,10 +2379,28 @@ function earlierTurnsControl(count) {
   };
   return button;
 }
-function completeOutputControl() {
+function completeOutputControl(turn, item) {
   const button = node("button", "Show full output", "quiet tool-complete");
   button.type = "button";
-  button.onclick = () => loadCompleteHistory(button, "Loading full output…");
+  button.onclick = () => {
+    if (!state.config?.conversationHistoryPages) return loadCompleteHistory(button, "Loading full output…");
+    return readConversationContent(button, "Loading full output…", async (id, entry, options, focused) => {
+      const preview = JSON.stringify(item);
+      const result = await api(sessionPath(id) + "/turns/" + encodeURIComponent(turn.id) + "/full", undefined, options);
+      if (state.conversations.get(id) !== entry) return;
+      const current = entry.detail?.thread.turns.find(current => current.id === turn.id);
+      const index = current?.items.findIndex(current => current.id === item.id) ?? -1;
+      if (index < 0 || JSON.stringify(current.items[index]) !== preview) return;
+      const full = result?.turn?.id === turn.id && result.turn.items?.find(current => current.id === item.id);
+      if (!full || full.abridged) throw new Error("Could not read the full tool output. Try again.");
+      // A turn read can contain many large outputs. Retain only the item asked
+      // for; siblings keep their compact previews and independent controls.
+      (entry.expandedOutput ||= new Map()).set(JSON.stringify([turn.id, item.id]), {preview, item: full});
+      current.items[index] = full;
+      entry.historyLoaded = true;
+      renderConversationContent(id, entry, button, {turnId: turn.id, itemId: item.id, focus: focused});
+    });
+  };
   return button;
 }
 function renderTimeline() {
@@ -2447,7 +2595,7 @@ function renderTimeline() {
           detail.append(summary);
           if (item.statusReason) detail.append(node("p", item.statusReason));
           detail.append(node("pre", text));
-          if (item.abridged) detail.append(completeOutputControl());
+          if (item.abridged) detail.append(completeOutputControl(turn, item));
         }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);
@@ -2769,6 +2917,15 @@ function applyEvent(event) {
     if (!item && method === "item/agentMessage/delta") { item = {id: params.itemId, type: "agentMessage", text: ""}; turn.items.push(item); }
     if (item && method === "item/agentMessage/delta") item.text = (item.text || "") + params.delta;
     if (item && method === "item/commandExecution/outputDelta") item.aggregatedOutput = (item.aggregatedOutput || "") + params.delta;
+    if (item && method === "item/mcpToolCall/outputDelta") {
+      const output = typeof item.visibleOutput === "string" ? item.visibleOutput : typeof item.result === "string" ? item.result : "";
+      item.visibleOutput = output + params.delta;
+    }
+    if (item && method === "item/reasoning/summaryTextDelta" && Number.isSafeInteger(params.summaryIndex) && params.summaryIndex >= 0) {
+      const summary = item.summary ||= [], index = params.summaryIndex;
+      if (summary[index] && typeof summary[index] === "object") summary[index].text = (summary[index].text || "") + params.delta;
+      else summary[index] = (summary[index] || "") + params.delta;
+    }
   }
   scheduleTimelineRender({userMessage: params.item?.type === "userMessage"});
 }

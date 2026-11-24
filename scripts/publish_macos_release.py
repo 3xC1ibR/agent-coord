@@ -263,6 +263,26 @@ def verify_download(key: str, path: Path) -> None:
             raise ValueError(f"Public download checksum mismatch: {key}")
 
 
+def promote(files: list[Path], release: dict, manifest: Path, r2: R2) -> None:
+    for arch, update in release.get("updates", {}).items():
+        feed = next(path for path in files if path.name == update["appcast"])
+        key = f"updates/{release['channel']}/{arch}.xml"
+        r2.promote_feed(key, feed)
+        verify_download(key, feed)
+    r2.promote(manifest)
+    verify_download(CURRENT_KEY, manifest)
+
+
+def promote_published(files: list[Path], release: dict, r2: R2 | None = None) -> None:
+    """Advance the signed feeds for the exact, already published release."""
+    release_workload_receipt.require_release_receipts(release)
+    with tempfile.TemporaryDirectory(prefix="ribbon-release-") as directory:
+        manifest = Path(directory) / "release.json"
+        manifest.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n")
+        verify_download(f"releases/{release['version']}/release.json", manifest)
+        promote(files, release, manifest, r2 or R2())
+
+
 def publish(files: list[Path], release: dict, r2: R2 | None = None, *, promote_current: bool = False,
             receipt_wait_seconds: int = 0) -> None:
     release_workload_receipt.require_release_receipts(release, receipt_wait_seconds)
@@ -283,13 +303,7 @@ def publish(files: list[Path], release: dict, r2: R2 | None = None, *, promote_c
                 r2.put(key, path)
             verify_download(key, path)
         if promote_current:
-            for arch, update in release.get("updates", {}).items():
-                feed = next(path for path in files if path.name == update["appcast"])
-                key = f"updates/{release['channel']}/{arch}.xml"
-                r2.promote_feed(key, feed)
-                verify_download(key, feed)
-            r2.promote(manifest)
-            verify_download(CURRENT_KEY, manifest)
+            promote(files, release, manifest, r2)
 
 
 def main() -> None:
@@ -300,6 +314,7 @@ def main() -> None:
     parser.add_argument("--channel", choices=("alpha", "beta", "stable"), default="alpha")
     parser.add_argument("--publish", action="store_true", help="Upload verified files to the public R2 bucket")
     parser.add_argument("--promote-current", action="store_true", help="Advance the website release after every artifact verifies")
+    parser.add_argument("--promote-only", action="store_true", help="Promote an already published exact release")
     parser.add_argument("--require-updates", action="store_true", help="Reject releases without signed Sparkle artifacts")
     parser.add_argument("--update-public-key", help="Trusted public key for archive and feed verification")
     parser.add_argument("--receipt-wait-seconds", type=int, default=0,
@@ -307,11 +322,16 @@ def main() -> None:
     args = parser.parse_args()
     if args.promote_current and not args.publish:
         parser.error("--promote-current requires --publish")
+    if args.promote_only and (args.publish or args.receipt_wait_seconds):
+        parser.error("--promote-only has its own immediate receipt check")
     files, release = release_files(args.directory, args.version, args.commit, args.channel,
-                                   require_updates=args.require_updates or args.publish, update_public_key=args.update_public_key)
+                                   require_updates=args.require_updates or args.publish or args.promote_only,
+                                   update_public_key=args.update_public_key)
     if args.publish:
         publish(files, release, promote_current=args.promote_current, receipt_wait_seconds=args.receipt_wait_seconds)
-    print(json.dumps({"published": args.publish, **release}, indent=2))
+    if args.promote_only:
+        promote_published(files, release)
+    print(json.dumps({"published": args.publish, "promoted": args.promote_only or args.promote_current, **release}, indent=2))
 
 
 if __name__ == "__main__":
