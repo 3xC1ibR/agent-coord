@@ -152,7 +152,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                           address.user == nil, address.password == nil else { return nil }
                     return "http://\(host):\(port)/"
                 }
-                let ready = origin != nil && item.loaded && !item.webView.isHidden && !item.webView.isLoading &&
+                let ready = origin != nil && (item.isSettings || url?.path != "/" || item.navigationReady) &&
+                    item.loaded && !item.webView.isHidden && !item.webView.isLoading &&
                     item.nextOrigin == nil && item.replacement == nil && !item.restoringWorkspace &&
                     url.map { self.isLocal($0, at: item.documentOrigin) } == true && item.documentOrigin != nil
                 return ["id": item.id, "origin": origin as Any, "ready": ready]
