@@ -337,6 +337,7 @@ async function captureMatrix(browser, report) {
               });
               record.theme = await page.locator("html").getAttribute("data-theme");
               assert.equal(record.theme, colorScheme);
+              assert(!record.pageErrors?.length, record.pageErrors?.join("\n"));
               await page.screenshot({path: join(output, name), animations: "disabled", caret: "hide"});
               record.status = "captured";
             } catch (error) {
@@ -597,6 +598,13 @@ async function attentionReceipts(page, fixture, key, clear, expectedResponse) {
     response.request().postDataJSON()?.seen === true);
   if (read) void read.catch(() => {});
   await openConversation(page, fixture, thread);
+  if (key === "approval") {
+    const request = page.locator("#requests section.request");
+    await expectContains(request.locator("pre"), "inspect gauge-reference.txt");
+    await request.getByRole("button", {name: "Allow once"}).waitFor({state: "visible"});
+    await request.getByRole("button", {name: "Decline", exact: true}).waitFor({state: "visible"});
+  }
+  if (key === "blocking") await shown(page, `#thread-asks .ask-row[data-id="${fixture.asks.blocking}"]`);
   if (read) assert((await read).ok());
   const {body: after} = await getBrowserAPI(fixture, "threads/" + thread.id);
   assert.equal(after.needs_attention, !clear, JSON.stringify({
