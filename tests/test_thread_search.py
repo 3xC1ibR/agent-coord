@@ -446,13 +446,14 @@ class SearchExecutionTests(unittest.TestCase):
                 caller_statements = [sql for sql in statements if not sql.lstrip().startswith("--")]
                 candidate_statements = [sql for sql in caller_statements if
                     sql.startswith("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('conversation_substring_parts'")
+                    or sql.startswith("SELECT term, doc FROM conversation_substring_vocabulary")
                     or sql.startswith("SELECT json_group_array(source),COUNT(*) FROM (")]
                 candidate_counts[query] = len(candidate_statements)
                 counts[query, len(page["items"])] = len(caller_statements) - len(candidate_statements)
-        # The indexed branch adds exactly one schema check and one batched
-        # candidate query. All other work retains the previous fixed bound,
+        # The indexed branch adds a schema check, a batched frequency lookup
+        # and a batched candidate query. Other work retains the fixed bound,
         # independent of how many conversations and messages match.
-        indexed_count = 2 if supported else 1
+        indexed_count = 3 if supported else 1
         self.assertEqual(candidate_counts, {"radio": indexed_count, "alarm": indexed_count,
                                             "x": 0, "zzzz": indexed_count})
         self.assertEqual(len(set(counts.values())), 1, counts)

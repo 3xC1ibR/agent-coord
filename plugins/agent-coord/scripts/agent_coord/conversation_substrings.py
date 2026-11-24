@@ -98,6 +98,8 @@ def ensure_schema(store):
             for statement in _TABLES.values():
                 db.execute(statement)
             db.execute(_FTS)
+            db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS conversation_substring_vocabulary
+                USING fts5vocab(conversation_substring_terms, row)""")
             # Never let one insertion initiate an unbounded crisis merge.
             # Explicit page-budget merges below maintain the index instead.
             db.execute("INSERT INTO conversation_substring_terms(conversation_substring_terms,rank) VALUES('automerge',0)")
@@ -371,17 +373,27 @@ def backfill_steps(store):
 
 def candidates(db, terms, measurement):
     """Return candidate keys, or None for a complete unsupported/short fallback."""
-    grams = sorted({term[-3:] for term in terms if len(term) >= 3 and "\0" not in term})
-    if not grams:
+    term_grams = [{term[offset:offset + 3] for offset in range(len(term) - 2)}
+                  for term in terms if len(term) >= 3 and "\0" not in term]
+    if not term_grams:
         measurement["short_query_fallbacks"] = 1
         return None
-    names = (*_TABLES, "conversation_substring_terms")
+    names = (*_TABLES, "conversation_substring_terms", "conversation_substring_vocabulary")
     ready = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name IN (" + ",".join("?" * len(names)) + ")", names).fetchone()[0]
     if ready != len(names):
         measurement["unavailable_query_fallbacks"] = 1
         return None
-    queries = _json(['"' + gram.replace('"', '""') + '"' for gram in grams])
+    # Common suffixes such as "ion" select most of an archive. Choose the
+    # least frequent necessary trigram of each keyword in this read snapshot.
+    # Frequency affects selectivity only: every exact match contains every
+    # chosen gram, including matches spanning indexed parts. An absent gram
+    # excludes indexed sources; incomplete sources still use the exact path.
     try:
+        frequencies = dict(db.execute("""SELECT term, doc FROM conversation_substring_vocabulary
+            WHERE term IN (SELECT value FROM json_each(?))""", (_json(sorted(set.union(*term_grams))),)))
+        grams = sorted({min(options, key=lambda gram: (frequencies.get(gram, 0), gram))
+                        for options in term_grams})
+        queries = _json(['"' + gram.replace('"', '""') + '"' for gram in grams])
         packed, count = db.execute("""SELECT json_group_array(source),COUNT(*) FROM (
             SELECT source FROM (SELECT DISTINCT p.source,q.value FROM json_each(?) q
                 CROSS JOIN conversation_substring_terms f JOIN conversation_substring_parts p ON p.id=f.rowid
