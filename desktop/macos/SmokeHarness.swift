@@ -60,8 +60,37 @@ extension AppDelegate {
 
     func recordSmokeQuit() {
         guard let started = smoke.quitRequestedAt else { return }
+        smoke.results["quit_action_monotonic_ns"] = started
         smoke.results["quit_milliseconds"] = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
         writeSmokeReport(error: nil)
+    }
+
+    private func smokeVisibleWindows() -> Int? {
+        guard let visible = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return nil }
+        let numbers = Set(windows.map { $0.window.windowNumber })
+        return visible.filter {
+            guard let number = $0[kCGWindowNumber as String] as? Int else { return false }
+            return $0[kCGWindowOwnerPID as String] as? Int == Int(getpid()) && numbers.contains(number)
+        }.count
+    }
+
+    func addRestorationSmokeScript(to controller: WKUserContentController, item: DesktopWindow) {
+        guard CommandLine.arguments.contains("--smoke-window-restoration"),
+              URL(string: item.launchRoute)?.fragment == "new-session" else { return }
+        controller.addUserScript(WKUserScript(source: """
+            const smokeFetch = window.fetch;
+            window.agentCoordSmokeDelayedModelReads = 0;
+            window.fetch = function (request, ...options) {
+                const url = new URL(request.url || request, location.href);
+                if (url.origin === location.origin && url.pathname === '/api/browser/models') {
+                    ++window.agentCoordSmokeDelayedModelReads;
+                    return new Promise(resolve => setTimeout(resolve, 25000))
+                        .then(() => smokeFetch.call(this, request, ...options));
+                }
+                return smokeFetch.call(this, request, ...options);
+            };
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
     // Native smoke mode uses a disposable database and preference domain. It
@@ -2010,6 +2039,10 @@ extension AppDelegate {
                         arguments: ["thread": (record["threads"] as! [String])[0], "text": index == 0 ? "background draft" : "beta conversation draft"])
                     try smokeCheck("restore_background_draft_\(index)", background as? Bool == true)
                 }
+                if index == 1 {
+                    let delayed = try await smokeJS("return (window.agentCoordSmokeDelayedModelReads || 0) > 0;", in: item.webView)
+                    try smokeCheck("restore_new_session_with_delayed_models", delayed as? Bool == true)
+                }
                 if index == 2 {
                     let extra = try await smokeJS("return agentCoordDesktop.conversationWindow && document.querySelector('#message').selectionStart === 2 && document.querySelector('#message').selectionEnd === 7 && state.attachments.items()[0]?.name === 'pixel.png' && Math.abs(state.timelineScroll.position() - 240) < 3;", in: item.webView)
                     try smokeCheck("restore_auxiliary_draft_image_scroll", extra as? Bool == true)
@@ -2228,11 +2261,14 @@ extension AppDelegate {
 
     func finishSmoke(error: String?) {
         guard smoke.report != nil, !quitting else { return }
+        let observesQuit = error == nil && CommandLine.arguments.contains("--smoke-observe-origins")
+        if observesQuit { smoke.results["quit_window_numbers"] = windows.map { $0.window.windowNumber } }
         writeSmokeReport(error: error)
         // Terminate outside the Swift task/GCD callback. AppKit's deferred
         // termination loop must remain able to drain main-queue cleanup work.
         RunLoop.main.perform {
-            if error == nil && CommandLine.arguments.contains("--smoke-observe-origins") {
+            if observesQuit {
+                self.smoke.results["quit_window_server_before"] = self.smokeVisibleWindows() ?? -1
                 self.smoke.quitRequestedAt = DispatchTime.now().uptimeNanoseconds
             }
             NSApp.sendAction(#selector(NSApplication.terminate(_:)), to: NSApp, from: nil)

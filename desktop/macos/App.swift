@@ -691,8 +691,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 .flatMap { String(data: $0, encoding: .utf8) }
             DispatchQueue.main.async {
                 if let item = item, let json = json, item.workspaceVersion == version {
+                    let firstSnapshot = item.workspaceJSON == nil
                     item.workspaceJSON = json
-                    self?.scheduleWindowSave()
+                    if firstSnapshot { self?.saveWindowSet() }
+                    else { self?.scheduleWindowSave() }
                 }
                 completion?()
             }
@@ -715,9 +717,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 item.restoredWorkspace = nil
             } else {
                 // Keep the snapshot available for a later Reload/retry.
-                var transfer = snapshot
-                transfer["originTransfer"] = true
-                item.restoredWorkspace = transfer
+                item.restoredWorkspace = snapshot
                 NSLog("Could not restore Ribbon Field window state; retaining its saved workspace.")
             }
             self?.scheduleWindowSave()
@@ -1039,6 +1039,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
+        #if RIBBON_SMOKE_HARNESS
+        if let item = item(for: webView) { addRestorationSmokeScript(to: controller, item: item) }
+        #endif
         if let composer = try? String(contentsOf: resources.appendingPathComponent("backend/agent_coord/web/composer-drafts.js"), encoding: .utf8) {
             controller.addUserScript(WKUserScript(source: composer, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
@@ -1098,7 +1101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     if let item = item { self?.resumeOriginalDocument(in: item, navigation: replacement.navigation) }
                     return
                 }
-                item.restoredWorkspace = snapshot
+                var transfer = snapshot
+                transfer["originTransfer"] = true
+                item.restoredWorkspace = transfer
                 item.restorationAttempted = false
                 self.acceptWorkspaceState(snapshot, for: item)
                 self.configureScripts(webView)
@@ -1519,6 +1524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 if allowed {
                     self.checkingQuit = false
                     self.quitting = true
+                    for item in self.windows { item.window.orderOut(nil) }
                     self.backend.detach()
                     // Release before Sparkle launches the replacement desktop.
                     if self.lockFile >= 0 { flock(self.lockFile, LOCK_UN); close(self.lockFile); self.lockFile = -1 }

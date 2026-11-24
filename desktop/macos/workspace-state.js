@@ -84,7 +84,7 @@
     const imageIds = new Map();
     let compatibilityStore, storageFailed = false;
     const compatibilityImages = new Map(), changedComposers = new Set();
-    const touched = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
+    const touched = new Set(), checkpointedComposers = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
     const currentState = () => { try { return getState(); } catch { return null; } };
     const currentViews = () => { try { return getViews(); } catch { return null; } };
     const currentNavigation = () => { try { return getNavigation(); } catch { return null; } };
@@ -158,6 +158,12 @@
           if (id && event.target?.id === "message") {
             const text = event.target.value;
             persistCompatibility(id, {text, mentions: s?.mentions?.snapshot(id, text) || []});
+            if (composerStore() && !checkpointedComposers.has(id)) {
+              checkpointedComposers.add(id);
+              // The first edit can immediately precede Quit. Save selection
+              // and routing metadata after this input event's handlers settle.
+              view.setTimeout(flush, 0);
+            }
           }
           if (event.target?.id?.startsWith("send-work-")) touched.add("send-work");
         }
@@ -498,7 +504,17 @@
           pairs(view.agentCoordPanes?.records).some(([, record]) => record.api?.canTransfer?.() === false &&
             !record.frame?.contentDocument?.querySelector("dialog[open]")));
       },
-      ready() { ready = true; installHooks(); if (!pending) { restored = true; changed(); } }};
+      ready() {
+        ready = true;
+        installHooks();
+        if (!pending) {
+          restored = true;
+          // Save the window's composer identities before an early Quit can
+          // leave its independently committed drafts without a window index.
+          if (composerStore()) flush();
+          else changed();
+        }
+      }};
   }
   const api = {create, usefulStorageKey};
   if (typeof module !== "undefined" && module.exports) module.exports = api;

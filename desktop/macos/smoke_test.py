@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -36,10 +37,67 @@ def read_window_origins(address: Path, expected_pid: int) -> list:
     return json.loads(data)["windows"]
 
 
-def observe_window_moves(app, address, deadline):
+class WindowServerObserver:
+    def __init__(self):
+        self.graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        self.foundation = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        pointer, index = ctypes.c_void_p, ctypes.c_long
+        self.owner_key = pointer.in_dll(self.graphics, "kCGWindowOwnerPID")
+        self.number_key = pointer.in_dll(self.graphics, "kCGWindowNumber")
+        self._signature(self.graphics.CGWindowListCopyWindowInfo, [ctypes.c_uint32, ctypes.c_uint32], pointer)
+        self._signature(self.foundation.CFArrayGetCount, [pointer], index)
+        self._signature(self.foundation.CFArrayGetValueAtIndex, [pointer, index], pointer)
+        self._signature(self.foundation.CFDictionaryGetValue, [pointer, pointer], pointer)
+        self._signature(self.foundation.CFNumberGetValue, [pointer, index, pointer], ctypes.c_bool)
+        self._signature(self.foundation.CFRelease, [pointer], None)
+
+    @staticmethod
+    def _signature(function, arguments, result):
+        function.argtypes, function.restype = arguments, result
+
+    def _integer(self, dictionary, key):
+        number = self.foundation.CFDictionaryGetValue(dictionary, key)
+        value = ctypes.c_int64()
+        if number and self.foundation.CFNumberGetValue(number, 4, ctypes.byref(value)):
+            return value.value
+
+    def windows_present(self, pid, numbers):
+        # kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements.
+        windows = self.graphics.CGWindowListCopyWindowInfo(1 | 16, 0)
+        if not windows:
+            raise RuntimeError("WindowServer enumeration is unavailable")
+        try:
+            for index in range(self.foundation.CFArrayGetCount(windows)):
+                row = self.foundation.CFArrayGetValueAtIndex(windows, index)
+                if self._integer(row, self.owner_key) == pid and self._integer(row, self.number_key) in numbers:
+                    return True
+            return False
+        finally:
+            self.foundation.CFRelease(windows)
+
+
+def observe_window_moves(app, address, report, deadline):
     observations = set()
     last = None
-    while app.poll() is None and time.monotonic() < deadline:
+    windows_gone = None
+    observer = WindowServerObserver()
+    final_origin = address.parent / "observed-127.0.0.1"
+    while time.monotonic() < deadline:
+        if final_origin.exists():
+            if report.is_file():
+                result = json.loads(report.read_bytes())
+                if result.get("error"):
+                    break
+                numbers = set(result.get("quit_window_numbers", []))
+                if len(numbers) == 2 and not observer.windows_present(app.pid, numbers):
+                    windows_gone = time.monotonic_ns()
+                    break
+            elif app.poll() is not None:
+                break
+            time.sleep(.004)
+            continue
+        if app.poll() is not None:
+            break
         try:
             windows = read_window_origins(address, app.pid)
         except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError, TimeoutError):
@@ -56,7 +114,7 @@ def observe_window_moves(app, address, deadline):
                     if host == "localhost" or host == "127.0.0.1" and (address.parent / "observed-localhost").exists():
                         (address.parent / ("observed-" + host)).touch()
         time.sleep(.025)
-    return observations
+    return observations, windows_gone
 
 
 def require_smoke_bundle(app: Path) -> None:
@@ -224,7 +282,7 @@ def main() -> int:
                 deadline = time.monotonic() + args.timeout
                 try:
                     if args.origins_only:
-                        observed = observe_window_moves(app, address, deadline)
+                        observed, windows_gone = observe_window_moves(app, address, report, deadline)
                     app.wait(timeout=max(0, deadline - time.monotonic()))
                 except subprocess.TimeoutExpired as error:
                     diagnostics.seek(max(0, diagnostics.seek(0, os.SEEK_END) - 4000))
@@ -251,9 +309,12 @@ def main() -> int:
             result = json.loads(report.read_text())
             if result.get("error"):
                 raise RuntimeError(result["error"])
-            quit_time = result.get("quit_milliseconds", float("inf"))
-            if quit_time >= 100:
-                raise RuntimeError(f"Ordinary Quit took {quit_time:.1f} ms (limit 100 ms)")
+            requested = result.get("quit_action_monotonic_ns")
+            if result.get("quit_window_server_before") != 2 or windows_gone is None or not requested:
+                raise RuntimeError("WindowServer did not observe both windows disappearing on ordinary Quit")
+            quit_time = (windows_gone - requested) / 1_000_000
+            if not 0 <= quit_time < 100:
+                raise RuntimeError(f"Ordinary Quit windows disappeared in {quit_time:.1f} ms (limit 100 ms)")
             if stopped(result["backend_pid"]):
                 raise RuntimeError("Ordinary Quit stopped the private runtime")
             window_set = json.loads((smoke_directory / "windows/state.json").read_text())
@@ -282,6 +343,8 @@ def main() -> int:
     if result.get("error"):
         raise RuntimeError(result["error"])
     if args.origins_only:
+        result["quit_windows_gone_milliseconds"] = quit_time
+        result["quit_window_server_remaining"] = 0
         port = urlsplit(result["url"]).port
         expected = {f"http://{host}:{port}/" for host in ("localhost", "127.0.0.1")}
         matching = {}
