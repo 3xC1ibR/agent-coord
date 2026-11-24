@@ -63,12 +63,8 @@ function startCreation(projectId, settings, text, images, mentions, quiet) {
   state.timelineScroll?.latest();
   return staged.then(() => continueCreation(projectId, intent), error => {
     if (intents.get(projectId) === intent) intents.delete(projectId);
-    if (state.newSessionDraft?.draftId === projectId && !input.value) {
-      state.drafts.set("new-session", text); input.value = text;
-      state.attachments?.drafts.set(projectId, images);
-      state.mentions?.restore(projectId, text, mentions);
-    }
-    throw error;
+    const rejected = {};
+    return repairComposerStage(projectId, row, rejected, error).then(() => { throw error; });
   });
 }
 
@@ -82,6 +78,7 @@ function continueCreation(projectId, intent) {
       throw new Error("Session creation requires a coordinator that can verify its original request.");
     }
     if (creation.receiptCapable) settings.requestId = row.requestId;
+    const previouslyUnconfirmed = intent.status === "uncertain";
     intent.status = "sending"; showCreationIntent(projectId, intent);
     let created;
     try {
@@ -90,11 +87,15 @@ function continueCreation(projectId, intent) {
         throw new Error("Session creation could not be confirmed.");
       intent.created = created;
     } catch (error) {
-      intent.status = submissionOutcomeUnknown(error) ? "uncertain" : "failed";
+      const denied = error.code === "workspace_access_denied" || error.status === 403 ||
+        error.status === 400 && error.message === "Work thread not found in this workspace.";
+      intent.status = submissionOutcomeUnknown(error) || previouslyUnconfirmed && denied ? "uncertain" : "failed";
       intent.error = error.message;
-      if (intent.status === "failed" && await state.durableDrafts.recover(projectId, row.requestId)) {
+      if (intent.status === "failed") {
+        const restored = await state.durableDrafts.recover(projectId, row.requestId);
+        if (!restored) await state.durableDrafts.acknowledge(projectId, row.requestId);
         state.creationIntents.delete(projectId);
-        if (state.newSessionDraft?.draftId === projectId) await restoreLocalDraft(projectId);
+        if (restored && state.newSessionDraft?.draftId === projectId) await restoreLocalDraft(projectId);
       }
       showCreationIntent(projectId, intent);
       throw error;

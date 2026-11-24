@@ -4808,7 +4808,7 @@ function setupConversationTransfer({state, document, select, goHome, renderStatu
       if (panes()?.active || state.dispatchDock?.active) goHome({restoreDispatcher: false});
       state.drafts.set(id, draft.text);
       state.attachments.drafts.set(id, draft.images || []);
-      (state.attachmentSnapshots ||= new Map()).set(id, state.attachments.drafts.get(id));
+      (state.attachmentSnapshots ||= new Map()).set(id, state.attachments.drafts.get(id).filter(image => image.url));
       state.mentions?.restore(id, draft.text, draft.mentions || []);
       const disclosures = Array.isArray(draft.disclosures) ? draft.disclosures : [];
       try { sessionStorage.setItem("timeline-disclosures:" + id, JSON.stringify(disclosures)); }

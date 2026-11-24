@@ -188,7 +188,7 @@ class ConversationPane {
     if (!draft) return;
     this.input.value = draft.text || "";
     this.workspace.attachments.drafts.set(this.id, draft.images || []);
-    (this.workspace.attachmentSnapshots ||= new Map()).set(this.id, this.workspace.attachments.drafts.get(this.id));
+    (this.workspace.attachmentSnapshots ||= new Map()).set(this.id, this.workspace.attachments.snapshot(this.id));
     this.workspace.mentions?.restore(this.id, this.input.value, draft.mentions || []);
     this.workspace.drafts.set(this.id, this.input.value);
     this.showImages();

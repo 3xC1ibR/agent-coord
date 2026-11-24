@@ -5,7 +5,12 @@
   const EXTENSIONS = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif"};
   const isImageURL = url => typeof url === "string" && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(url);
 
+  const pendingReads = new Set();
   class ChatImageAttachments {
+    static async drain() {
+      while (pendingReads.size) await Promise.allSettled(pendingReads);
+    }
+
     constructor({document, getThread, canAttach, onChange, onError, readFile}) {
       Object.assign(this, {document, getThread, canAttach, onChange, onError});
       this.drafts = new Map();
@@ -55,7 +60,7 @@
         const name = file.name && file.name.length <= 255 ? file.name : "Image." + mime.split("/")[1];
         const item = {name, url: null};
         this.drafts.set(id, [...items, item]);
-        reads.push(Promise.resolve().then(() => this.readFile(file)).then(result => {
+        const read = Promise.resolve().then(() => this.readFile(file)).then(result => {
           const encoded = String(result).split(",")[1] || "";
           const url = "data:" + mime + ";base64," + encoded;
           if (!isImageURL(url)) throw new Error("Could not read " + item.name + ". Try attaching it again.");
@@ -63,7 +68,9 @@
         }).catch(error => {
           this.remove(id, item);
           this.onError(error);
-        }).finally(() => this.onChange()));
+        }).finally(() => { pendingReads.delete(read); this.onChange(); });
+        pendingReads.add(read);
+        reads.push(read);
       }
       this.onChange();
       if (errors.length) this.onError(new Error([...new Set(errors)].join("\n")));

@@ -299,3 +299,56 @@ test("a browser without locks grants its scope only to the document following it
   const reload = open(first.store);
   assert.equal(await f.context.composerWindowScope(reload.view), id);
 });
+
+test("checkpoint persists the first decoded image while the second is pending and drains both file reads", async () => {
+  const f = environment(), first = deferred(), second = deferred(), saved = [];
+  f.context.composerDraftId = () => "one";
+  f.state.durableDrafts.write = async (id, patch) => {saved.push(patch.images.map(image => image.name));};
+  const images = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/image-attachments.js"), "utf8");
+  vm.runInContext(images, f.context);
+  f.state.attachments = new f.context.ChatImageAttachments({document: {}, getThread: () => "one", canAttach: () => true,
+    onChange: () => f.context.persistAttachmentChanges(), onError: assert.fail,
+    readFile: file => file.name === "a.png" ? first.promise : second.promise});
+  const adding = f.state.attachments.add(["a.png", "b.png"].map(name => ({name, type: "image/png", size: 2})));
+  first.resolve("data:image/png;base64,YQ=="); await tick();
+  assert.deepEqual(Array.from(saved[0]), ["a.png"]);
+  let drained = false;
+  const barrier = f.context.drainComposerWrites().then(() => {drained = true;});
+  await tick(); assert.equal(drained, false);
+  second.resolve("data:image/png;base64,Yg==");
+  await Promise.all([barrier, adding]);
+  assert.deepEqual(Array.from(saved.at(-1)), ["a.png", "b.png"]);
+});
+
+test("successful recovery of a failed local stage clears its obsolete exit error", async () => {
+  const f = environment(), gate = deferred(), writes = [];
+  f.discovery.resolve([]);
+  f.context.composerDraftId = () => "one";
+  f.state.durableDrafts.stage = () => gate.promise;
+  f.state.durableDrafts.write = async (id, draft) => {writes.push(draft);};
+  const sending = f.send("one", "first");
+  await tick(); f.input.value = "follow-up";
+  const draining = f.context.drainComposerWrites();
+  gate.reject(new Error("Temporary journal failure"));
+  await assert.rejects(sending, /Temporary journal failure/);
+  await draining;
+  assert.equal(writes.at(-1).text, "follow-up");
+  assert.deepEqual(f.effects, []);
+  assert.equal(f.state.composerWriteFailures.size, 0);
+});
+
+test("a definitive creation rejection retires A while preserving the newer project draft B", async () => {
+  const store = creationStore(), response = deferred();
+  const first = creationWindow(store, () => response.promise);
+  store.recover = async () => false;
+  first.input.value = "A";
+  const sending = first.context.sendSessionDraft("A", []);
+  await first.context.drainComposerWrites();
+  first.input.value = "B";
+  await store.write(first.projectId, {text: "B"});
+  response.reject(Object.assign(new Error("Invalid session settings"), {status: 400}));
+  await assert.rejects(sending, {status: 400});
+  assert.equal(first.input.value, "B"); assert.equal((await store.read(first.projectId)).text, "B");
+  assert.equal((await store.pending(first.projectId)).length, 0);
+  assert.equal(first.state.creationIntents.has(first.projectId), false);
+});

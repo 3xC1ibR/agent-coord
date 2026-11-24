@@ -98,9 +98,10 @@ function writeComposerRecord(id, write, field = "draft") {
 }
 
 async function drainComposerWrites() {
+  await globalThis.ChatImageAttachments?.drain?.();
   while (state.composerWrites?.size) {
     for (const proceed of state.composerPaints || []) proceed();
-    await Promise.all(state.composerWrites.values());
+    await Promise.allSettled(state.composerWrites.values());
   }
   const failed = state.composerWriteFailures?.values().next().value;
   if (failed) throw failed;
@@ -128,8 +129,9 @@ function persistComposer(id = composerDraftId(), fields = "text") {
 
 function persistAttachmentChanges() {
   const snapshots = state.attachmentSnapshots ||= new Map();
-  for (const [id, images] of state.attachments.drafts) {
-    if (!state.attachments.pending(id) && snapshots.get(id) !== images) {
+  for (const id of state.attachments.drafts.keys()) {
+    const images = state.attachments.snapshot(id), previous = snapshots.get(id) || [];
+    if (previous.length !== images.length || images.some((image, index) => image !== previous[index])) {
       snapshots.set(id, images);
       persistComposer(id, "images");
     }
@@ -138,6 +140,31 @@ function persistAttachmentChanges() {
     snapshots.delete(id);
     persistComposer(id, "images");
   }
+}
+
+// A rejected local stage has no provider effect. Persist whichever draft the
+// user can now edit, including edits made while the journal was unavailable.
+function repairComposerStage(id, row, echo, error) {
+  echo.localFailure = true;
+  state.outgoing.rejected(echo, error.message || String(error));
+  const pane = globalThis.agentCoordPanes?.records.get(id)?.api;
+  const selected = id === composerDraftId(), field = selected ? $("message") : null;
+  const savedProject = id.startsWith("new-session:") && state.projectDrafts?.get(id.slice("new-session:".length));
+  const current = pane?.exportDraft() || {text: field?.value ?? savedProject?.text ?? state.drafts.get(id) ?? "",
+    images: state.attachments?.snapshot(id) || [], mentions: []};
+  if (!current.text && !current.images.length) {
+    current.text = row.text; current.images = row.images; current.mentions = row.mentions;
+    if (savedProject && !selected) savedProject.text = current.text;
+    else state.drafts.set(selected ? state.selected : id, current.text);
+    if (field) field.value = current.text;
+    state.attachments?.drafts.set(id, current.images);
+    state.mentions?.restore(id, current.text, current.mentions);
+    pane?.restoreDraft(current);
+  } else if (!pane) current.mentions = state.mentions?.snapshot(id, current.text) || [];
+  updateOutgoing(id);
+  const recovered = writeComposerRecord(id, () => state.durableDrafts.write(id,
+    {text: current.text, images: current.images, mentions: current.mentions}));
+  return recovered.then(() => state.composerWriteFailures?.delete(JSON.stringify([id, row.requestId])));
 }
 
 function updateOutgoing(id) {
@@ -240,6 +267,7 @@ async function deliverComposerSubmission(id, row, echo, staged) {
       await state.durableDrafts?.acknowledge(id, row.requestId);
       return result;
     } catch (error) {
+      if (echo.localFailure) throw error;
       if (echo.acceptance || echo.transferReceipt) {
         await state.durableDrafts?.acknowledge(id, row.requestId);
         return {acceptedMessage: echo.acceptance, transferSubmission: echo.transferReceipt};
@@ -291,7 +319,9 @@ function submitComposerMessage({id, requestId = crypto.randomUUID(), text, image
   if (!live) discovering.set(id, live = new Map());
   live.set(requestId, {row, echo, staged});
   onStage?.(staged);
-  staged?.catch(() => {}); // The queue observes the failure when this write reaches its turn.
+  // Local recovery must run even if an earlier provider submission is still
+  // unconfirmed and this row has not reached the head of its network lane.
+  staged.catch(error => repairComposerStage(id, row, echo, error)).catch(showError);
   state.clearingSubmission = id;
   try { clear(); } finally { state.clearingSubmission = null; }
   updateOutgoing(id);
