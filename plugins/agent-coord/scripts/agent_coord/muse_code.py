@@ -100,12 +100,7 @@ class MuseConnection(ACPConnection):
         self.write({"method": "initialized"})
         return result
 
-    def close(self):
-        if self.closed:
-            return
-        super().close()
-        if not self.closed:
-            return
+    def _release_resources(self):
         if self.notifications:
             self.notifications.put(None)
         if self.dispatcher and self.dispatcher is not threading.current_thread():

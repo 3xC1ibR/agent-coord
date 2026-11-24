@@ -153,10 +153,7 @@ class AntigravityConnection(ACPConnection):
     def _consume_line(self, line):
         return self._authorization(line)
 
-    def close(self):
-        super().close()
-        if not self.closed:
-            return
+    def _release_resources(self):
         if self.temporary:
             self.temporary.cleanup()
         elif getattr(self, "resource_path", None):

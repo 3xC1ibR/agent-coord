@@ -318,6 +318,37 @@ class ACPProjectionTests(unittest.TestCase):
         self.assertEqual([required for _, required in writes], [True, False])
 
 
+    def test_event_close_preserves_waiters_resources_and_connection_on_rollback(self):
+        from concurrent.futures import Future
+        from pathlib import Path
+        for provider in ('kimi', 'antigravity', 'muse'):
+            with self.subTest(provider=provider):
+                adapter, connection = self.bind(provider)
+                future = connection.pending[99] = Future()
+                directory = Path(self.fixture.temporary.name) / provider
+                directory.mkdir()
+                resource = directory / 'configuration'
+                resource.write_text('retain until close commit')
+                connection.resource_path = str(directory)
+                def close_native(message):
+                    adapter.connections.pop(self.identity, None)
+                    connection.close()
+                connection.callback = close_native
+                event = self.event(self.projection.cursor + 1, {'method': 'native/failure'}, channel=provider)
+                with patch.object(self.projection, '_save', side_effect=RuntimeError('close rollback')):
+                    with self.assertRaisesRegex(RuntimeError, 'close rollback'):
+                        self.projection.project(event)
+                self.assertFalse(connection.closed)
+                self.assertFalse(future.done())
+                self.assertTrue(resource.exists())
+                self.assertIs(adapter.connections[self.identity], connection)
+                self.projection.project(event)
+                self.assertTrue(connection.closed)
+                self.assertTrue(future.done())
+                if provider in {'antigravity', 'muse'}:
+                    self.assertFalse(resource.exists())
+
+
 class ACPCancellationTests(unittest.TestCase):
     def test_cancel_waits_for_native_terminal_reply_before_close(self):
         import os
