@@ -106,6 +106,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Conversation asks | The asks view's rows above the composer, without the thread name: open asks only, with the Blocking flag in red on the row. Unfolded while an ask waits; the user's fold is kept per conversation. One ask shows in full, the first in order unless the user opens another by its title; the rest show title and meta. Folded, the summary line carries the blocking count and the first ask's title. No card, no heading: dividers and the summary line only |
 | Resolved asks in the side panel | A section of the thread context panel after the scratchpad: the panel's heading, then each resolution as its title, a muted outcome line (resolution, kind, time) and its answer or note. The ten most recent; a muted line says when earlier ones are in the asks view. Absent when the conversation has none |
 | Navigation toggle count | The sidebar entry's count pill on the corner of the navigation toggle, ringed in the paper colour, only while the navigation is closed (a phone, or a collapsed sidebar); red when an ask is blocking. The toggle's name and action do not change |
+| Agent Coord system row | A runtime-generated prompt (message delivery, subscription event, inbox wake, automatic continuation) in a conversation: one muted row in the tool-row grammar with an icon, "Agent Coord message from <sender>" or the prompt's title, its kind and time. Mouse hover or a tap opens a popover with the readable details; the exact prompt is a closed disclosure inside it. A prompt whose messages already have cards is not shown; each card keeps it as a closed Delivered prompt disclosure |
 | Title band | Mac workspace windows: native window controls centered on the project tab labels; the sidebar, a collapsed header and the compact header start clear of them |
 
 ## Do's and Don'ts
@@ -148,6 +149,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-24 | Runtime-generated prompts render as Agent Coord system rows with a popover, or fold into the matching message card | Deliveries and subscription events appeared as user bubbles of raw JSON beside their own cards; they are not the user's words |
 | 2026-11-22 | Upcoming chat prompts use a clock in the header and the existing details dialog | Keep the conversation readable while preserving prompt details and scheduling actions |
 | 2026-11-22 | Every ask has a reply field in view; resolved asks leave the conversation for its side panel | The owner had to copy an ask by hand to say something its buttons did not offer, and wanted no ask history above the composer. The earlier Add note control hid the only free text behind a click. |
 | 2026-11-22 | A conversation shows its own asks above its composer, and the navigation toggle carries the open count while the navigation is closed | The owner could not see a thread's asks in the thread, and on a phone the count was inside the drawer. Both are views of existing asks built from the asks view's rows and count, in the existing `asks.js` and `asks.css`. |

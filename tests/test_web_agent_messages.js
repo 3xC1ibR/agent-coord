@@ -8,12 +8,13 @@ const source = fs.readFileSync(require.resolve('../plugins/agent-coord/scripts/a
 const sample = values => ({id: 7, direction: 'received', created_at: 1234567890, body: '<script>alert(1)</script>',
   counterpart: {session_id: 'peer id', title: '<b>Validator</b>', available: true}, status: 'Queued for agent', ...values});
 function element(tag) {
-  return {tag, children: [], dataset: {}, append(...nodes) { this.children.push(...nodes); },
-    setAttribute(key, value) { this[key] = value; }};
+  return {tag, children: [], dataset: {}, style: {}, listeners: {}, append(...nodes) { this.children.push(...nodes); },
+    setAttribute(key, value) { this[key] = value; }, addEventListener(type, listener) { this.listeners[type] = listener; }};
 }
 const document = {createElement: element};
-const text = node => [node.textContent || '', ...(node.children || []).map(text)].join(' ');
-const descendants = node => [node, ...node.children.flatMap(descendants)];
+// Element.append also accepts strings.
+const text = node => typeof node === 'string' ? node : [node.textContent || '', ...(node.children || []).map(text)].join(' ');
+const descendants = node => typeof node === 'string' ? [] : [node, ...node.children.flatMap(descendants)];
 const withClass = (node, name) => descendants(node).find(n => n.className === name);
 
 test('watchdog preview shows outstanding work and queue age while disclosure preserves the receipt', () => {
@@ -222,4 +223,116 @@ test('live turn-start events retain timing before the first streamed user item',
   context.applyEvent({method:'item/completed',params:{threadId:'thread',turnId:'new',turnStartedAt:200,
     item:{id:'new-user',type:'userMessage',timelineAt:200}}});
   assert.deepEqual(visibleOrder(state.detail.thread.turns,state.detail.coordinationMessages),['old-user','card-1','new-user']);
+});
+
+const DELIVERY = '[Automatic Agent Coord message delivery — not a human message]\nHandle the coordination messages supplied here. ' +
+  'If their bodies are missing, retrieve them with agent-coord inbox --unread. Delivery receipts are automatic. Reply only when reply_required=true.';
+const userItem = text => ({type: 'userMessage', content: [{type: 'text', text}]});
+const delivery = (...entries) => userItem(DELIVERY + '\n' + entries.map(entry => JSON.stringify(entry)).join('\n'));
+const request = {id: 36798, sender_session_id: 'adjutant', sender_name: 'Adjutant', classification: 'action_required',
+  thread_id: 'app-agent-request:stoic-share', reply_required: true, body: 'Save links to **Stoic** from the share sheet.'};
+const eventBody = JSON.stringify({event: 'subscription_matched', subscription_id: 'sub-1', mode: 'all', target: 'all',
+  outcomes: [{kind: 'turn', session_id: 'worker', turn_id: 't1', state: 'completed',
+    checkpoint: {phase: 'validation', summary: 'Share sheet saves links.'}}],
+  continuation: 'Review the result.', meaning: 'Turn completion is not assignment completion.'});
+const event = {id: 36860, sender_session_id: 'me', sender_name: 'Me', classification: 'action_required',
+  thread_id: 'event:sub-1:all', reply_required: false, body: eventBody};
+
+test('runtime-generated prompt families are recognized and human text is not', () => {
+  const message = AgentMessages.automaticPrompt(delivery(request));
+  assert.equal(message.kind, 'delivery');
+  assert.deepEqual(message.entries.map(e => e.id), [36798]);
+  assert.equal(AgentMessages.automaticPrompt(delivery(event)).kind, 'event');
+  assert.equal(AgentMessages.automaticPrompt(delivery(request, event)).kind, 'delivery');
+  assert.equal(AgentMessages.automaticPrompt(userItem(DELIVERY)).kind, 'wake', 'body-free browser delivery');
+  assert.equal(AgentMessages.automaticPrompt(userItem('Check and handle your unread agent-coord messages.')).kind, 'wake');
+  assert.equal(AgentMessages.automaticPrompt(userItem('Automatic agent-message delivery. Handle the coordination messages supplied with this turn. ' +
+    'If their bodies are missing, retrieve them with agent-coord inbox --unread.')).kind, 'wake');
+  const continuation = AgentMessages.automaticPrompt(userItem('[Automatic continuation after a Ribbon Field backend update]\n' +
+    'Continue the unfinished assignment from the saved conversation.'));
+  assert.equal(continuation.kind, 'automatic');
+  assert.equal(continuation.title, 'Automatic continuation after a Ribbon Field backend update');
+  for (const text of [DELIVERY + '\n' + JSON.stringify(request) + '\nAnd also fix the build.', 'Please fix the build.',
+    '[Automatic continuation after a Ribbon Field backend update]', DELIVERY.split('\n')[0] + '\nMy own words',
+    DELIVERY + '\n{"id": "not a number"}'])
+    assert.equal(AgentMessages.automaticPrompt(userItem(text)), null, text);
+  assert.equal(AgentMessages.automaticPrompt({type: 'agentMessage', text: DELIVERY}), null);
+});
+
+test('a prompt whose messages all have cards is folded into those cards', () => {
+  const prompt = AgentMessages.automaticPrompt(delivery(request, event));
+  assert.ok(AgentMessages.represented(prompt, {id: 't'}, [sample({id: 36798}), sample({id: 36860})]));
+  assert.equal(AgentMessages.represented(prompt, {id: 't'}, [sample({id: 36798})]), false, 'a missing card keeps the row');
+  assert.equal(AgentMessages.represented(prompt, {id: 't'}, []), false);
+  const wake = AgentMessages.automaticPrompt(userItem('Check and handle your unread agent-coord messages.'));
+  assert.ok(AgentMessages.represented(wake, {id: 'wake'}, [sample({started_turn: true, wake_turn_id: 'wake'})]));
+  assert.equal(AgentMessages.represented(wake, {id: 'other'}, [sample({started_turn: true, wake_turn_id: 'wake'})]), false);
+  const item = delivery(request);
+  const prompts = AgentMessages.deliveredPrompts([{id: 't', items: [userItem('Human words'), item]}]);
+  assert.deepEqual([...prompts.keys()], [36798]);
+  const card = AgentMessages.card(document, sample({id: 36798, body: request.body}), {prompt: prompts.get(36798)});
+  const raw = withClass(card, 'agent-message-raw');
+  assert.equal(raw.tag, 'details');
+  assert.equal(raw.open, undefined, 'the exact prompt is never the default view');
+  assert.equal(raw.children[0].textContent, 'Delivered prompt');
+  assert.equal(raw.children[1].textContent, item.content[0].text);
+  assert.equal(withClass(AgentMessages.card(document, sample({})), 'agent-message-raw'), undefined);
+});
+
+test('subscription event cards read as outcomes with the JSON folded away', () => {
+  const card = AgentMessages.card(document, sample({...event, direction: 'sent'}), {titleOf: id => id === 'worker' ? 'Share sheet worker' : null});
+  const preview = withClass(card, 'agent-message-preview').textContent;
+  assert.equal(preview, 'Subscription matched · Share sheet worker · completed. Share sheet saves links.');
+  const body = withClass(card, 'agent-message-body');
+  assert.match(text(body), /Share sheet worker.*completed · validation.*Share sheet saves links.*Review the result/s);
+  const raw = withClass(body, 'agent-message-raw');
+  assert.equal(raw.children[0].textContent, 'Event JSON');
+  assert.equal(raw.children[1].textContent, eventBody);
+  const timeout = JSON.stringify({event: 'subscription_timeout', outcomes: []});
+  assert.equal(withClass(AgentMessages.card(document, sample({...event, body: timeout})), 'agent-message-preview').textContent, 'Subscription timed out');
+  const unparsed = withClass(AgentMessages.card(document, sample({...event, body: '{broken'})), 'agent-message-preview').textContent;
+  assert.equal(unparsed, '{broken', 'unrecognized event text is shown as written');
+});
+
+test('uncarded prompts become a marked system row whose popover holds readable details and the exact prompt', () => {
+  const item = delivery(request);
+  const row = AgentMessages.promptRow(document, AgentMessages.automaticPrompt(item), {time: element('time')});
+  assert.equal(row.className, 'agent-coord-row');
+  const trigger = withClass(row, 'agent-coord-row-trigger');
+  assert.equal(trigger.tag, 'button');
+  assert.equal(text(withClass(trigger, 'agent-coord-row-title')).replace(/\s+/g, ' ').trim(), 'Agent Coord message from Adjutant');
+  assert.equal(withClass(trigger, 'agent-coord-row-detail').textContent, 'Reply requested');
+  assert.match(trigger['aria-label'], /^Agent Coord message from Adjutant · Reply requested/);
+  const panel = withClass(row, 'agent-coord-popover');
+  assert.equal(panel.hidden, true);
+  assert.match(text(panel), /Adjutant.*Action required · Reply requested · Exchange app-agent-request:stoic-share/s);
+  assert.equal(withClass(panel, 'agent-coord-body plain').textContent, request.body, 'bodies stay literal text without the renderer');
+  assert.equal(withClass(panel, 'agent-message-raw').children[1].textContent, item.content[0].text);
+  trigger.onclick({});
+  assert.equal(panel.hidden, false); assert.equal(trigger['aria-expanded'], 'true');
+  row.listeners.pointerleave({pointerType: 'mouse'});
+  assert.equal(panel.hidden, false, 'a tapped or clicked popover stays open when the pointer leaves');
+  trigger.onclick({});
+  assert.equal(panel.hidden, true); assert.equal(trigger['aria-expanded'], 'false');
+  const titles = kind => text(withClass(AgentMessages.promptRow(document, AgentMessages.automaticPrompt(kind)), 'agent-coord-row-title')).trim();
+  assert.equal(titles(delivery(event)), 'Agent Coord event');
+  assert.equal(titles(userItem('Check and handle your unread agent-coord messages.')), 'Agent Coord inbox wake');
+  assert.equal(titles(userItem('[Automatic continuation after a Ribbon Field backend update]\nContinue.')),
+    'Automatic continuation after a Ribbon Field backend update');
+  const several = AgentMessages.promptRow(document, AgentMessages.automaticPrompt(delivery(request, {...request, id: 2, sender_name: 'Validator', reply_required: false})));
+  assert.equal(text(withClass(several, 'agent-coord-row-title')).replace(/\s+/g, ' ').trim(), 'Agent Coord messages from Adjutant and 1 more');
+  const large = {...request, body: undefined, body_chars: 24000, retrieve: 'agent-coord message --message-id 36798 --offset 0'};
+  delete large.body;
+  assert.match(text(AgentMessages.promptRow(document, AgentMessages.automaticPrompt(delivery(large)))), /24,000-character body was not included/);
+});
+
+test('the timeline folds carded prompts, renders other automatic prompts as rows, and passes the exact prompt to cards', () => {
+  const start = source.indexOf('function renderTimeline(');
+  const body = source.slice(start, source.indexOf('\nfunction ', start + 10));
+  assert.match(body, /AgentMessages\.deliveredPrompts\(turns\)/);
+  assert.match(body, /prompt: deliveredPrompts\.get\(entry\.message\.id\)/);
+  assert.match(body, /AgentMessages\.represented\(automatic, turn, messages\)\) continue;/);
+  assert.match(body, /AgentMessages\.promptRow\(document, automatic/);
+  assert.ok(body.indexOf('AgentMessages?.automaticPrompt(item)') < body.indexOf('item.type === "userMessage" || item.type === "agentMessage"'),
+    'automatic prompts are handled before ordinary user messages');
 });

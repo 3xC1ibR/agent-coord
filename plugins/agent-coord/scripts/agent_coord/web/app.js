@@ -2269,6 +2269,10 @@ function renderTimeline() {
   const turns = globalThis.DispatchUI && (state.detail?.work_thread?.dispatcher || state.detail?.dispatchRequests?.length)
     ? DispatchUI.turns(sourceTurns, state.detail.dispatchRequests || []) : sourceTurns;
   const allEntries = messages.length ? AgentMessages.entries(turns, messages) : turns.map(turn => ({turn}));
+  // A card keeps the exact delivery prompt its agent received; the prompt itself is not repeated as a user message.
+  const deliveredPrompts = messages.length ? AgentMessages.deliveredPrompts(turns) : new Map();
+  const titleOf = id => state.sessions?.find(thread => thread.thread_id === id)?.title ||
+    messages.find(message => message.counterpart?.session_id === id)?.counterpart.title;
   const turnIndexes = new Map(turns.map((turn, index) => [turn, index]));
   const pendingForks = new Set(forkRelations(state.detail?.work_thread).map(relation =>
     ({...relation, boundary: forkBoundary(relation, turns)})));
@@ -2306,7 +2310,8 @@ function renderTimeline() {
   const disclosureListeners = conversation.disclosureListeners ||= new WeakSet();
   for (const entry of entries) {
     if (entry.message) {
-      fragment.append(AgentMessages.card(document, entry.message, {open: openAgentMessage, expanded: open.has("agent-message:" + entry.message.id)}));
+      fragment.append(AgentMessages.card(document, entry.message, {open: openAgentMessage, expanded: open.has("agent-message:" + entry.message.id),
+        prompt: deliveredPrompts.get(entry.message.id), titleOf}));
       continue;
     }
     const turn = entry.turn;
@@ -2321,7 +2326,19 @@ function renderTimeline() {
           dismiss: id => action(async () => { await api(sessionPath(state.selected) + "/dispatch", {id, action: "dismiss"}); await refreshDetail(); })}));
         continue;
       }
-      if (messages.length && AgentMessages.isWakePrompt(item, turn, messages)) continue;
+      const automatic = globalThis.AgentMessages?.automaticPrompt(item);
+      if (automatic && AgentMessages.represented(automatic, turn, messages)) continue;
+      if (automatic) {
+        // Runtime-generated prompts are system rows, not the user's words. Reuse
+        // the row across streaming renders so an open popover stays open.
+        const key = JSON.stringify(["automatic", turn.id ?? turns.indexOf(turn), item.id ?? (turn.items || []).indexOf(item)]);
+        const time = messageTimeLabel(item, turn), signature = JSON.stringify([item, time.outerHTML]);
+        const reused = previousMessages.get(key);
+        const row = reused?.signature === signature ? reused.node : AgentMessages.promptRow(document, automatic, {time, titleOf});
+        messageNodes.set(key, {signature, node: row});
+        fragment.append(row);
+        continue;
+      }
       if (item.type === "userMessage" || item.type === "agentMessage") {
         const time = messageTimeLabel(item, turn);
         const minute = time.dateTime?.slice(0, 16) ?? null;
