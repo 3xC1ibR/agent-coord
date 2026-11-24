@@ -38,6 +38,7 @@ class TranscriptStoreTests(unittest.TestCase):
         self.assertEqual(self.transcripts.read_full("thread"), self.history)
         page = self.transcripts.read_window("thread")
         self.assertEqual(page["beforeSeq"], 43)
+        self.assertEqual(json.loads(self.transcripts.read_window_json("thread")), page)
         self.assertEqual(len(page["turns"]), 40)
         self.assertTrue(page["turns"][0]["items"][0]["abridged"])
         second = self.transcripts.read_window("thread", before_seq=page["beforeSeq"])
@@ -160,10 +161,11 @@ class TranscriptStoreTests(unittest.TestCase):
         browser = object.__new__(BrowserSessions)
         browser.store = self.store
         browser.cwd = str(self.store.database_path.parent)
-        browser.reviews = SimpleNamespace(public_history=lambda identity, history: history)
+        browser.reviews = SimpleNamespace(public_history=lambda identity, history: history, list=lambda identity: [])
         self.assertEqual(browser.read_history_window("thread", turn_id="20", limit=5)["turns"][-1]["id"], "20")
         self.assertEqual(browser.read_history_turn("thread", "20"), self.history["turns"][20])
         self.assertIsNone(browser.read_history_window("thread", turn_id="missing"))
+        self.assertEqual(json.loads(browser.read_history_window_json("thread", limit=5)), browser.read_history_window("thread", limit=5))
         outside = str(self.store.database_path.parent.with_name(self.store.database_path.parent.name + "-outside"))
         with self.store._connection() as db:
             db.execute("CREATE TABLE browser_sessions(thread_id TEXT PRIMARY KEY, cwd TEXT)")

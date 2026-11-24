@@ -2578,6 +2578,17 @@ class BrowserSessions:
         window.update(earlierTurns=start, beforeSeq=start, totalTurns=len(turns))
         return self.reviews.public_history(thread_id, window)
 
+    def read_history_window_json(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
+        """HTTP page body; review-bearing histories retain their public projection."""
+        from .transcript_store import TranscriptStore, encode
+        self._authorize_history(thread_id)
+        if not self.reviews.list(thread_id):
+            body = TranscriptStore(self.store).read_window_json(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+            if body is not None:
+                return body
+        window = self.read_history_window(thread_id, before_seq=before_seq, limit=limit, turn_id=turn_id)
+        return encode(window) if window is not None else None
+
     def read_history_turn(self, thread_id, turn_id):
         from .transcript_store import TranscriptStore
         self._authorize_history(thread_id)

@@ -188,7 +188,7 @@ class TranscriptStore:
                     on_publish(db)
         return generation
 
-    def _read(self, thread_id, *, before_seq=None, limit=None, turn_id=None, full=False, require_active=True, with_checkpoint=False, target_turn=None):
+    def _read(self, thread_id, *, before_seq=None, limit=None, turn_id=None, full=False, require_active=True, with_checkpoint=False, target_turn=None, serialized=False):
         with self.store.reading(), self.store._connection() as db:
             db.execute("BEGIN")
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='transcript_generations'").fetchone():
@@ -220,6 +220,7 @@ class TranscriptStore:
             entries = list(reversed(db.execute(query, args).fetchall()))
         result = json.loads(row[2])
         result["turns"] = []
+        raw_turns = []
         if entries:
             column = 5 if full else 3
             path = self.directory(thread_id) / ("turns.full.jsonl" if full else "turns.compact.jsonl")
@@ -243,12 +244,18 @@ class TranscriptStore:
                         raw = data[entry[column]-start:entry[column]-start+entry[column+1]]
                         if full and hashlib.sha256(raw).hexdigest() != entry[7]:
                             raise ValueError("Transcript turn digest mismatch")
-                        result["turns"].append(json.loads(raw))
+                        if serialized:
+                            raw_turns.append(raw[:-1])
+                        else:
+                            result["turns"].append(json.loads(raw))
             finally:
                 os.close(fd)
         if not full:
             result.update(view="recent", earlierTurns=entries[0][1] if entries else 0,
                           beforeSeq=entries[0][1] if entries else None, totalTurns=row[3])
+        if serialized:
+            header = encode({key: value for key, value in result.items() if key != "turns"})[:-1]
+            return header + (b"," if header != b"{" else b"") + b'"turns":[' + b",".join(raw_turns) + b"]}"
         if with_checkpoint:
             return {"generation": row[1], "checkpoint": row[7], "source_instance": row[8] if len(row) > 8 else None, "history": result}
         return result
@@ -261,6 +268,12 @@ class TranscriptStore:
         if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
             raise ValueError("Invalid transcript window")
         return self._read(thread_id, before_seq=before_seq, limit=limit, target_turn=turn_id)
+
+    def read_window_json(self, thread_id, *, before_seq=None, limit=40, turn_id=None):
+        """Return pre-serialized compact JSON for a response without item parsing."""
+        if not 1 <= limit <= 200 or (before_seq is not None and before_seq < 0):
+            raise ValueError("Invalid transcript window")
+        return self._read(thread_id, before_seq=before_seq, limit=limit, target_turn=turn_id, serialized=True)
 
     def read_full(self, thread_id, *, require_active=True):
         return self._read(thread_id, full=True, require_active=require_active)
