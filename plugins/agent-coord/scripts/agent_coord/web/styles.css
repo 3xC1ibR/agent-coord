@@ -1139,8 +1139,7 @@ body.mobile-chat .mobile-chat-status:not(:is([data-status="running"], [data-stat
 body.mobile-chat .conversation .message:has(+ .turn-work),
 body.mobile-chat .conversation .turn-work { margin-bottom: var(--chat-message-padding); }
 body.mobile-chat .conversation .turn-work > summary { min-height: var(--chat-control-size); }
-body.mobile-chat .conversation .composer textarea { min-height: var(--chat-control-size); }
-body.mobile-chat .composer > .jump-to-latest-anchor { top: var(--mobile-chat-inset); inset-inline: var(--mobile-chat-inset); }
-body.mobile-chat .composer .jump-to-latest { top: 0; bottom: auto; right: 0; left: auto; transform: none; box-shadow: none; }
-body.mobile-chat .composer:has(.jump-to-latest:not([hidden])) #message { padding-inline-end: calc(var(--chat-control-size) + var(--chat-menu-gap)); }
+body.mobile-chat .conversation-controls > .jump-to-latest { position: static; transform: none; border: 0; border-radius: var(--response-action-radius); box-shadow: none; background: transparent; color: var(--muted); }
+.conversation .checkpoint-saved { display: block; margin-top: var(--chat-toolbar-gap); font-size: var(--chat-meta-size); line-height: var(--chat-message-leading); }
+.conversation .context-secondary:not(:has(#context-reuse > *)) { display: none; }
 body.mobile-chat .error { top: calc(var(--mobile-chat-header-height) + var(--mobile-chat-gap)); bottom: auto; }

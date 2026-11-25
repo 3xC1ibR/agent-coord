@@ -15,13 +15,14 @@ class MobileChat {
     this.media = view.matchMedia(`(max-width: ${pane ? 800 : 720}px), (max-width: 1100px) and (hover: none) and (pointer: coarse)`);
     this.dialog = this.$("mobile-thread-sheet");
     this.trigger = this.$("mobile-chat-actions");
+    this.jumpButton = this.$("jump-to-latest");
     this.panel = this.$("context-panel");
     this.actions = doc.querySelector(".session-actions");
     this.info = doc.querySelector(".session-statusbar");
     this.composerOptions = this.$("composer-options");
     this.sendWork = this.$("send-work-mobile-chat");
     this.origin = this.$("fork-origin");
-    this.homes = [this.actions, this.panel, this.info, this.composerOptions, this.sendWork, this.origin].map(element => {
+    this.homes = [this.actions, this.panel, this.info, this.composerOptions, this.sendWork, this.origin, this.jumpButton].map(element => {
       const marker = doc.createComment("mobile chat control position");
       element.before(marker);
       return {element, marker};
@@ -61,6 +62,7 @@ class MobileChat {
     this.close();
     this.doc.body.classList.toggle("mobile-chat", this.matches);
     if (this.matches) {
+      this.trigger.before(this.jumpButton);
       this.$("mobile-sheet-actions").append(this.actions);
       this.$("mobile-sheet-context").append(this.panel);
       this.$("mobile-sheet-info").append(this.info);

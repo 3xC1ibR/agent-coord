@@ -20,6 +20,7 @@ class Element {
   }
   before(marker) {
     const parent = this.parentElement;
+    marker.parentElement?.children.splice(marker.parentElement.children.indexOf(marker), 1);
     parent.children.splice(parent.children.indexOf(this), 0, marker); marker.parentElement = parent;
   }
   after(element) {
@@ -42,10 +43,11 @@ class Element {
 function setup(mobile = true, pane = false) {
   const ids = ["mobile-thread-sheet", "mobile-chat-actions", "context-panel", "mobile-chat-back", "mobile-show-context",
     "mobile-sheet-back", "mobile-sheet-actions", "mobile-sheet-context", "mobile-sheet-info", "mobile-sheet-title",
-    "thread-context", "conversation", "mobile-chat-status", "composer-options", "send-work-mobile-chat", "fork-origin", "mobile-sheet-composer", "message"];
+    "thread-context", "conversation", "mobile-chat-status", "composer-options", "send-work-mobile-chat", "fork-origin", "mobile-sheet-composer", "message", "jump-to-latest"];
   const elements = Object.fromEntries(ids.map(id => [id,new Element(id)]));
   const body = new Element("body"), header = new Element("header"), actions = new Element("actions"), info = new Element("info");
   body.append(header); header.append(actions); body.append(elements["context-panel"]); body.append(info);
+  header.append(elements["mobile-chat-actions"]); body.append(elements["jump-to-latest"]);
   elements["context-panel"].append(elements["thread-context"]);
   for (const id of ["mobile-sheet-actions","mobile-sheet-context","mobile-show-context","mobile-sheet-info"]) elements["mobile-thread-sheet"].append(elements[id]);
   for (const id of ["composer-options", "send-work-mobile-chat", "fork-origin"]) body.append(elements[id]);
@@ -214,4 +216,20 @@ test("the mobile dispatcher dock retains its own composer options", () => {
   assert.equal(options.parentElement, marker.parentElement, "Viewport changes preserve dock controls");
   s.chat.layoutComposer(false);
   assert.equal(options.parentElement, s.elements["mobile-sheet-composer"]);
+});
+
+test("latest navigation moves to the mobile header and restores its original desktop control", () => {
+  const s = setup(false), button = s.elements["jump-to-latest"];
+  const desktopParent = button.parentElement;
+  button.onclick = () => "latest"; button.hidden = true;
+  s.media.matches = true; s.media.change();
+  assert.equal(button.parentElement, s.header);
+  assert.equal(s.header.children.indexOf(button) + 1, s.header.children.indexOf(s.elements["mobile-chat-actions"]));
+  assert.equal(button.hidden, true);
+  button.hidden = false;
+  s.media.matches = false; s.media.change();
+  assert.equal(button.parentElement, desktopParent);
+  assert.equal(button.hidden, false);
+  assert.equal(button.onclick(), "latest");
+  assert.equal(s.header.children.includes(button), false);
 });

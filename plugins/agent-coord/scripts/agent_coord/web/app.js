@@ -1487,7 +1487,16 @@ function renderThread() {
     for (const entry of work.checkpoints) { const item = node("article", null, "checkpoint-entry"); item.append(node("small", entry.phase + " · " + new Date(entry.created_at * 1000).toLocaleString(), "muted"), node("p", entry.summary)); if (entry.next_action) item.append(node("p", "Next (" + entry.next_actor + "): " + entry.next_action)); history.append(item); }
     $("checkpoint-extras").append(history);
   }
-  if (checkpoint) $("checkpoint-extras").append(node("small", (checkpoint.author === "user" ? "Edited by you" : "Saved by agent") + " · " + new Date(checkpoint.refreshed_at * 1000).toLocaleString(), "muted"));
+  if (checkpoint) {
+    const savedAt = new Date(checkpoint.refreshed_at * 1000);
+    const author = checkpoint.author === "user" ? "Edited by you" : "Saved by agent";
+    const valid = Number.isFinite(savedAt.getTime());
+    const label = valid ? savedAt.toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+      ...(savedAt.getFullYear() !== new Date().getFullYear() ? {year: "numeric"} : {})}) : "Time unavailable";
+    const provenance = node("small", author + " · " + label, "muted checkpoint-saved");
+    if (valid) { provenance.title = savedAt.toLocaleString(); provenance.tabIndex = 0; }
+    $("checkpoint-extras").append(provenance);
+  }
   $("resume-browser").hidden = !work.can_resume || work.attention === "archived";
 }
 function renderTitle() {
