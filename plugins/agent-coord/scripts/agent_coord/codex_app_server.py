@@ -3088,16 +3088,24 @@ class BrowserSessions:
                 session_row = preflight_db.execute(
                     """SELECT b.*,
                               (SELECT attention FROM work_threads WHERE thread_id = b.thread_id) AS _thread_attention,
+                              (SELECT snoozed_until IS NOT NULL FROM work_threads WHERE thread_id = b.thread_id) AS _thread_snoozed,
                               (EXISTS (SELECT 1 FROM review_runs WHERE owner_id = b.thread_id AND state IN ('active', 'creating'))
                                OR EXISTS (SELECT 1 FROM review_runs WHERE critic_id = b.thread_id AND state IN ('active', 'creating'))) AS _has_active_review,
-                              EXISTS (SELECT 1 FROM review_steps WHERE actor_id = b.thread_id LIMIT 1) AS _has_review_steps
+                              EXISTS (SELECT 1 FROM review_steps WHERE actor_id = b.thread_id LIMIT 1) AS _has_review_steps,
+                              EXISTS (SELECT 1 FROM browser_inbox_wake w WHERE w.thread_id = b.thread_id
+                                      AND (w.paused != 0 OR w.dispatching != 0 OR w.error IS NOT NULL OR w.pause_kind IS NOT NULL
+                                           OR w.wake_message_id IS NOT NULL OR w.recovery_turn_id IS NOT NULL
+                                           OR w.retry_count != 0 OR w.retry_at IS NOT NULL OR w.paused_at IS NOT NULL
+                                           OR w.reconciled_turn_id IS NOT NULL OR w.recovery_after_message_id != 0)) AS _wake_dirty
                        FROM browser_sessions b WHERE b.thread_id = ?""",
                     (thread_id,),
                 ).fetchone()
             record = self._record_from_row(thread_id, session_row)
             thread_attention = record.pop("_thread_attention", None)
+            thread_snoozed = bool(record.pop("_thread_snoozed", 0))
             has_active_review = bool(record.pop("_has_active_review", 0))
             has_review_steps = bool(record.pop("_has_review_steps", 0))
+            wake_dirty = bool(record.pop("_wake_dirty", 0))
             if automatic:
                 # The wake worker has claimed the message durably. Closed is
                 # organization, while Stop/failure/queued user input remain gates.
@@ -3213,8 +3221,14 @@ class BrowserSessions:
                     with self.lock:
                         self.starting_notification_context.pop(thread_id, None)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
-                self._record_accepted_input(thread_id, turn_id, {"origin": "user", "owner_thread_id": thread_id},
-                                            user_input=True, publish_changed=True)
+                self._record_accepted_input(
+                    thread_id,
+                    turn_id,
+                    {"origin": "user", "owner_thread_id": thread_id},
+                    user_input=True,
+                    publish_changed=True,
+                    active_steer_clean=(thread_attention == "now" and not thread_snoozed and not wake_dirty),
+                )
                 if accepted_input is not None:
                     accepted_input["turnId"] = turn_id
                 return result
@@ -3286,12 +3300,44 @@ class BrowserSessions:
                 accepted_input["turnId"] = result["turn"]["id"]
             return result
 
-    def _apply_accepted_input_db(self, db, thread_id, turn_id, context, *, user_input, original_request=None):
-        self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
+    def _apply_accepted_input_db(
+        self,
+        db,
+        thread_id,
+        turn_id,
+        context,
+        *,
+        user_input,
+        original_request=None,
+        active_steer_clean=False,
+    ):
+        from .desktop_runtime import _OWNED_DATABASES
+        owned = self.store._database_identity in _OWNED_DATABASES
+        recorded_turns = getattr(self, "_recorded_user_turns", None)
+        if recorded_turns is None:
+            recorded_turns = self._recorded_user_turns = set()
+        turn_pair = (thread_id, turn_id)
+        if not (
+            owned
+            and active_steer_clean
+            and original_request is None
+            and context.get("origin") == "user"
+            and context.get("owner_thread_id") == thread_id
+            and turn_pair in recorded_turns
+        ):
+            self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
+            if context.get("origin") == "user" and context.get("owner_thread_id") == thread_id and turn_id:
+                if len(recorded_turns) >= 4096:
+                    recorded_turns.clear()
+                recorded_turns.add(turn_pair)
         now = self.store.clock()
         if user_input:
-            from .thread_control import cancel_pending
-            cancel_pending(db, thread_id, now)
+            pending_closes = getattr(self.store, "_pending_close_threads", None)
+            if not (owned and pending_closes is not None and thread_id not in pending_closes):
+                from .thread_control import cancel_pending
+                cancel_pending(db, thread_id, now)
+                if pending_closes is not None:
+                    pending_closes.discard(thread_id)
             if original_request is not None:
                 req = original_request.strip()[:100000]
                 auto_title = " ".join(req.split())[:100]
@@ -3306,22 +3352,41 @@ class BrowserSessions:
                          AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL) OR original_request = '')""",
                     (now, req, auto_title, thread_id),
                 )
-            else:
+            elif not (owned and active_steer_clean):
                 db.execute(
                     """UPDATE work_threads SET attention = 'now', snoozed_until = NULL, updated_at = ?
                        WHERE thread_id = ? AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL))""",
                     (now, thread_id),
                 )
-            self.inbox_wake.resume(thread_id, connection=db)
+            if owned and active_steer_clean:
+                self.inbox_wake.checked_pauses.pop(thread_id, None)
+            else:
+                self.inbox_wake.resume(thread_id, connection=db)
         db.execute("UPDATE browser_sessions SET updated_at=? WHERE thread_id=?", (time.time(), thread_id))
 
-    def _record_accepted_input(self, thread_id, turn_id, context, *, user_input, original_request=None, publish_changed=False):
+    def _record_accepted_input(
+        self,
+        thread_id,
+        turn_id,
+        context,
+        *,
+        user_input,
+        original_request=None,
+        publish_changed=False,
+        active_steer_clean=False,
+    ):
         # These state changes all describe the same provider acknowledgement.
         # Commit them together before publishing browser/changed.
         after = (lambda: self._publish("browser/changed", {"threadId": thread_id})) if publish_changed else None
         if self.submissions.defer_db_effect(
             lambda db: self._apply_accepted_input_db(
-                db, thread_id, turn_id, context, user_input=user_input, original_request=original_request
+                db,
+                thread_id,
+                turn_id,
+                context,
+                user_input=user_input,
+                original_request=original_request,
+                active_steer_clean=active_steer_clean,
             ),
             after_commit=after,
         ):
@@ -3330,7 +3395,13 @@ class BrowserSessions:
             self.store._writer.record_scope_search_thread(thread_id)
             db.execute("BEGIN IMMEDIATE")
             self._apply_accepted_input_db(
-                db, thread_id, turn_id, context, user_input=user_input, original_request=original_request
+                db,
+                thread_id,
+                turn_id,
+                context,
+                user_input=user_input,
+                original_request=original_request,
+                active_steer_clean=active_steer_clean,
             )
         if after is not None:
             after()

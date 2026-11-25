@@ -48,6 +48,12 @@ class ThreadControl:
             runtime_table = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'thread_control_runtimes'").fetchone()
             request_index = db.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'one_pending_thread_close'").fetchone()
             if "success_only" in columns and runtime_table is not None and request_index is not None:
+                queued = {row[0] for row in db.execute("SELECT thread_id FROM thread_close_requests WHERE status = 'queued'")}
+                existing = getattr(store, "_pending_close_threads", None)
+                if existing is None:
+                    store._pending_close_threads = queued
+                else:
+                    existing.update(queued)
                 return
             if db.execute("PRAGMA query_only").fetchone()[0]:
                 return
@@ -75,6 +81,12 @@ class ThreadControl:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(thread_close_requests)")}
             if "success_only" not in columns:
                 db.execute("ALTER TABLE thread_close_requests ADD COLUMN success_only INTEGER NOT NULL DEFAULT 0")
+            queued = {row[0] for row in db.execute("SELECT thread_id FROM thread_close_requests WHERE status = 'queued'")}
+        existing = getattr(store, "_pending_close_threads", None)
+        if existing is None:
+            store._pending_close_threads = queued
+        else:
+            existing.update(queued)
 
     def _is_closed(self, thread_id, thread):
         if thread["attention"] != "archived":
@@ -151,6 +163,9 @@ class ThreadControl:
                     (request_id, thread_id, turn_key, after_turn, success_only, status, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)""",
                     (request_id, thread_id, thread["turn_key"], int(after_turn), int(success_only), now, now))
+                pending_set = getattr(self.store, "_pending_close_threads", None)
+                if pending_set is not None:
+                    pending_set.add(thread_id)
         # An already-ended terminal needs no running provider to release its
         # declaration and close its thread. Browser archival belongs to its runtime.
         if thread["ended_at"] is not None and not self.store.threads.is_browser_session(thread_id):

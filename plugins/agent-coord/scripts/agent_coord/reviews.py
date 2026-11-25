@@ -78,6 +78,8 @@ class ReviewRuntime:
                 CREATE INDEX IF NOT EXISTS review_critic_active ON review_runs(critic_id)
                     WHERE state IN ('creating','active');
             """)
+            actors = {row[0] for row in db.execute("SELECT DISTINCT actor_id FROM review_steps")}
+        self._review_actors: set[str] = actors
 
     def _get(self, db, run_id):
         row = db.execute("SELECT * FROM review_runs WHERE id=?", (run_id,)).fetchone()
@@ -226,6 +228,7 @@ class ReviewRuntime:
             reply_required=False, now=self.store.clock())
         db.execute("INSERT INTO review_steps(run_id,stage,actor_id,message_id,draft_hash) VALUES (?,?,?,?,?)",
                    (run["id"], stage, actor, message["id"], run["draft_hash"]))
+        self._review_actors.add(actor)
         db.execute("UPDATE review_runs SET phase=? WHERE id=?", (stage, run["id"]))
 
     def bind(self, db, thread_id, turn_id):
@@ -254,6 +257,9 @@ class ReviewRuntime:
 
     def stage_for(self, thread_id, turn_id, *, pending=False):
         if not thread_id or not turn_id:
+            return None
+        from .desktop_runtime import _OWNED_DATABASES
+        if self.store._database_identity in _OWNED_DATABASES and thread_id not in self._review_actors:
             return None
         with self.store.reading(), self.store._connection() as db:
             row = db.execute("""SELECT s.* FROM review_steps s JOIN review_runs r ON r.id=s.run_id

@@ -194,8 +194,14 @@ def _thread_url(database: str, thread_id: str) -> str:
 
 @contextmanager
 def _readonly_state_connection(store):
+    from .desktop_runtime import _OWNED_DATABASES
+    owned = store._database_identity in _OWNED_DATABASES
     while True:
         with store.reading(), store._connection() as db:
+            cached_tables = getattr(store, "_search_owned_tables", None) if owned else None
+            if cached_tables is not None:
+                yield db, cached_tables
+                return
             if getattr(store, "_search_org_verified", False):
                 names, count_mismatch = db.execute(
                     """SELECT
@@ -222,6 +228,8 @@ def _readonly_state_connection(store):
                     store._search_org_verified = True
             tables = set(json.loads(names))
             if not organization_missing or store.read_only:
+                if owned and not organization_missing and len(tables) == 4:
+                    store._search_owned_tables = tables
                 yield db, tables
                 return
         store.threads.organization.backfill()
@@ -514,7 +522,15 @@ def _sync_unindexed_histories(store, db, tables: set[str], scope_ids: list[str])
     partial_ids = all_partial & scope_set
 
     # Legacy fallback for unmigrated browser_history rows in standalone tests.
-    if "browser_history" in tables and db.execute("SELECT 1 FROM browser_history LIMIT 1").fetchone() is not None:
+    from .desktop_runtime import _OWNED_DATABASES
+    owned = store._database_identity in _OWNED_DATABASES
+    if "browser_history" in tables and not (owned and getattr(store, "_search_legacy_history_empty", False)):
+        has_legacy = db.execute("SELECT 1 FROM browser_history LIMIT 1").fetchone() is not None
+        if not has_legacy and owned:
+            store._search_legacy_history_empty = True
+    else:
+        has_legacy = False
+    if has_legacy:
         remaining = [tid for tid in scope_ids if tid not in saved_ids and tid not in partial_ids]
         if remaining:
             indexed_ids = search.indexed_thread_ids()

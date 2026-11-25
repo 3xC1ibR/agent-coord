@@ -120,6 +120,9 @@ class SearchStore:
         self._reader_holders: list[_ReadConnectionHolder] = []
         self._indexed_turns = 0
         self._indexed_metadata = 0
+        self._deleted_threads = 0
+        self._query_cache_lock = threading.Lock()
+        self._query_cache: dict[tuple, dict[str, list[dict[str, Any]]]] = {}
         self._pending_tasks = 0
         self._idle_condition = threading.Condition()
         self._initialized = False
@@ -338,6 +341,7 @@ class SearchStore:
                 placeholders = ",".join("?" for _ in chunk)
                 db.execute(f"DELETE FROM search_fts WHERE rowid IN ({placeholders})", chunk)
             db.execute("DELETE FROM search_turns WHERE thread_id = ?", (thread_id,))
+            self._deleted_threads += 1
 
     # ------------------------------------------------------------------
     # Public non-blocking enqueue & synchronous batch APIs
@@ -441,6 +445,20 @@ class SearchStore:
     # Read-only FTS5 query API
     # ------------------------------------------------------------------
 
+    def _stat_signature(self) -> tuple[int, int, int, int]:
+        db_mtime = db_size = wal_mtime = wal_size = 0
+        try:
+            st = self.path.stat()
+            db_mtime, db_size = st.st_mtime_ns, st.st_size
+        except OSError:
+            pass
+        try:
+            wst = os.stat(f"{self.path}-wal")
+            wal_mtime, wal_size = wst.st_mtime_ns, wst.st_size
+        except OSError:
+            pass
+        return (db_mtime, db_size, wal_mtime, wal_size)
+
     def search_messages(
         self,
         terms: list[str],
@@ -452,6 +470,28 @@ class SearchStore:
         self._ensure_initialized()
         if not terms:
             return {}
+        allowed_key = frozenset(thread_ids) if thread_ids is not None else None
+        if allowed_key is not None and not allowed_key:
+            return {}
+        cache_key = (
+            self._stat_signature(),
+            self._indexed_turns,
+            self._indexed_metadata,
+            self._deleted_threads,
+            tuple(terms),
+            bool(user_only),
+            allowed_key if allowed_key is not None and len(allowed_key) <= 64 else None,
+        )
+        with self._query_cache_lock:
+            cached = self._query_cache.get(cache_key)
+        if cached is not None:
+            if allowed_key is None or len(allowed_key) <= 64:
+                return {tid: [dict(item) for item in hits] for tid, hits in cached.items()}
+            return {
+                tid: [dict(item) for item in hits]
+                for tid, hits in cached.items()
+                if tid in allowed_key
+            }
         fts_expr = _fts_phrase_query(terms, body_only=True)
         short_terms = [term for term in terms if len(term) < 3]
         params: list[Any] = []
@@ -483,23 +523,36 @@ class SearchStore:
             WHERE {' AND '.join(conditions)}
         """
         grouped: dict[str, list[dict[str, Any]]] = {}
+        store_all = allowed_filter is None or len(allowed_filter) <= 64
+        unfiltered: dict[str, list[dict[str, Any]]] = {} if not store_all else grouped
         with self._readonly_connection() as db:
             for row in db.execute(sql, params):
                 tid = row["thread_id"]
-                if allowed_filter is not None and tid not in allowed_filter:
-                    continue
                 role = "assistant" if row["is_assistant"] else "user"
-                grouped.setdefault(tid, []).append(
-                    {
-                        "turn_seq": row["turn_seq"],
-                        "turn_id": row["turn_id"] or f"search-turn-{row['turn_seq']}",
-                        "role": role,
-                        "timestamp": row["created_at"],
-                        "excerpt": row["excerpt"] or "",
-                        "folded_body": row["body"] or "",
-                        "bm25_score": float(row["rank_score"] or 0.0),
-                    }
-                )
+                entry = {
+                    "turn_seq": row["turn_seq"],
+                    "turn_id": row["turn_id"] or f"search-turn-{row['turn_seq']}",
+                    "role": role,
+                    "timestamp": row["created_at"],
+                    "excerpt": row["excerpt"] or "",
+                    "folded_body": row["body"] or "",
+                    "bm25_score": float(row["rank_score"] or 0.0),
+                }
+                if not store_all:
+                    unfiltered.setdefault(tid, []).append(entry)
+                    if allowed_filter is not None and tid not in allowed_filter:
+                        continue
+                    grouped.setdefault(tid, []).append(dict(entry))
+                else:
+                    if allowed_filter is not None and tid not in allowed_filter:
+                        continue
+                    grouped.setdefault(tid, []).append(entry)
+        with self._query_cache_lock:
+            if len(self._query_cache) >= 64:
+                self._query_cache.clear()
+            self._query_cache[cache_key] = {
+                tid: [dict(item) for item in hits] for tid, hits in unfiltered.items()
+            }
         return grouped
 
     def indexed_thread_ids(self) -> set[str]:
