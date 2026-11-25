@@ -2796,9 +2796,11 @@ function applyEvent(event) {
     renderTimeline();
   }
   if (method === "turn/completed") {
-    state.detail.running = false;
-    const turn = state.detail.thread.turns?.find(t => t.id === params.turn?.id);
+    state.detail.running = false; state.detail.activeTurn = null;
+    const turns = state.detail.thread.turns ||= [];
+    const turn = turns.find(t => t.id === params.turn?.id);
     if (turn) Object.assign(turn, {...params.turn, items: params.turn.items?.length ? params.turn.items : turn.items});
+    else if (params.turn?.id) turns.push({...params.turn, items: params.turn.items || []});
     renderTimeline(); scheduleDetail();
   }
   if (method === "serverRequest/resolved" || method === "browser/requests") scheduleDetail();

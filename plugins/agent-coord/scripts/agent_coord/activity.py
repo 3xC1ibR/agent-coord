@@ -252,7 +252,7 @@ class ActivityStore:
         return {"status": "skipped", "reason": reason, "event_id": event_id}
 
     def record(self, kind, thread_id, *, event_id=None, occurred_at=None, actor="human",
-               source="app", window_id=None, visit_id=None, turn_id=None, details=None):
+               source="app", window_id=None, visit_id=None, turn_id=None, details=None, connection=None):
         if not isinstance(kind, str) or kind not in KINDS:
             raise CoordinationError("Unknown activity kind.")
         if not isinstance(actor, str) or actor not in ACTORS:
@@ -268,6 +268,10 @@ class ActivityStore:
         details_json = _details(details)
         if occurred_at is not None:
             occurred_at = _timestamp(occurred_at, "Activity time")
+        if connection is not None:
+            return self._record(connection, kind, thread_id, event_id=event_id, occurred_at=occurred_at,
+                                actor=actor, source=source, window_id=window_id,
+                                visit_id=visit_id, turn_id=turn_id, details_json=details_json)
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             return self._record(db, kind, thread_id, event_id=event_id, occurred_at=occurred_at,
@@ -311,12 +315,13 @@ class ActivityStore:
                           (occurred_at, occurred_at)).fetchone():
                 return self._skip(db, event_id, "recording_paused_at_occurrence", visit_key=visit_key)
         snapshot = self._snapshot(threads[0], self._creators(db, thread_id))
-        db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
+        cursor = db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
             received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event_id, kind, thread_id, occurred_at, received_at, actor, source,
              window_id, visit_id, turn_id, details_json, _json(snapshot)))
-        return self._receipt(db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone())
+        return self._receipt({"event_id": event_id, "sequence": cursor.lastrowid,
+                              "occurred_at": occurred_at, "received_at": received_at})
 
     def record_turn(self, db, kind, thread_id, turn_key, *, turn_id, started_at,
                     occurred_at, status=None, context=None):

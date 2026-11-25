@@ -798,6 +798,48 @@ class ProjectionTests(unittest.TestCase):
             result = self.sessions._read_thread(self.identity)
         self.assertIn("Live output", [item.get("text") for item in result["turns"][-1]["items"]])
 
+    def test_concurrent_projection_and_direct_publish_produce_strictly_monotonic_sequences(self):
+        start_seq = self.sessions.sequence
+        barrier = threading.Barrier(3)
+        stop = threading.Event()
+        observed_seqs: list[int] = []
+
+        def sse_reader():
+            cursor = start_seq
+            barrier.wait()
+            while not stop.is_set() or cursor < self.sessions.sequence:
+                batch = self.sessions.events_after(cursor, timeout=0.05)
+                for ev in batch["events"]:
+                    observed_seqs.append(ev["seq"])
+                cursor = batch["seq"]
+                if stop.is_set() and not self.sessions._inflight_sequences and cursor >= self.sessions.sequence:
+                    break
+
+        def direct_publisher():
+            barrier.wait()
+            for idx in range(60):
+                self.sessions._publish("browser/changed", {"threadId": self.identity, "step": idx})
+
+        reader_thread = threading.Thread(target=sse_reader, daemon=True)
+        pub_thread = threading.Thread(target=direct_publisher, daemon=True)
+        reader_thread.start()
+        pub_thread.start()
+        barrier.wait()
+        self.projection.project(self.event(1, "item/started", item={"id": "msg-1", "type": "agentMessage", "text": ""}))
+        for seq_num in range(2, 62):
+            self.projection.project(
+                self.event(seq_num, "item/agentMessage/delta", itemId="msg-1", delta=f"t{seq_num}")
+            )
+        pub_thread.join(timeout=5)
+        stop.set()
+        with self.sessions.events_changed:
+            self.sessions.events_changed.notify_all()
+        reader_thread.join(timeout=5)
+
+        expected = list(range(start_seq + 1, self.sessions.sequence + 1))
+        self.assertEqual(observed_seqs, expected)
+        self.assertEqual(len(observed_seqs), len(set(observed_seqs)))
+
 
 if __name__ == "__main__":
     unittest.main()

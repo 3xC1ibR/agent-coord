@@ -81,7 +81,26 @@ def attribute(store, token):
 def record_action(store, criterion):
     """Fail open: measurement must never fail an agent action or a checkpoint."""
     try:
-        with store._connection() as db:
+        with store.reading(), store._connection() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='launch_install'"
+            ).fetchone():
+                return
+            row = db.execute("SELECT * FROM launch_install").fetchone()
+        if not row or not row["enabled"]:
+            return
+        now = int(store.clock())
+        age = now - row["launched_at"]
+        needs_activate = 0 <= age <= DAY and row["activated_at"] is None
+        needs_return = (
+            row["activated_at"] is not None
+            and row["returned_at"] is None
+            and 3 * DAY <= age < 5 * DAY
+            and now // DAY > row["activated_at"] // DAY
+        )
+        if not needs_activate and not needs_return:
+            return
+        with store.database_operation("launch_metrics.record_action", priority="background"), store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM launch_install").fetchone()
             if not row or not row["enabled"]:
@@ -102,7 +121,7 @@ def record_action(store, criterion):
 
 def registered(store):
     try:
-        with store._connection() as db:
+        with store.reading(), store._connection() as db:
             count = db.execute("""SELECT count(*) FROM sessions
                 WHERE client IN ('codex', 'claude') AND ended_at IS NULL
                 AND last_seen_at >= ?""", (store.clock() - store.stale_after_seconds,)).fetchone()[0]

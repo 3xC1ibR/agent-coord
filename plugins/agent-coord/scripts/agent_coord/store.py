@@ -1682,7 +1682,7 @@ class CoordinationStore:
             "label": " ".join(str(label or "").split())[:200],
             "at": self.clock(),
         }
-        with self._connection() as connection:
+        with self.database_operation("store.record_tool", priority="background"), self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE sessions SET last_tool_json = ? WHERE session_id = ?",
                 (json.dumps(record), session_id),

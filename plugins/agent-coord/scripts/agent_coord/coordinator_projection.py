@@ -343,8 +343,12 @@ class CoordinatorProjection:
                 sessions.histories = copy.deepcopy(state["browser"]["histories"])
             events = deque(copy.deepcopy(state["events"]), maxlen=1500)
             with sessions.events_changed:
+                sessions._inflight_sequences.clear()
                 sessions.events = events
-                sessions.sequence = state["browser"]["sequence"]
+                sessions.sequence = max(
+                    state["browser"]["sequence"],
+                    events[-1]["seq"] if events else 0,
+                )
             sessions.rpc.next_id = state["codex"]["next_id"]
             sessions.rpc.ready = state["codex"]["ready"]
             sessions.rpc.initialized_response = state["codex"].get("initialized_response", False)
@@ -658,13 +662,10 @@ class CoordinatorProjection:
             self._publish_rows(db, rows)
 
     def buffer_publication(self, event):
-        """Reserve a sequence during a projected batch without immediate SQLite writes."""
+        """Buffer an event during a projected batch so sequence numbers are assigned atomically."""
         if not getattr(self.in_event, "active", False):
             return False
-        batch_offset = getattr(self.in_event, "batch_offset", 0)
-        sequence = self.sessions.sequence + batch_offset + len(self.in_event.publications) + 1
-        full_event = {"seq": sequence, **event}
-        self.in_event.publications.append((sequence, full_event))
+        self.in_event.publications.append(dict(event))
         return True
 
     @staticmethod
@@ -984,7 +985,6 @@ class CoordinatorProjection:
                         self.sessions._load_history_unlocked(tid)
 
                     self.in_event.active = True
-                    self.in_event.batch_offset = len(in_memory_events)
                     self.in_event.publications = []
                     self.in_event.commands = []
                     self.in_event.completions = []
@@ -1010,28 +1010,35 @@ class CoordinatorProjection:
                     if self.in_event.commands or self.in_event.completions:
                         # An outbound command or commit waiter during a stream frame commits durably.
                         if in_memory_events:
-                            self.sessions.append_committed_events(in_memory_events)
+                            self.sessions.publish_batch(in_memory_events)
                         for prior_tid, raw_event in live_appends:
                             self.store.transcripts.append_live(prior_tid, raw_event)
                         prepared_plans = self._prepare_dirty_history_plans()
                         completions, encoded = self._encode_checkpoint(pending_plans=prepared_plans)
-                        durable_pub_rows = [(seq, json.dumps(pub)) for seq, pub in self.in_event.publications]
-                        with self.store.database_operation("coordinator.project"), self.store._connection() as db:
-                            db.execute("BEGIN IMMEDIATE")
-                            for _, _, plan in prepared_plans:
-                                self.store.transcripts.commit_turns_index(db, plan)
-                            db.executemany(
-                                "INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?,'pending',NULL)",
-                                self.in_event.commands,
-                            )
-                            self._publish_rows(db, durable_pub_rows)
-                            self._save(db, encoded, event["sequence"])
+                        reserved_pubs: list[dict] = []
+                        try:
+                            with self.store.database_operation("coordinator.project"), self.store._connection() as db:
+                                db.execute("BEGIN IMMEDIATE")
+                                for _, _, plan in prepared_plans:
+                                    self.store.transcripts.commit_turns_index(db, plan)
+                                db.executemany(
+                                    "INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?,'pending',NULL)",
+                                    self.in_event.commands,
+                                )
+                                self._save(db, encoded, event["sequence"])
+                                reserved_pubs = self.sessions.reserve_event_sequences(self.in_event.publications)
+                                if reserved_pubs:
+                                    self._publish_rows(db, [(pub["seq"], json.dumps(pub)) for pub in reserved_pubs])
+                        except Exception:
+                            if reserved_pubs:
+                                self.sessions.abort_reserved_events(reserved_pubs)
+                            raise
                         self._finalize_dirty_history_plans(prepared_plans)
                         if tid and event["stream"] == "stdout" and isinstance(message, dict):
                             self.store.transcripts.append_live(tid, event)
                         self.cursor = event["sequence"]
-                        if self.in_event.publications:
-                            self.sessions.append_committed_events([pub for _, pub in self.in_event.publications])
+                        if reserved_pubs:
+                            self.sessions.commit_reserved_events(reserved_pubs)
                         self._finish_checkpoint(completions, event["sequence"])
                         pending_cmds = list(self.in_event.commands)
                         pending_cbs = list(self.in_event.completions)
@@ -1041,15 +1048,14 @@ class CoordinatorProjection:
                             self.deliver(cmd_id, ch, op, json.loads(val))
                         return decoded[streaming_count:] or None
 
-                    for _, pub in self.in_event.publications:
-                        in_memory_events.append(pub)
+                    in_memory_events.extend(self.in_event.publications)
                     if tid and event["stream"] == "stdout" and isinstance(message, dict):
                         live_appends.append((tid, event))
                     self.cursor = event["sequence"]
                     self._dirty_cursor = True
 
                 if in_memory_events:
-                    self.sessions.append_committed_events(in_memory_events)
+                    self.sessions.publish_batch(in_memory_events)
                 for tid, raw_event in live_appends:
                     self.store.transcripts.append_live(tid, raw_event)
                 return decoded[streaming_count:] or None
@@ -1125,43 +1131,47 @@ class CoordinatorProjection:
             with self.store._writer.measure_request("provider.prepare_event_checkpoint"):
                 completions, encoded = self._encode_checkpoint(pending_plans=prepared_plans)
 
-            durable_pub_rows = [
-                (seq, json.dumps(pub))
-                for seq, pub in self.in_event.publications
-            ]
-            with self.store.database_operation("coordinator.project"), self.store._connection() as db:
-                db.execute("BEGIN IMMEDIATE")
-                with self.store.sharing_transaction(db):
-                    for callback, required in writes:
-                        if not required:
-                            db.execute("SAVEPOINT optional_projection")
-                        try:
-                            result = callback()
-                            if isinstance(result, Iterator):
-                                for _ in result:
-                                    pass
-                        except Exception:
-                            if required:
-                                raise
-                            db.execute("ROLLBACK TO SAVEPOINT optional_projection")
-                            logging.getLogger(__name__).exception("Optional projected bookkeeping failed")
-                        finally:
+            reserved_pubs: list[dict] = []
+            try:
+                with self.store.database_operation("coordinator.project"), self.store._connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    with self.store.sharing_transaction(db):
+                        for callback, required in writes:
                             if not required:
-                                db.execute("RELEASE SAVEPOINT optional_projection")
-                    for _, _, plan in prepared_plans:
-                        self.store.transcripts.commit_turns_index(db, plan)
-                    db.executemany(
-                        "INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?,'pending',NULL)",
-                        self.in_event.commands,
-                    )
-                    self._publish_rows(db, durable_pub_rows)
-                    self._save(db, encoded, event["sequence"])
+                                db.execute("SAVEPOINT optional_projection")
+                            try:
+                                result = callback()
+                                if isinstance(result, Iterator):
+                                    for _ in result:
+                                        pass
+                            except Exception:
+                                if required:
+                                    raise
+                                db.execute("ROLLBACK TO SAVEPOINT optional_projection")
+                                logging.getLogger(__name__).exception("Optional projected bookkeeping failed")
+                            finally:
+                                if not required:
+                                    db.execute("RELEASE SAVEPOINT optional_projection")
+                        for _, _, plan in prepared_plans:
+                            self.store.transcripts.commit_turns_index(db, plan)
+                        db.executemany(
+                            "INSERT OR IGNORE INTO coordinator_commands VALUES (?,?,?,?,'pending',NULL)",
+                            self.in_event.commands,
+                        )
+                        self._save(db, encoded, event["sequence"])
+                        reserved_pubs = self.sessions.reserve_event_sequences(self.in_event.publications)
+                        if reserved_pubs:
+                            self._publish_rows(db, [(pub["seq"], json.dumps(pub)) for pub in reserved_pubs])
+            except Exception:
+                if reserved_pubs:
+                    self.sessions.abort_reserved_events(reserved_pubs)
+                raise
 
             self._finalize_dirty_history_plans(prepared_plans)
 
             self.cursor = event["sequence"]
-            if self.in_event.publications:
-                self.sessions.append_committed_events([pub for _, pub in self.in_event.publications])
+            if reserved_pubs:
+                self.sessions.commit_reserved_events(reserved_pubs)
             self._finish_checkpoint(completions, event["sequence"])
             commands = list(self.in_event.commands)
             completion_callbacks = list(self.in_event.completions)

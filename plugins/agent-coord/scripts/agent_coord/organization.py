@@ -20,6 +20,11 @@ def app_agent_creators(db, thread_id=None):
         WHERE name IN ('app_control_requests', 'app_control_creator_metadata')""")}
     if "app_control_requests" not in schema:
         return {}
+    if thread_id is not None and not db.execute(
+        "SELECT 1 FROM app_control_requests WHERE thread_id=? AND operation='create' LIMIT 1",
+        (thread_id,),
+    ).fetchone():
+        return {}
     # A status index looks selective to SQLite with old snapshot statistics,
     # but reads completed request bodies and sorts them on every refresh.
     # This covering index stores the mode expression and creation order.

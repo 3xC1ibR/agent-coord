@@ -103,6 +103,8 @@ class ThreadStore:
                     project_id TEXT NOT NULL REFERENCES work_projects(id),
                     UNIQUE(thread_id, kind, target, project_id)
                 );
+                CREATE INDEX IF NOT EXISTS thread_links_thread_idx
+                    ON thread_links(thread_id, id);
                 CREATE INDEX IF NOT EXISTS threads_project_idx ON work_threads(project_id, attention);
                 CREATE TABLE IF NOT EXISTS thread_scratchpads (
                     thread_id TEXT PRIMARY KEY REFERENCES work_threads(thread_id),
@@ -119,6 +121,8 @@ class ThreadStore:
                     completed_at REAL NOT NULL, notified_at REAL,
                     UNIQUE(thread_id, turn_key)
                 );
+                CREATE INDEX IF NOT EXISTS turn_completions_thread_idx
+                    ON turn_completions(thread_id, id);
                 CREATE TABLE IF NOT EXISTS turn_stop_requests (
                     thread_id TEXT NOT NULL REFERENCES work_threads(thread_id),
                     turn_id TEXT NOT NULL, requested_at REAL NOT NULL,

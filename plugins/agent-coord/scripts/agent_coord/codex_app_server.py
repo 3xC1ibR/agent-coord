@@ -330,6 +330,7 @@ class BrowserSessions:
         self.events_changed = threading.Condition()
         self.events: deque[dict] = deque(maxlen=1500)
         self.sequence = 0
+        self._inflight_sequences: set[int] = set()
         self.turn_revisions: dict[str, int] = {}
         self.requests: dict[str, dict] = {}
         self.active: dict[str, str | None] = {}
@@ -577,10 +578,74 @@ class BrowserSessions:
         if projection is not None and not is_stream_only:
             projection.publication(event)
 
+    def publish_batch(self, raw_events: list[dict]) -> list[dict]:
+        """Atomically allocate monotonic sequence numbers and publish a streaming batch."""
+        if not raw_events:
+            return []
+        assigned: list[dict] = []
+        with self.events_changed:
+            for raw in raw_events:
+                self.sequence += 1
+                assigned.append({"seq": self.sequence, **raw})
+            self.events.extend(assigned)
+            self.events_changed.notify_all()
+        with self.changed:
+            self.changed.notify_all()
+        return assigned
+
+    def reserve_event_sequences(self, raw_events: list[dict]) -> list[dict]:
+        """Reserve monotonic sequence numbers before durable commit; holdSSE frontier until committed."""
+        if not raw_events:
+            return []
+        reserved: list[dict] = []
+        with self.events_changed:
+            for raw in raw_events:
+                self.sequence += 1
+                self._inflight_sequences.add(self.sequence)
+                reserved.append({"seq": self.sequence, **raw})
+        return reserved
+
+    def commit_reserved_events(self, events: list[dict]) -> None:
+        """Publish durably committed events in strict sequence order and advance SSE frontier."""
+        if not events:
+            return
+        with self.events_changed:
+            for ev in events:
+                self._inflight_sequences.discard(ev["seq"])
+            if not self.events or events[0]["seq"] > self.events[-1]["seq"]:
+                self.events.extend(events)
+            else:
+                merged = sorted([*self.events, *events], key=lambda item: item["seq"])
+                self.events = deque(merged[-1500:], maxlen=1500)
+            if events[-1]["seq"] > self.sequence:
+                self.sequence = events[-1]["seq"]
+            self.events_changed.notify_all()
+        with self.changed:
+            self.changed.notify_all()
+
+    def abort_reserved_events(self, events: list[dict]) -> None:
+        """Release reserved sequence numbers on transaction rollback."""
+        if not events:
+            return
+        with self.events_changed:
+            seqs = {ev["seq"] for ev in events}
+            self._inflight_sequences -= seqs
+            highest_committed = self.events[-1]["seq"] if self.events else 0
+            highest_inflight = max(self._inflight_sequences, default=0)
+            if max(seqs) == self.sequence and max(highest_committed, highest_inflight) < min(seqs):
+                self.sequence = min(seqs) - 1
+            self.events_changed.notify_all()
+
     def append_committed_events(self, events):
         """Publish under the session lock only after the corresponding storage commit."""
+        if not events:
+            return
         with self.events_changed:
-            self.events.extend(events)
+            if not self.events or events[0]["seq"] > self.events[-1]["seq"]:
+                self.events.extend(events)
+            else:
+                merged = sorted([*self.events, *events], key=lambda item: item["seq"])
+                self.events = deque(merged[-1500:], maxlen=1500)
             if events[-1]["seq"] > self.sequence:
                 self.sequence = events[-1]["seq"]
             self.events_changed.notify_all()
@@ -1417,13 +1482,25 @@ class BrowserSessions:
         return self._remember_thread(thread)
 
     def events_after(self, sequence: int, timeout=15) -> dict:
-        # Stream readers need only committed events and their cursor. An unrelated
-        # checkpoint may hold the session state lock while staging large histories.
+        # Stream readers need only committed events and their contiguous cursor.
         with self.events_changed:
-            if self.sequence <= sequence and not self.closed:
-                self.events_changed.wait(timeout)
+            deadline = time.monotonic() + timeout
+            while not self.closed:
+                visible_seq = (min(self._inflight_sequences) - 1) if self._inflight_sequences else self.sequence
+                if visible_seq > sequence:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.events_changed.wait(remaining)
+            visible_seq = (min(self._inflight_sequences) - 1) if self._inflight_sequences else self.sequence
             reset = sequence > self.sequence or bool(self.events and sequence < self.events[0]["seq"] - 1)
-            return {"seq": self.sequence, "reset": reset, "events": [e for e in self.events if e["seq"] > sequence]}
+            cursor_seq = visible_seq if reset else max(sequence, visible_seq)
+            return {
+                "seq": cursor_seq,
+                "reset": reset,
+                "events": [e for e in self.events if sequence < e["seq"] <= visible_seq],
+            }
 
     def completions_after(self, sequence: int) -> dict:
         batch = self.store.threads.completions_after(sequence)
@@ -2869,33 +2946,59 @@ class BrowserSessions:
     def submit(self, thread_id: str, body: dict, *, queued=False, transfer=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
         context = activity_context(body)
+        request_id = body.get("requestId")
+        event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
+                    if request_id else None)
+        activity_recorded = False
+
+        def record_inline_activity(db, res):
+            nonlocal activity_recorded
+            cmd = res.get("command")
+            t_id = res.get("turnId") or (res.get("turn") or {}).get("id")
+            record_accepted(
+                self.store,
+                "decision_submitted" if cmd else "message_submitted",
+                thread_id,
+                context=context,
+                turn_id=t_id,
+                event_id=event_id,
+                details={
+                    "action": cmd.get("name") if isinstance(cmd, dict) else "message",
+                    "queued": bool(res.get("queued")),
+                    "request_id": res.get("id"),
+                },
+                connection=db,
+            )
+            activity_recorded = True
+
         with self.store._writer.measure_request("send.execution"):
             if transfer:
                 # This intent was accepted as an ordinary message. Its first
                 # canonical effect is the immutable receipt reservation, even
                 # if dispatcher settings changed during the coordinator switch.
-                result = self.submissions.run(thread_id, body, lambda: self._send_composer(thread_id, body))
+                result = self.submissions.run(
+                    thread_id,
+                    body,
+                    lambda: self._send_composer(thread_id, body),
+                    on_complete_db=record_inline_activity,
+                )
             else:
-                result = self._submit(thread_id, body, queued=queued)
+                result = self._submit(thread_id, body, queued=queued, on_complete_db=record_inline_activity)
         if result.get("acceptedMessage"):
             # Only a committed completed receipt proves provider acceptance.
             # Replayed receipts retain their identity; windows reconcile them once.
             self._publish("browser/messageAccepted", result["acceptedMessage"])
-        command = result.get("command")
-        turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
-        # Dispatcher and reviewed requests have their own durable acceptance
-        # IDs. Older clients may retry them without browser activity metadata.
-        request_id = body.get("requestId")
-        event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
-                    if request_id else None)
-        with self.store._writer.measure_request("send.activity"):
-            record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
-                context=context, turn_id=turn_id, event_id=event_id,
-                details={"action": command.get("name") if isinstance(command, dict) else "message",
-                         "queued": bool(result.get("queued")), "request_id": result.get("id")})
+        if not activity_recorded:
+            command = result.get("command")
+            turn_id = result.get("turnId") or (result.get("turn") or {}).get("id")
+            with self.store._writer.measure_request("send.activity"):
+                record_accepted(self.store, "decision_submitted" if command else "message_submitted", thread_id,
+                    context=context, turn_id=turn_id, event_id=event_id,
+                    details={"action": command.get("name") if isinstance(command, dict) else "message",
+                             "queued": bool(result.get("queued")), "request_id": result.get("id")})
         return result
 
-    def _submit(self, thread_id: str, body: dict, *, queued=False) -> dict:
+    def _submit(self, thread_id: str, body: dict, *, queued=False, on_complete_db=None) -> dict:
         message = body.get("message", "")
         if body.get("review") is not None:
             if queued:
@@ -2904,7 +3007,8 @@ class BrowserSessions:
         if self.dispatch.settings(thread_id)["enabled"] and not (isinstance(message, str) and message.strip().startswith("/")):
             return self.dispatch.submit(thread_id, body)
         return self.submissions.run(thread_id, body,
-            lambda: self.queue.enqueue(thread_id, body) if queued else self._send_composer(thread_id, body), queued=queued)
+            lambda: self.queue.enqueue(thread_id, body) if queued else self._send_composer(thread_id, body),
+            queued=queued, on_complete_db=on_complete_db)
 
     def _send_composer(self, thread_id: str, body: dict) -> dict:
         # Enter means deliver this user message. The visible turn can finish
@@ -3104,8 +3208,7 @@ class BrowserSessions:
                         self.starting_notification_context.pop(thread_id, None)
                 self.dispatch.confirm_context(thread_id, dispatch_context)
                 self._record_accepted_input(thread_id, turn_id, {"origin": "user", "owner_thread_id": thread_id},
-                                            user_input=True)
-                self._publish("browser/changed", {"threadId": thread_id})
+                                            user_input=True, publish_changed=True)
                 if accepted_input is not None:
                     accepted_input["turnId"] = turn_id
                 return result
@@ -3171,24 +3274,40 @@ class BrowserSessions:
                     self.active[thread_id] = result["turn"]["id"]
             # Some app-server versions omit input items from turn/started.
             self._record_accepted_input(thread_id, result["turn"]["id"], context, user_input=not automatic and not recovery,
-                                        original_request=message or "\n".join("[Image]" for _ in images))
-            self._publish("browser/changed", {"threadId": thread_id})
+                                        original_request=message or "\n".join("[Image]" for _ in images),
+                                        publish_changed=True)
             if accepted_input is not None:
                 accepted_input["turnId"] = result["turn"]["id"]
             return result
 
-    def _record_accepted_input(self, thread_id, turn_id, context, *, user_input, original_request=None):
+    def _apply_accepted_input_db(self, db, thread_id, turn_id, context, *, user_input, original_request=None):
+        self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
+        if user_input:
+            self.store.threads.user_message(thread_id, connection=db)
+            if original_request is not None:
+                self.store.threads.capture_request(thread_id, original_request, connection=db)
+            self.inbox_wake.resume(thread_id, connection=db)
+        db.execute("UPDATE browser_sessions SET updated_at=? WHERE thread_id=?", (time.time(), thread_id))
+
+    def _record_accepted_input(self, thread_id, turn_id, context, *, user_input, original_request=None, publish_changed=False):
         # These state changes all describe the same provider acknowledgement.
         # Commit them together before publishing browser/changed.
+        after = (lambda: self._publish("browser/changed", {"threadId": thread_id})) if publish_changed else None
+        if self.submissions.defer_db_effect(
+            lambda db: self._apply_accepted_input_db(
+                db, thread_id, turn_id, context, user_input=user_input, original_request=original_request
+            ),
+            after_commit=after,
+        ):
+            return
         with self.store.database_operation("send.record_accepted_input"), self.store._connection() as db:
+            self.store._writer.record_scope_search_thread(thread_id)
             db.execute("BEGIN IMMEDIATE")
-            self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
-            if user_input:
-                self.store.threads.user_message(thread_id, connection=db)
-                if original_request is not None:
-                    self.store.threads.capture_request(thread_id, original_request, connection=db)
-                self.inbox_wake.resume(thread_id, connection=db)
-            db.execute("UPDATE browser_sessions SET updated_at=? WHERE thread_id=?", (time.time(), thread_id))
+            self._apply_accepted_input_db(
+                db, thread_id, turn_id, context, user_input=user_input, original_request=original_request
+            )
+        if after is not None:
+            after()
 
     def interrupt(self, thread_id: str) -> dict:
         if self.reviews.cancel(thread_id):

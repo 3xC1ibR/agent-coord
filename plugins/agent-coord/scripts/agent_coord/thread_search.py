@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from .database_writer import sqlite_commit_signature
 from .history_persistence import decode_history
 from .history_window import messages, turn_messages
 from .organization import UNSET
@@ -95,16 +96,51 @@ def _folded_context(
     }
 
 
-def _relevance_folded(folded: str, terms: list[str], phrase: str) -> int:
-    span = _match_span(folded, terms, phrase)
+@lru_cache(maxsize=16384)
+def _relevance_folded_cached(folded: str, terms_key: tuple[str, ...], phrase: str) -> int:
+    span = _match_span(folded, list(terms_key), phrase)
     if span is None:
         return 0
-    gap = max(0, span[1] - span[0] - sum(map(len, terms)))
+    gap = max(0, span[1] - span[0] - sum(map(len, terms_key)))
     return 1 + max(0, 24 - gap // 8) + 32 * (phrase in folded) + 16 * (folded == phrase)
 
 
+def _relevance_folded(folded: str, terms: list[str], phrase: str) -> int:
+    return _relevance_folded_cached(folded, tuple(terms), phrase)
+
+
 def _relevance(value: str | None, terms: list[str], phrase: str) -> int:
-    return _relevance_folded(_normalize(value), terms, phrase)
+    return _relevance_folded_cached(_normalize(value), tuple(terms), phrase)
+
+
+@lru_cache(maxsize=16384)
+def _score_context_fields(
+    title_val: str,
+    domain_val: str,
+    summary_val: str,
+    request_val: str,
+    artifacts_val: str,
+    terms_key: tuple[str, ...],
+    phrase: str,
+) -> tuple[bool, int]:
+    folded_fields = _folded_context(title_val, domain_val, summary_val, request_val, artifacts_val)
+    if not all(any(term in val for val in folded_fields.values()) for term in terms_key):
+        return False, 0
+    context_score = 0
+    for term in terms_key:
+        context_score += (
+            8 * (term in folded_fields["title"])
+            + 6 * (term in folded_fields["domain"])
+            + 4 * (term in folded_fields["summary"])
+            + 2 * (term in folded_fields["request"])
+            + 1 * (term in folded_fields["artifacts"])
+        )
+    context_score += (
+        3 * _relevance_folded_cached(folded_fields["title"], terms_key, phrase)
+        + _relevance_folded_cached(folded_fields["summary"], terms_key, phrase)
+        + _relevance_folded_cached(folded_fields["request"], terms_key, phrase)
+    )
+    return True, context_score
 
 
 def _snippet(value: str | None, terms: list[str], limit: int, phrase: str | None = None) -> str:
@@ -160,18 +196,214 @@ def _thread_url(database: str, thread_id: str) -> str:
 def _readonly_state_connection(store):
     while True:
         with store.reading(), store._connection() as db:
-            names, organization_missing = db.execute(
-                """SELECT
-                    (SELECT json_group_array(name) FROM sqlite_master WHERE type='table' AND name IN
-                     ('browser_sessions', 'browser_history', 'browser_inbox_wake', 'thread_turns')),
-                    EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
-                            WHERE o.thread_id IS NULL)"""
-            ).fetchone()
+            if getattr(store, "_search_org_verified", False):
+                names, count_mismatch = db.execute(
+                    """SELECT
+                        (SELECT json_group_array(name) FROM sqlite_master WHERE type='table' AND name IN
+                         ('browser_sessions', 'browser_history', 'browser_inbox_wake', 'thread_turns')),
+                        (SELECT COUNT(*) FROM work_threads) != (SELECT COUNT(*) FROM thread_organization)"""
+                ).fetchone()
+                organization_missing = bool(count_mismatch) and bool(
+                    db.execute(
+                        """SELECT EXISTS (SELECT 1 FROM work_threads t
+                           LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
+                           WHERE o.thread_id IS NULL)"""
+                    ).fetchone()[0]
+                )
+            else:
+                names, organization_missing = db.execute(
+                    """SELECT
+                        (SELECT json_group_array(name) FROM sqlite_master WHERE type='table' AND name IN
+                         ('browser_sessions', 'browser_history', 'browser_inbox_wake', 'thread_turns')),
+                        EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
+                                WHERE o.thread_id IS NULL)"""
+                ).fetchone()
+                if not organization_missing:
+                    store._search_org_verified = True
             tables = set(json.loads(names))
             if not organization_missing or store.read_only:
                 yield db, tables
                 return
         store.threads.organization.backfill()
+
+
+def _query_context_entries(db, tables: set[str], thread_ids: list[str] | None = None) -> dict[str, tuple]:
+    app_expr = (
+        "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)"
+        if "browser_sessions" in tables
+        else "0"
+    )
+    if thread_ids is not None:
+        if not thread_ids:
+            return {}
+        rows = db.execute(
+            f"""WITH _ids(tid) AS (SELECT value FROM json_each(?))
+                SELECT t.thread_id, t.title, t.domain, t.original_request,
+                       c.summary, c.next_action,
+                       (SELECT group_concat(artifact, char(10)) FROM (
+                           SELECT l.label || ' ' || l.target AS artifact
+                           FROM thread_links l WHERE l.thread_id = t.thread_id ORDER BY l.id
+                       )),
+                       MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(done.completed_at, 0), COALESCE(c.created_at, 0)),
+                       w.root, o.repository_id, o.project_id, {app_expr}
+                FROM work_threads t
+                JOIN _ids ids ON ids.tid = t.thread_id
+                JOIN sessions s ON s.session_id = t.thread_id
+                JOIN work_projects w ON w.id = t.project_id
+                JOIN thread_organization o ON o.thread_id = t.thread_id
+                LEFT JOIN thread_checkpoints c ON c.id =
+                    (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)
+                LEFT JOIN turn_completions done ON done.id =
+                    (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)""",
+            (json.dumps(sorted(thread_ids)),),
+        ).fetchall()
+    else:
+        rows = db.execute(
+            f"""WITH _cp_max AS (SELECT thread_id, MAX(id) AS max_id FROM thread_checkpoints GROUP BY thread_id),
+                     _done_max AS (SELECT thread_id, MAX(id) AS max_id FROM turn_completions GROUP BY thread_id),
+                     _tl AS (
+                         SELECT thread_id, group_concat(artifact, char(10)) AS artifacts
+                         FROM (SELECT thread_id, label || ' ' || target AS artifact FROM thread_links ORDER BY thread_id, id)
+                         GROUP BY thread_id
+                     )
+                SELECT t.thread_id, t.title, t.domain, t.original_request,
+                       c0.summary, c0.next_action, tl.artifacts,
+                       MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(d0.completed_at, 0), COALESCE(c0.created_at, 0)),
+                       w.root, o.repository_id, o.project_id, {app_expr}
+                FROM work_threads t
+                JOIN sessions s ON s.session_id = t.thread_id
+                JOIN work_projects w ON w.id = t.project_id
+                JOIN thread_organization o ON o.thread_id = t.thread_id
+                LEFT JOIN _cp_max cm ON cm.thread_id = t.thread_id
+                LEFT JOIN thread_checkpoints c0 ON c0.id = cm.max_id
+                LEFT JOIN _done_max dm ON dm.thread_id = t.thread_id
+                LEFT JOIN turn_completions d0 ON d0.id = dm.max_id
+                LEFT JOIN _tl tl ON tl.thread_id = t.thread_id"""
+        ).fetchall()
+
+    entries: dict[str, tuple] = {}
+    for row in rows:
+        tid, title, domain, req, summary, next_act, artifacts, last_work, w_root, repo_id, proj_id, is_app = row
+        raw_ctx = " ".join(
+            part for part in (title, domain, req, summary, next_act, artifacts) if part
+        )
+        entries[tid] = (
+            tid,
+            title,
+            domain,
+            req,
+            summary,
+            next_act,
+            artifacts,
+            last_work,
+            w_root,
+            repo_id,
+            proj_id,
+            bool(is_app),
+            raw_ctx.lower(),
+            not raw_ctx.isascii(),
+        )
+    return entries
+
+
+def _connection_data_version(db) -> int:
+    prev = getattr(db, "_applying_internal_pragma", False)
+    try:
+        db._applying_internal_pragma = True
+    except AttributeError:
+        pass
+    try:
+        return int(db.execute("PRAGMA data_version").fetchone()[0])
+    finally:
+        try:
+            db._applying_internal_pragma = prev
+        except AttributeError:
+            pass
+
+
+def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, int, int, int], rev_before: int) -> dict[str, tuple]:
+    writer = store._writer
+    cur_dv = _connection_data_version(db)
+    last_dv = getattr(db, "_search_last_dv", None)
+    last_rev = getattr(db, "_search_last_rev", None)
+    external_dv_jump = last_dv is not None and last_rev == writer.commit_revision and cur_dv != last_dv
+    sig_after = sqlite_commit_signature(store.database_path)
+    build_token = None
+    with writer.search_cache_lock:
+        if external_dv_jump:
+            writer.search_dirty_threads = None
+            writer.search_known_sigs.clear()
+        cache = writer.search_cache
+        dirty = None if writer.search_dirty_threads is None else set(writer.search_dirty_threads)
+        pinned_clean = sig_before == sig_after and writer.commit_revision == rev_before and not external_dv_jump
+        sig_trusted = (
+            not external_dv_jump
+            and cache is not None
+            and dirty is not None
+            and (cache["sig"] == sig_after or sig_after in writer.search_known_sigs)
+        )
+        cached_rows = dict(cache["rows"]) if sig_trusted else None
+        if cached_rows is None and pinned_clean and writer._search_build_token is None:
+            build_token = object()
+            writer._search_build_token = build_token
+            writer._search_build_sig = sig_after
+            writer._search_build_dirty = set()
+            writer.search_known_sigs.append(sig_after)
+
+    def remember_conn_state() -> None:
+        try:
+            db._search_last_dv = cur_dv
+            db._search_last_rev = writer.commit_revision
+        except AttributeError:
+            pass
+
+    if cached_rows is not None:
+        if dirty:
+            refreshed = _query_context_entries(db, tables, list(dirty))
+            for tid in dirty:
+                if tid in refreshed:
+                    cached_rows[tid] = refreshed[tid]
+                else:
+                    cached_rows.pop(tid, None)
+            if pinned_clean:
+                with writer.search_cache_lock:
+                    if (
+                        writer.commit_revision == rev_before
+                        and writer.search_cache is not None
+                        and writer.search_cache["sig"] == sig_after
+                        and writer.search_dirty_threads is not None
+                        and sqlite_commit_signature(store.database_path) == sig_after
+                    ):
+                        writer.search_cache["rows"] = dict(cached_rows)
+                        writer.search_dirty_threads -= dirty
+        remember_conn_state()
+        return cached_rows
+
+    try:
+        built = _query_context_entries(db, tables)
+    except BaseException:
+        if build_token is not None:
+            with writer.search_cache_lock:
+                if writer._search_build_token is build_token:
+                    writer._search_build_token = None
+                    writer._search_build_dirty = None
+        raise
+
+    if build_token is not None:
+        with writer.search_cache_lock:
+            if (
+                writer._search_build_token is build_token
+                and writer._search_build_sig is not None
+                and writer._search_build_dirty is not None
+                and sqlite_commit_signature(store.database_path) == writer._search_build_sig
+            ):
+                writer.search_cache = {"sig": writer._search_build_sig, "rows": dict(built)}
+                writer.search_dirty_threads = set(writer._search_build_dirty)
+            if writer._search_build_token is build_token:
+                writer._search_build_token = None
+                writer._search_build_dirty = None
+    remember_conn_state()
+    return built
 
 
 def _sync_unindexed_histories(store, db, tables: set[str], scope_ids: list[str]) -> tuple[set[str], set[str], dict[str, list[tuple]]]:
@@ -192,7 +424,7 @@ def _sync_unindexed_histories(store, db, tables: set[str], scope_ids: list[str])
     partial_ids = all_partial & scope_set
 
     # Legacy fallback for unmigrated browser_history rows in standalone tests.
-    if "browser_history" in tables:
+    if "browser_history" in tables and db.execute("SELECT 1 FROM browser_history LIMIT 1").fetchone() is not None:
         remaining = [tid for tid in scope_ids if tid not in saved_ids and tid not in partial_ids]
         if remaining:
             indexed_ids = search.indexed_thread_ids()
@@ -281,18 +513,13 @@ def search_threads(
     use_context = source != "messages"
     use_messages = source != "context"
 
-    where = []
-    params: dict[str, Any] = {}
-    if thread_ids is not None:
-        where.append("t.thread_id IN (SELECT value FROM json_each(:thread_ids))")
-        params["thread_ids"] = json.dumps(sorted(thread_ids))
-    if workspace is not None:
-        where.append("w.root = :cwd")
-        params["cwd"] = workspace
-    for key, value in (("repository_id", repository_id), ("project_id", project_id)):
-        if value is not UNSET:
-            where.append(f"o.{key} IS :{key}")
-            params[key] = value
+    has_scope_filter = bool(
+        thread_ids is not None
+        or workspace is not None
+        or repository_id is not UNSET
+        or project_id is not UNSET
+        or app_only
+    )
 
     with store._writer.measure_request("search.query"), _readonly_state_connection(store) as (db, tables):
         app_expr = (
@@ -300,24 +527,31 @@ def search_threads(
             if "browser_sessions" in tables
             else "0"
         )
-        if app_only:
-            where.append(app_expr)
-        has_scope_filter = bool(where)
+        with store._writer.search_cache_lock:
+            rev_before = store._writer.commit_revision
+        sig_before = sqlite_commit_signature(store.database_path)
         db.execute("BEGIN")
         try:
-            scope_ids = [
-                row[0]
-                for row in db.execute(
-                    f"""SELECT t.thread_id
-                        FROM work_threads t
-                        JOIN sessions s ON s.session_id = t.thread_id
-                        JOIN work_projects w ON w.id = t.project_id
-                        JOIN thread_organization o ON o.thread_id = t.thread_id
-                        WHERE {' AND '.join(where) or '1'}""",
-                    params,
-                )
-            ]
-            scope_set = set(scope_ids)
+            db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            all_entries = _load_context_snapshot(store, db, tables, sig_before, rev_before)
+            if not has_scope_filter:
+                in_scope_entries = list(all_entries.values())
+                scope_ids = list(all_entries)
+                scope_set = set(all_entries)
+            else:
+                allowed_tids = set(thread_ids) if thread_ids is not None else None
+                in_scope_entries = [
+                    entry
+                    for entry in all_entries.values()
+                    if (allowed_tids is None or entry[0] in allowed_tids)
+                    and (workspace is None or entry[8] == workspace)
+                    and (repository_id is UNSET or entry[9] == repository_id)
+                    and (project_id is UNSET or entry[10] == project_id)
+                    and (not app_only or entry[11])
+                ]
+                scope_ids = [entry[0] for entry in in_scope_entries]
+                scope_set = set(scope_ids)
+
             saved_ids, partial_ids, live_prose = _sync_unindexed_histories(store, db, tables, scope_ids)
 
             if resident_live_turns:
@@ -353,70 +587,74 @@ def search_threads(
                                 }
                             )
 
-            row_where = list(where)
-            row_params = dict(params)
-            skip_row_query = not scope_ids
-            cte_sql = ""
-            matched_join = ""
-            if not skip_row_query and not use_context:
-                hit_ids = sorted(message_hits)
-                if not hit_ids:
-                    skip_row_query = True
-                else:
-                    row_where = ["t.thread_id IN (SELECT value FROM json_each(:msg_hit_ids))"]
-                    row_params = {"msg_hit_ids": json.dumps(hit_ids)}
-            elif not skip_row_query and use_context and all(term.isascii() for term in terms):
-                term_clauses = []
-                for idx, term in enumerate(terms):
-                    key_name = f"_ascii_term_{idx}"
-                    row_params[key_name] = term
-                    term_clauses.append(f"instr(_ctx.folded_ctx, :{key_name}) > 0")
-                disjuncts = ["_ctx.has_unicode", "(" + " AND ".join(term_clauses) + ")"]
-                if message_hits:
-                    row_params["msg_hit_ids"] = json.dumps(sorted(message_hits))
-                    disjuncts.insert(0, "_ctx.thread_id IN (SELECT value FROM json_each(:msg_hit_ids))")
-                raw_ctx = (
-                    "(COALESCE(t.title, '') || ' ' || COALESCE(t.domain, '') || ' ' || "
-                    "COALESCE(t.original_request, '') || ' ' || COALESCE(c0.summary, '') || ' ' || "
-                    "COALESCE(c0.next_action, '') || ' ' || COALESCE(tl.links_text, ''))"
-                )
-                cte_sql = f"""WITH _raw AS (
-                    SELECT t.thread_id,
-                           c0.id AS latest_checkpoint_id,
-                           {raw_ctx} AS raw_ctx
-                    FROM work_threads t
-                    JOIN sessions s ON s.session_id = t.thread_id
-                    JOIN work_projects w ON w.id = t.project_id
-                    JOIN thread_organization o ON o.thread_id = t.thread_id
-                    LEFT JOIN (SELECT thread_id, MAX(id) AS max_id FROM thread_checkpoints GROUP BY thread_id) cm
-                        ON cm.thread_id = t.thread_id
-                    LEFT JOIN thread_checkpoints c0 ON c0.id = cm.max_id
-                    LEFT JOIN (SELECT thread_id, group_concat(label || ' ' || target, ' ') AS links_text FROM thread_links GROUP BY thread_id) tl
-                        ON tl.thread_id = t.thread_id
-                    WHERE {' AND '.join(where) or '1'}
-                ), _ctx AS (
-                    SELECT thread_id,
-                           latest_checkpoint_id,
-                           lower(raw_ctx) AS folded_ctx,
-                           (length(CAST(raw_ctx AS BLOB)) != length(raw_ctx)) AS has_unicode
-                    FROM _raw
-                ), _matched AS (
-                    SELECT thread_id, latest_checkpoint_id FROM _ctx
-                    WHERE {' OR '.join(disjuncts)}
-                ) """
-                matched_join = "JOIN _matched m ON m.thread_id = t.thread_id"
-                row_where = []
-
-            if skip_row_query:
-                decoded_rows = []
+            terms_key = tuple(terms)
+            ascii_terms = all(term.isascii() for term in terms_key)
+            if not scope_ids:
+                scoring_rows = []
+            elif not use_context:
+                scoring_rows = [all_entries[tid] for tid in message_hits if tid in scope_set]
+            elif ascii_terms:
+                scoring_rows = [
+                    entry
+                    for entry in in_scope_entries
+                    if entry[0] in message_hits or entry[13] or all(term in entry[12] for term in terms_key)
+                ]
             else:
-                checkpoint_join = (
-                    "LEFT JOIN thread_checkpoints c ON c.id = m.latest_checkpoint_id"
-                    if matched_join
-                    else "LEFT JOIN thread_checkpoints c ON c.id = (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)"
+                scoring_rows = in_scope_entries
+
+            candidates = []
+            for srow in scoring_rows:
+                tid = srow[0]
+                context_matched = False
+                context_score = 0
+                if use_context:
+                    title_val = srow[1] or ""
+                    domain_val = srow[2] or ""
+                    summary_val = ((srow[4] or "") + " " + (srow[5] or "")).strip()
+                    request_val = srow[3] or ""
+                    artifacts_val = srow[6] or ""
+                    context_matched, context_score = _score_context_fields(
+                        title_val, domain_val, summary_val, request_val, artifacts_val, terms_key, phrase
+                    )
+
+                thread_messages = message_hits.get(tid, []) if use_messages else []
+                message_matched = bool(thread_messages)
+                matched = (
+                    context_matched
+                    if source == "context"
+                    else message_matched
+                    if source == "messages"
+                    else (context_matched or message_matched)
                 )
+                if not matched:
+                    continue
+
+                msg_score = 0
+                ranked_matches = []
+                if thread_messages:
+                    for hit in thread_messages:
+                        rel = _relevance_folded_cached(hit["folded_body"], terms_key, phrase)
+                        bm25_bonus = min(16, max(0, int(round(hit["bm25_score"]))))
+                        hit_score = max(1, rel + bm25_bonus)
+                        msg_score = max(msg_score, hit_score)
+                        ranked_matches.append((hit_score, hit["turn_seq"], hit))
+
+                total_score = max(1, context_score + msg_score)
+                last_work_at = _decode_number(srow[7])
+                key = (total_score, last_work_at, tid)
+                if after is not None and key >= after:
+                    continue
+                candidates.append((key, tid, context_matched, ranked_matches))
+
+            candidates.sort(key=lambda entry: entry[0], reverse=True)
+            selected = candidates[: limit + 1]
+            page = selected[:limit]
+
+            if page:
+                page_ids_json = json.dumps([tid for _, tid, _, _ in page])
                 packed_rows = db.execute(
-                    f"""{cte_sql}SELECT COALESCE(json_group_array(json_array(
+                    f"""WITH _page_ids(tid) AS (SELECT value FROM json_each(?))
+                        SELECT COALESCE(json_group_array(json_array(
                                t.thread_id, t.title, t.domain, t.original_request, t.attention,
                                s.client, s.cwd, s.turn_active,
                                o.repository_id, r.name,
@@ -428,27 +666,26 @@ def search_threads(
                                c.context_lifecycle_turn_key IS NOT t.turn_key,
                                done.status,
                                MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(done.completed_at, 0), COALESCE(c.created_at, 0)),
-                               (SELECT group_concat(artifact, char(10)) FROM (
-                                   SELECT l.label || ' ' || l.target AS artifact
-                                   FROM thread_links l WHERE l.thread_id = t.thread_id ORDER BY l.id
-                               )),
+                               NULL,
                                {"bw.thread_id IS NOT NULL, bw.paused, bw.error" if "browser_inbox_wake" in tables else "0, NULL, NULL"}
                            )), '[]')
                         FROM work_threads t
-                        {matched_join}
+                        JOIN _page_ids pids ON pids.tid = t.thread_id
                         JOIN sessions s ON s.session_id = t.thread_id
                         JOIN work_projects w ON w.id = t.project_id
                         JOIN thread_organization o ON o.thread_id = t.thread_id
                         LEFT JOIN work_repositories r ON r.id = o.repository_id
                         LEFT JOIN named_projects p ON p.id = o.project_id
-                        {checkpoint_join}
+                        LEFT JOIN thread_checkpoints c ON c.id =
+                            (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)
                         LEFT JOIN turn_completions done ON done.id =
                             (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)
-                        {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}
-                        WHERE {' AND '.join(row_where) or '1'}""",
-                    row_params,
+                        {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}""",
+                    (page_ids_json,),
                 ).fetchone()[0]
                 decoded_rows = json.loads(packed_rows)
+            else:
+                decoded_rows = []
         finally:
             db.rollback()
 
@@ -477,69 +714,10 @@ def search_threads(
         "scope": "Registered threads and saved message history; external provider transcripts are not searched.",
     }
 
-    candidates = []
-    for tid, row in scope_by_id.items():
-        context_matched = False
-        context_score = 0
-        if use_context:
-            title_val = row["title"] or ""
-            domain_val = row["domain"] or ""
-            summary_val = ((row["summary"] or "") + " " + (row["next_action"] or "")).strip()
-            request_val = row["original_request"] or ""
-            artifacts_val = row["artifacts"] or ""
-            folded_fields = _folded_context(title_val, domain_val, summary_val, request_val, artifacts_val)
-            if all(any(term in val for val in folded_fields.values()) for term in terms):
-                context_matched = True
-                for term in terms:
-                    context_score += (
-                        8 * (term in folded_fields["title"])
-                        + 6 * (term in folded_fields["domain"])
-                        + 4 * (term in folded_fields["summary"])
-                        + 2 * (term in folded_fields["request"])
-                        + 1 * (term in folded_fields["artifacts"])
-                    )
-                context_score += (
-                    3 * _relevance_folded(folded_fields["title"], terms, phrase)
-                    + _relevance_folded(folded_fields["summary"], terms, phrase)
-                    + _relevance_folded(folded_fields["request"], terms, phrase)
-                )
-
-        thread_messages = message_hits.get(tid, []) if use_messages else []
-        message_matched = bool(thread_messages)
-        matched = (
-            context_matched
-            if source == "context"
-            else message_matched
-            if source == "messages"
-            else (context_matched or message_matched)
-        )
-        if not matched:
-            continue
-
-        msg_score = 0
-        ranked_matches = []
-        if thread_messages:
-            for hit in thread_messages:
-                rel = _relevance(hit["folded_body"], terms, phrase)
-                bm25_bonus = min(16, max(0, int(round(hit["bm25_score"]))))
-                hit_score = max(1, rel + bm25_bonus)
-                msg_score = max(msg_score, hit_score)
-                ranked_matches.append((hit_score, hit["turn_seq"], hit))
-
-        total_score = max(1, context_score + msg_score)
-        last_work_at = _decode_number(row["last_work_at"])
-        key = (total_score, last_work_at, tid)
-        if after is not None and key >= after:
-            continue
-        candidates.append((key, tid, row, context_matched, ranked_matches))
-
-    candidates.sort(key=lambda entry: entry[0], reverse=True)
-    selected = candidates[: limit + 1]
-    page = selected[:limit]
-
     database = hashlib.sha256(str(store.database_path.resolve()).encode()).hexdigest()[:24]
     items = []
-    for (score, last_work_at, _), tid, row, context_matched, ranked_matches in page:
+    for (score, last_work_at, _), tid, context_matched, ranked_matches in page:
+        row = scope_by_id[tid]
         item: dict[str, Any] = {
             "thread_id": tid,
             "title": row["title"],

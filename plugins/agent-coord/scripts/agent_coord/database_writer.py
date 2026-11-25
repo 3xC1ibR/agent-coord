@@ -33,6 +33,33 @@ SLOW_DATABASE_PHASES = frozenset({
     "statement.execute", "statement.executemany", "statement.executescript",
     "statement.fetchall", "statement.fetchmany", "transaction.commit", "transaction.rollback", "scope",
 })
+ZERO_SEARCH_IMPACT_OPERATIONS = frozenset({
+    "submission_receipts.reserve",
+    "submission_receipts.fail",
+    "coordinator.publication",
+    "coordinator.watermark",
+    "coordinator.command",
+    "coordinator.command_outcome",
+    "activity.record",
+    "execution_state.persist",
+    "store.record_tool",
+})
+
+
+def sqlite_commit_signature(database_path: Path) -> tuple[int, int, int, int]:
+    """Stat-only signature; NEVER open/close SQLite or -shm files (POSIX close drops fcntl locks)."""
+    db_mtime = db_size = wal_mtime = wal_size = 0
+    try:
+        db_st = os.stat(database_path)
+        db_mtime, db_size = db_st.st_mtime_ns, db_st.st_size
+    except OSError:
+        pass
+    try:
+        wal_st = os.stat(f"{database_path}-wal")
+        wal_mtime, wal_size = wal_st.st_mtime_ns, wal_st.st_size
+    except OSError:
+        pass
+    return (db_mtime, db_size, wal_mtime, wal_size)
 
 
 def _after_fork():
@@ -45,11 +72,12 @@ if hasattr(os, "register_at_fork"):
 
 
 def writer_for(database):
-    identity = str(Path(database).resolve())
+    resolved = Path(database).resolve()
+    identity = str(resolved)
     with _registry_lock:
         writer = _registry.get(identity)
         if writer is None:
-            writer = _registry[identity] = DatabaseWriter()
+            writer = _registry[identity] = DatabaseWriter(resolved)
         return writer
 
 
@@ -97,7 +125,8 @@ def system_performance_snapshot():
 
 
 class DatabaseWriter:
-    def __init__(self):
+    def __init__(self, database_path: Path | None = None):
+        self.database_path = database_path
         self.condition = threading.Condition()
         self.owner = None
         self.connections = []
@@ -124,6 +153,19 @@ class DatabaseWriter:
         self.admission_timeout_records = deque(maxlen=16)
         self.commit_condition = threading.Condition()
         self.commit_revision = 0
+        self.search_cache_lock = threading.Lock()
+        self.search_cache: dict | None = None
+        self.search_dirty_threads: set[str] | None = None
+        self.search_known_sigs: deque[tuple[int, int, int, int]] = deque(maxlen=32)
+        self._search_build_token: object | None = None
+        self._search_build_sig: tuple[int, int, int, int] | None = None
+        self._search_build_dirty: set[str] | None = None
+        self._scope_search_safe = False
+        self._scope_search_threads: set[str] = set()
+
+    def record_scope_search_thread(self, thread_id: str) -> None:
+        if self.owner == threading.get_ident() and isinstance(thread_id, str):
+            self._scope_search_threads.add(thread_id)
 
     def _next(self):
         foreground = [entry for entry in self.queue if entry[1] == "foreground"]
@@ -177,6 +219,20 @@ class DatabaseWriter:
                 self.started_thread_cpu = _thread_cpu_time()
                 self.foreground_streak = self.foreground_streak + 1 if priority == "foreground" else 0
                 self.waits.append((self.started - entered) * 1000)
+                self._scope_search_safe = operation in ZERO_SEARCH_IMPACT_OPERATIONS or operation in {
+                    "submission_receipts.complete",
+                    "send.record_accepted_input",
+                }
+                self._scope_search_threads = set()
+                if self.database_path is not None:
+                    with self.search_cache_lock:
+                        cur_sig = sqlite_commit_signature(self.database_path)
+                        if self.search_cache is not None and self.search_dirty_threads is not None:
+                            if cur_sig != self.search_cache["sig"]:
+                                self.search_dirty_threads = None
+                        if self._search_build_token is not None and cur_sig != self._search_build_sig:
+                            self._search_build_token = None
+                            self._search_build_dirty = None
             self.connections.append(connection)
         failed = False
         try:
@@ -185,6 +241,23 @@ class DatabaseWriter:
             failed = True
             raise
         finally:
+            if not nested and self.database_path is not None:
+                with self.search_cache_lock:
+                    if failed or not self._scope_search_safe:
+                        self.search_dirty_threads = None
+                        self.search_known_sigs.clear()
+                        self._search_build_token = None
+                        self._search_build_dirty = None
+                    else:
+                        new_sig = sqlite_commit_signature(self.database_path)
+                        if self.search_cache is not None and self.search_dirty_threads is not None:
+                            self.search_dirty_threads.update(self._scope_search_threads)
+                            self.search_cache["sig"] = new_sig
+                            self.search_known_sigs.append(new_sig)
+                        if self._search_build_token is not None and self._search_build_dirty is not None:
+                            self._search_build_dirty.update(self._scope_search_threads)
+                            self._search_build_sig = new_sig
+                            self.search_known_sigs.append(new_sig)
             with self.condition:
                 self.connections.remove(connection)
                 if not nested:

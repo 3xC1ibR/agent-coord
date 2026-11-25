@@ -186,6 +186,35 @@ def _pread_exact(fd: int, length: int, offset: int) -> bytes:
     return b"".join(chunks) if len(chunks) != 1 else chunks[0]
 
 
+def _pread_ranges(fd: int, ranges: list[tuple[int, int]], *, max_gap: int = 65536) -> list[bytes]:
+    """Read (offset, length) byte ranges, coalescing nearby spans while skipping superseded gaps."""
+    if not ranges:
+        return []
+    indexed = sorted(enumerate(ranges), key=lambda item: item[1][0])
+    out: list[bytes] = [b""] * len(ranges)
+    group_start = indexed[0][1][0]
+    group_end = group_start + indexed[0][1][1]
+    group_items = [indexed[0]]
+    for entry in indexed[1:]:
+        off, length = entry[1]
+        end = off + length
+        if off - group_end <= max_gap:
+            if end > group_end:
+                group_end = end
+            group_items.append(entry)
+        else:
+            buf = _pread_exact(fd, group_end - group_start, group_start)
+            for orig_idx, (r_off, r_len) in group_items:
+                rel = r_off - group_start
+                out[orig_idx] = buf[rel : rel + r_len]
+            group_start, group_end, group_items = off, end, [entry]
+    buf = _pread_exact(fd, group_end - group_start, group_start)
+    for orig_idx, (r_off, r_len) in group_items:
+        rel = r_off - group_start
+        out[orig_idx] = buf[rel : rel + r_len]
+    return out
+
+
 def _close_live_fds(live_fds: dict[str, int], lock: threading.Lock) -> None:
     with lock:
         descriptors = list(live_fds.values())
@@ -941,21 +970,17 @@ class TranscriptStore:
         if ordered:
             directory = self.directory_for(thread_id)
             compact_path = directory / "turns.compact.jsonl"
-            min_offset = min(r["compact_offset"] for r in ordered)
-            max_end = max(r["compact_offset"] + r["compact_length"] for r in ordered)
             fd = os.open(compact_path, os.O_RDONLY)
             try:
-                buffer = _pread_exact(fd, max_end - min_offset, min_offset)
+                slices = _pread_ranges(fd, [(r["compact_offset"], r["compact_length"]) for r in ordered])
             finally:
                 os.close(fd)
-            for row in ordered:
+            for row, raw_line in zip(ordered, slices):
                 if active_turn_id and row["turn_id"] == active_turn_id and live_turn is None:
                     full_turn = self._pread_full_row(directory, row["full_offset"], row["full_length"])
                     if full_turn is not None:
                         turns.append(full_turn)
                         continue
-                rel = row["compact_offset"] - min_offset
-                raw_line = buffer[rel : rel + row["compact_length"]]
                 turns.append(json.loads(raw_line.decode("utf-8", "surrogatepass")))
 
         if before_seq is None and live_turn is not None:
@@ -1044,16 +1069,12 @@ class TranscriptStore:
         turns: list[dict] = []
         if rows:
             full_path = self.directory_for(thread_id) / "turns.full.jsonl"
-            min_offset = min(r["full_offset"] for r in rows)
-            max_end = max(r["full_offset"] + r["full_length"] for r in rows)
             fd = os.open(full_path, os.O_RDONLY)
             try:
-                buffer = _pread_exact(fd, max_end - min_offset, min_offset)
+                slices = _pread_ranges(fd, [(r["full_offset"], r["full_length"]) for r in rows])
             finally:
                 os.close(fd)
-            for row in rows:
-                rel = row["full_offset"] - min_offset
-                raw_line = buffer[rel : rel + row["full_length"]]
+            for raw_line in slices:
                 turns.append(json.loads(raw_line.decode("utf-8", "surrogatepass")))
 
         if has_live:

@@ -176,7 +176,7 @@ class RuntimeExecution:
             payload = (thread_id, self.runtime_id, turn_id, state, source, observed, json.dumps(pending), json.dumps(permissions))
 
         def persist():
-            with self.store._connection() as db:
+            with self.store.database_operation("execution_state.persist", priority="background"), self.store._connection() as db:
                 # Optional status bookkeeping must not hold the provider event
                 # lock for the store's normal five-second writer timeout.
                 # BrowserPersistence retries contention in transition order.

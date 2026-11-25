@@ -42,7 +42,7 @@ class SessionControl:
     def authorize(self, sender, thread):
         self.store.get_session(sender)
         self.store.get_session(thread)
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as db:
             # The current supervisor: the creator unless supervision was transferred.
             created = supervision.authorizes(db, sender, thread)
             binding = db.execute(
@@ -133,7 +133,12 @@ class SessionControl:
         }
 
     def append(self, thread, key, payload):
-        with self.store._connection() as db:
+        with self.store.reading(), self.store._connection() as rdb:
+            if not rdb.execute(
+                "SELECT 1 FROM interactive_bindings WHERE thread_id=?", (thread,)
+            ).fetchone():
+                return
+        with self.store.database_operation("session_control.append", priority="background"), self.store._connection() as db:
             if not db.execute(
                 "SELECT 1 FROM interactive_bindings WHERE thread_id=?", (thread,)
             ).fetchone():

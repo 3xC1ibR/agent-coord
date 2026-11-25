@@ -88,7 +88,7 @@ def _claim_job(store, job_id, token, supervisor_pid):
 
 def _save_job_progress(store, job_id, token, child_pid, discarded):
     now = store.clock()
-    with store.connection_timeout(0), store._connection() as db:
+    with store.connection_timeout(250), store.database_operation("runtime_metadata._save_job_progress", priority="background"), store._connection() as db:
         db.execute("""UPDATE jobs SET child_pid=?, heartbeat_at=?, updated_at=?, output_discarded=?
             WHERE id=? AND supervisor_token=? AND state='running'""",
                    (child_pid, now, now, discarded, job_id, token))
@@ -97,7 +97,7 @@ def _save_job_progress(store, job_id, token, child_pid, discarded):
 
 def _finish_job(store, job_id, token, *, state, exit_code, error, discarded, finished_at):
     from .jobs import ManagedJobs
-    with store.connection_timeout(0), store._connection() as db:
+    with store.connection_timeout(500), store.database_operation("runtime_metadata._finish_job", priority="foreground"), store._connection() as db:
         db.execute("""UPDATE jobs SET state=?, exit_code=?, error=?, finished_at=?, updated_at=?,
             heartbeat_at=?, output_discarded=? WHERE id=? AND supervisor_token=? AND state='running'""",
                    (state, exit_code, error, finished_at, finished_at, finished_at, discarded, job_id, token))

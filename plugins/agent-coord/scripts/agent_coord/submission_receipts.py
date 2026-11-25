@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import uuid
 
 from .store import CoordinationError
@@ -15,6 +16,7 @@ from .store import CoordinationError
 class SubmissionReceipts:
     def __init__(self, store):
         self.store = store
+        self._local = threading.local()
         with store._connection() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS browser_submission_receipts (
                 thread_id TEXT NOT NULL REFERENCES browser_sessions(thread_id),
@@ -24,7 +26,14 @@ class SubmissionReceipts:
                 PRIMARY KEY(thread_id, request_id)
             )""")
 
-    def run(self, thread_id, body, callback, *, queued=False):
+    def defer_db_effect(self, db_callback, after_commit=None) -> bool:
+        effects = getattr(self._local, "effects", None)
+        if effects is None:
+            return False
+        effects.append((db_callback, after_commit))
+        return True
+
+    def run(self, thread_id, body, callback, *, queued=False, on_complete_db=None):
         key = body.get("requestId")
         if key is None:
             key = str(uuid.uuid4())
@@ -36,7 +45,7 @@ class SubmissionReceipts:
         encoded = json.dumps({"body": semantic, "queued": queued}, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(encoded.encode()).hexdigest()
         now = self.store.clock()
-        with self.store._connection() as db:
+        with self.store.database_operation("submission_receipts.reserve", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
                              (thread_id, key)).fetchone()
@@ -53,13 +62,17 @@ class SubmissionReceipts:
                 db.execute("INSERT INTO browser_submission_receipts VALUES (?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?)",
                            (thread_id, key, digest, encoded, now, now))
         # No database transaction spans the external operation.
+        outermost = getattr(self._local, "effects", None) is None
+        if outermost:
+            self._local.effects = []
         try:
             result = callback()
+            effects = list(self._local.effects) if outermost else []
         except Exception as error:
             from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
             state = "rejected" if isinstance(error, (BrowserBusyError, BrowserNotSubmittedError)) else "uncertain"
             try:
-                with self.store._connection() as db:
+                with self.store.database_operation("submission_receipts.fail", priority="foreground"), self.store._connection() as db:
                     db.execute("UPDATE browser_submission_receipts SET state=?, error=?, updated_at=? WHERE thread_id=? AND request_id=?",
                                (state, str(error)[:2000], self.store.clock(), thread_id, key))
             except Exception:
@@ -67,15 +80,50 @@ class SubmissionReceipts:
                 # when failure bookkeeping cannot be committed.
                 pass
             raise
+        finally:
+            if outermost:
+                self._local.effects = None
+        effect_failure: list[Exception] = []
         try:
             if result.get("acceptedMessage"):
                 result = {**result, "acceptedMessage": {**result["acceptedMessage"],
                           "threadId": thread_id, "requestId": key}}
-            with self.store._connection() as db:
-                db.execute("UPDATE browser_submission_receipts SET state='completed', result_json=?, updated_at=? WHERE thread_id=? AND request_id=?",
-                           (json.dumps(result), self.store.clock(), thread_id, key))
+            with self.store.database_operation("submission_receipts.complete", priority="foreground"), self.store._connection() as db:
+                self.store._writer.record_scope_search_thread(thread_id)
+                db.execute("BEGIN IMMEDIATE")
+                with self.store.sharing_transaction(db):
+                    if effects:
+                        db.execute("SAVEPOINT submission_effects")
+                        try:
+                            for db_callback, _ in effects:
+                                db_callback(db)
+                        except Exception as effect_error:
+                            db.execute("ROLLBACK TO SAVEPOINT submission_effects")
+                            db.execute("RELEASE SAVEPOINT submission_effects")
+                            from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
+                            state = "rejected" if isinstance(effect_error, (BrowserBusyError, BrowserNotSubmittedError)) else "uncertain"
+                            try:
+                                db.execute(
+                                    "UPDATE browser_submission_receipts SET state=?, error=?, updated_at=? WHERE thread_id=? AND request_id=?",
+                                    (state, str(effect_error)[:2000], self.store.clock(), thread_id, key),
+                                )
+                            except Exception:
+                                pass
+                            effect_failure.append(effect_error)
+                        else:
+                            db.execute("RELEASE SAVEPOINT submission_effects")
+                    if not effect_failure:
+                        db.execute("UPDATE browser_submission_receipts SET state='completed', result_json=?, updated_at=? WHERE thread_id=? AND request_id=?",
+                                   (json.dumps(result), self.store.clock(), thread_id, key))
+                        if on_complete_db is not None:
+                            on_complete_db(db, result)
         except Exception as error:
             raise CoordinationError("Your submission may have been received, but its receipt could not be saved. Check the conversation before sending again.") from error
+        if effect_failure:
+            raise effect_failure[0]
+        for _, after_commit in effects:
+            if after_commit is not None:
+                after_commit()
         return result
 
     def accepted(self, thread_id, history, *, active_turn=None):

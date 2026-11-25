@@ -123,7 +123,7 @@ class AppControl:
             from .sidecars import Sidecars
             # Exact retries remain readable after the selected agent becomes busy,
             # the watch completes, or either conversation closes.
-            with self.store._connection() as db:
+            with self.store.reading(), self.store._connection() as db:
                 prior = db.execute("SELECT * FROM app_control_requests WHERE request_id=?", (request_id,)).fetchone()
             if prior:
                 saved = json.loads(prior["payload_json"])
@@ -161,7 +161,7 @@ class AppControl:
                 if payload.get("execution_confirmed") and not payload.get("reason"):
                     raise CoordinationError("Execution confirmation requires a reason describing the native-state evidence.")
                 from .supervision import authorizes
-                with self.store._connection() as db:
+                with self.store.reading(), self.store._connection() as db:
                     # The creating orchestrator, unless supervision was explicitly transferred.
                     if not authorizes(db, sender_session_id, thread_id):
                         raise CoordinationError("Only this app agent's current supervisor can recover it.")
@@ -209,7 +209,8 @@ class AppControl:
         identifier = request_id or str(uuid.uuid4())
         if not isinstance(identifier, str) or not identifier.strip() or len(identifier) > 160:
             raise CoordinationError("Request ID must contain 1–160 characters.")
-        with self.store._connection() as db:
+        conflict = False
+        with self.store.database_operation("app_control.request"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (identifier,)).fetchone()
             if previous:
@@ -223,7 +224,7 @@ class AppControl:
                 if (previous["operation"] != operation or previous["sender_session_id"] != sender_session_id
                         or old_payload != payload or (operation != "move" and previous["cwd"] != cwd)
                         or (operation in {"settings", "move", "resume", "interrupt", "session"} and previous["thread_id"] != thread_id)):
-                    raise CoordinationError("Request ID already belongs to a different app request.")
+                    conflict = True
             else:
                 if operation in {"settings", "move"}:
                     payload["expected_settings"] = {key: record[key] for key in SETTINGS}
@@ -237,6 +238,8 @@ class AppControl:
                     (request_id, operation, sender_session_id, cwd, thread_id, payload_json,
                      status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (identifier, operation, sender_session_id, cwd, thread_id, json.dumps(payload, sort_keys=True), queued, now, now))
+        if conflict:
+            raise CoordinationError("Request ID already belongs to a different app request.")
         return self.status(identifier)
 
     def _reconcile(self):
