@@ -380,6 +380,13 @@ def _load_context_snapshot(
                                     writer.search_cache["rows"][tid] = refreshed[tid]
                                 else:
                                     writer.search_cache["rows"].pop(tid, None)
+                                hydrated_cache = writer.search_cache.get("hydrated")
+                                if hydrated_cache is not None:
+                                    hydrated_cache.pop(tid, None)
+                                scored_cache = writer.search_cache.get("scored_terms")
+                                if scored_cache is not None:
+                                    for term_map in scored_cache.values():
+                                        term_map.pop(tid, None)
                                 writer.search_dirty_threads.pop(tid, None)
             return cached_rows
 
@@ -404,6 +411,8 @@ def _load_context_snapshot(
                         "sig": None,
                         "unsafe_epoch": unsafe_before,
                         "rows": dict(built),
+                        "scored_terms": {},
+                        "hydrated": {},
                     }
                     writer.search_dirty_threads = dict(writer._search_build_dirty)
                 if writer._search_build_token is pre_build_token:
@@ -725,33 +734,59 @@ def search_threads(
 
             terms_key = tuple(terms)
             ascii_terms = all(term.isascii() for term in terms_key)
+            cached_term_scores: dict[str, tuple[bool, int]] | None = None
+            dirty_now: set[str] = set()
+            if owned and use_context:
+                with store._writer.search_cache_lock:
+                    sc = store._writer.search_cache
+                    if sc is not None and sc.get("unsafe_epoch") == unsafe_before and store._writer.search_dirty_threads is not None:
+                        dirty_now = set(store._writer.search_dirty_threads)
+                        scored_terms_map = sc.setdefault("scored_terms", {})
+                        existing_term_map = scored_terms_map.get((terms_key, phrase))
+                        if existing_term_map is not None:
+                            cached_term_scores = dict(existing_term_map)
+
             if not scope_ids:
-                scoring_rows = []
+                candidate_tids = []
             elif not use_context:
-                scoring_rows = [all_entries[tid] for tid in message_hits if tid in scope_set]
+                candidate_tids = [tid for tid in message_hits if tid in scope_set]
+            elif cached_term_scores is not None:
+                candidate_tids = list(
+                    dict.fromkeys(
+                        tid
+                        for tid in (*cached_term_scores, *message_hits, *dirty_now)
+                        if tid in scope_set and tid in all_entries
+                    )
+                )
             elif ascii_terms:
-                scoring_rows = [
-                    entry
+                candidate_tids = [
+                    entry[0]
                     for entry in in_scope_entries
                     if entry[0] in message_hits or entry[13] or all(term in entry[12] for term in terms_key)
                 ]
             else:
-                scoring_rows = in_scope_entries
+                candidate_tids = scope_ids
 
+            new_term_scores: dict[str, tuple[bool, int]] = {} if (owned and use_context and cached_term_scores is None) else None
             candidates = []
-            for srow in scoring_rows:
-                tid = srow[0]
+            for tid in candidate_tids:
+                srow = all_entries[tid]
                 context_matched = False
                 context_score = 0
                 if use_context:
-                    title_val = srow[1] or ""
-                    domain_val = srow[2] or ""
-                    summary_val = ((srow[4] or "") + " " + (srow[5] or "")).strip()
-                    request_val = srow[3] or ""
-                    artifacts_val = srow[6] or ""
-                    context_matched, context_score = _score_context_fields(
-                        title_val, domain_val, summary_val, request_val, artifacts_val, terms_key, phrase
-                    )
+                    if cached_term_scores is not None and tid not in dirty_now and tid in cached_term_scores:
+                        context_matched, context_score = cached_term_scores[tid]
+                    else:
+                        title_val = srow[1] or ""
+                        domain_val = srow[2] or ""
+                        summary_val = ((srow[4] or "") + " " + (srow[5] or "")).strip()
+                        request_val = srow[3] or ""
+                        artifacts_val = srow[6] or ""
+                        context_matched, context_score = _score_context_fields(
+                            title_val, domain_val, summary_val, request_val, artifacts_val, terms_key, phrase
+                        )
+                        if new_term_scores is not None and context_matched and tid not in dirty_now:
+                            new_term_scores[tid] = (context_matched, context_score)
 
                 thread_messages = message_hits.get(tid, []) if use_messages else []
                 message_matched = bool(thread_messages)
@@ -782,44 +817,86 @@ def search_threads(
                     continue
                 candidates.append((key, tid, context_matched, ranked_matches))
 
+            if new_term_scores is not None and not has_scope_filter:
+                with store._writer.search_cache_lock:
+                    sc = store._writer.search_cache
+                    if sc is not None and sc.get("unsafe_epoch") == unsafe_before and store._writer.search_dirty_threads is not None:
+                        scored_terms_map = sc.setdefault("scored_terms", {})
+                        if len(scored_terms_map) >= 64:
+                            scored_terms_map.clear()
+                        clean_scores = {
+                            tid: val for tid, val in new_term_scores.items() if tid not in store._writer.search_dirty_threads
+                        }
+                        scored_terms_map[(terms_key, phrase)] = clean_scores
+
             candidates.sort(key=lambda entry: entry[0], reverse=True)
             selected = candidates[: limit + 1]
             page = selected[:limit]
 
             if page:
-                page_ids_json = json.dumps([tid for _, tid, _, _ in page])
-                packed_rows = db.execute(
-                    f"""WITH _page_ids(tid) AS (SELECT value FROM json_each(?))
-                        SELECT COALESCE(json_group_array(json_array(
-                               t.thread_id, t.title, t.domain, t.original_request, t.attention,
-                               s.client, s.cwd, s.turn_active,
-                               o.repository_id, r.name,
-                               o.project_id, p.name,
-                               c.phase, c.summary, c.next_action, c.next_actor,
-                               c.created_at,
-                               {app_expr},
-                               c.id, c.context_lifecycle_json,
-                               c.context_lifecycle_turn_key IS NOT t.turn_key,
-                               done.status,
-                               MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(done.completed_at, 0), COALESCE(c.created_at, 0)),
-                               NULL,
-                               {"bw.thread_id IS NOT NULL, bw.paused, bw.error" if "browser_inbox_wake" in tables else "0, NULL, NULL"}
-                           )), '[]')
-                        FROM work_threads t
-                        JOIN _page_ids pids ON pids.tid = t.thread_id
-                        JOIN sessions s ON s.session_id = t.thread_id
-                        JOIN work_projects w ON w.id = t.project_id
-                        JOIN thread_organization o ON o.thread_id = t.thread_id
-                        LEFT JOIN work_repositories r ON r.id = o.repository_id
-                        LEFT JOIN named_projects p ON p.id = o.project_id
-                        LEFT JOIN thread_checkpoints c ON c.id =
-                            (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)
-                        LEFT JOIN turn_completions done ON done.id =
-                            (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)
-                        {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}""",
-                    (page_ids_json,),
-                ).fetchone()[0]
-                decoded_rows = json.loads(packed_rows)
+                page_tids = [tid for _, tid, _, _ in page]
+                cached_hydrated: dict[str, list] = {}
+                missing_tids = page_tids
+                if owned:
+                    with store._writer.search_cache_lock:
+                        sc = store._writer.search_cache
+                        if sc is not None and sc.get("unsafe_epoch") == unsafe_before and store._writer.search_dirty_threads is not None:
+                            hyd = sc.setdefault("hydrated", {})
+                            cur_dirty = store._writer.search_dirty_threads
+                            cached_hydrated = {
+                                tid: hyd[tid] for tid in page_tids if tid in hyd and tid not in cur_dirty
+                            }
+                            missing_tids = [tid for tid in page_tids if tid not in cached_hydrated]
+                fetched_rows: list[list] = []
+                if missing_tids:
+                    page_ids_json = json.dumps(missing_tids)
+                    packed_rows = db.execute(
+                        f"""WITH _page_ids(tid) AS (SELECT value FROM json_each(?))
+                            SELECT COALESCE(json_group_array(json_array(
+                                   t.thread_id, t.title, t.domain, t.original_request, t.attention,
+                                   s.client, s.cwd, s.turn_active,
+                                   o.repository_id, r.name,
+                                   o.project_id, p.name,
+                                   c.phase, c.summary, c.next_action, c.next_actor,
+                                   c.created_at,
+                                   {app_expr},
+                                   c.id, c.context_lifecycle_json,
+                                   c.context_lifecycle_turn_key IS NOT t.turn_key,
+                                   done.status,
+                                   MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(done.completed_at, 0), COALESCE(c.created_at, 0)),
+                                   NULL,
+                                   {"bw.thread_id IS NOT NULL, bw.paused, bw.error" if "browser_inbox_wake" in tables else "0, NULL, NULL"}
+                               )), '[]')
+                            FROM work_threads t
+                            JOIN _page_ids pids ON pids.tid = t.thread_id
+                            JOIN sessions s ON s.session_id = t.thread_id
+                            JOIN work_projects w ON w.id = t.project_id
+                            JOIN thread_organization o ON o.thread_id = t.thread_id
+                            LEFT JOIN work_repositories r ON r.id = o.repository_id
+                            LEFT JOIN named_projects p ON p.id = o.project_id
+                            LEFT JOIN thread_checkpoints c ON c.id =
+                                (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)
+                            LEFT JOIN turn_completions done ON done.id =
+                                (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)
+                            {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}""",
+                        (page_ids_json,),
+                    ).fetchone()[0]
+                    fetched_rows = json.loads(packed_rows)
+                    if owned and fetched_rows:
+                        with store._writer.search_cache_lock:
+                            sc = store._writer.search_cache
+                            if (
+                                sc is not None
+                                and sc.get("unsafe_epoch") == unsafe_before
+                                and store._writer.search_dirty_threads is not None
+                            ):
+                                hyd = sc.setdefault("hydrated", {})
+                                if len(hyd) >= 4096:
+                                    hyd.clear()
+                                for vals in fetched_rows:
+                                    if vals[0] not in store._writer.search_dirty_threads:
+                                        hyd[vals[0]] = vals
+                decoded_rows = list(cached_hydrated.values()) + fetched_rows
             else:
                 decoded_rows = []
         finally:

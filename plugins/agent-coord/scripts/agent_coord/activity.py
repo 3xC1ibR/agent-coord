@@ -281,6 +281,28 @@ class ActivityStore:
     def _record(self, db, kind, thread_id, *, event_id, occurred_at, actor, source,
                 window_id=None, visit_id=None, turn_id=None, details_json="{}"):
         """Insert validated metadata using the caller's transaction."""
+        from .desktop_runtime import _OWNED_DATABASES
+        owned = self.store._database_identity in _OWNED_DATABASES
+        writer = self.store._writer
+        unsafe_epoch = writer.search_unsafe_epoch
+        cache = getattr(self, "_owned_snapshot_cache", None)
+        if owned and kind not in VISIT_KINDS and cache is not None and cache[0] == unsafe_epoch:
+            cached_settings, cached_snapshots = cache[1], cache[2]
+            cached_snapshot_json = cached_snapshots.get(thread_id)
+            if cached_settings["enabled"] and cached_snapshot_json is not None:
+                received_at = _timestamp(self.store.clock(), "Clock")
+                actual_occurred_at = received_at if occurred_at is None else occurred_at
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO activity_events (event_id, kind, thread_id, occurred_at,
+                        received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (event_id, kind, thread_id, actual_occurred_at, received_at, actor, source,
+                     window_id, visit_id, turn_id, details_json, cached_snapshot_json),
+                )
+                if cursor.rowcount == 1:
+                    return self._receipt({"event_id": event_id, "sequence": cursor.lastrowid,
+                                          "occurred_at": actual_occurred_at, "received_at": received_at})
+
         from .organization import _app_control_schema
         has_app_table = "app_control_requests" in _app_control_schema(db)
         app_creator_expr = (
@@ -321,12 +343,20 @@ class ActivityStore:
             actual_occurred_at = received_at if occurred_at is None else occurred_at
             creators = self._creators(db, thread_id) if has_creator else {}
             snapshot = self._snapshot(combined_dict, creators)
+            encoded_snapshot = _json(snapshot)
+            if owned and writer.search_unsafe_epoch == unsafe_epoch:
+                if cache is None or cache[0] != unsafe_epoch:
+                    cache = (unsafe_epoch, dict(settings), {})
+                    self._owned_snapshot_cache = cache
+                if len(cache[2]) >= 4096:
+                    cache[2].clear()
+                cache[2][thread_id] = encoded_snapshot
             cursor = db.execute(
                 """INSERT OR IGNORE INTO activity_events (event_id, kind, thread_id, occurred_at,
                     received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (event_id, kind, thread_id, actual_occurred_at, received_at, actor, source,
-                 window_id, visit_id, turn_id, details_json, _json(snapshot)),
+                 window_id, visit_id, turn_id, details_json, encoded_snapshot),
             )
             if cursor.rowcount == 1:
                 return self._receipt({"event_id": event_id, "sequence": cursor.lastrowid,

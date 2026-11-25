@@ -3082,30 +3082,71 @@ class BrowserSessions:
         if "expectedTurnId" in body:
             expected_turn = self._text(expected_turn, "Expected turn ID", 200)
         with self._thread_lock(thread_id):
+            from .desktop_runtime import _OWNED_DATABASES
+            owned = self.store._database_identity in _OWNED_DATABASES
+            unsafe_epoch = self.store._writer.search_unsafe_epoch
+            steer_cache = getattr(self, "_steer_preflight_cache", None)
+            if steer_cache is None:
+                steer_cache = self._steer_preflight_cache = {}
             with self.lock:
                 self.last_used[thread_id] = time.monotonic()
-            with self.store.reading(), self.store._connection() as preflight_db:
-                session_row = preflight_db.execute(
-                    """SELECT b.*,
-                              (SELECT attention FROM work_threads WHERE thread_id = b.thread_id) AS _thread_attention,
-                              (SELECT snoozed_until IS NOT NULL FROM work_threads WHERE thread_id = b.thread_id) AS _thread_snoozed,
-                              (EXISTS (SELECT 1 FROM review_runs WHERE owner_id = b.thread_id AND state IN ('active', 'creating'))
-                               OR EXISTS (SELECT 1 FROM review_runs WHERE critic_id = b.thread_id AND state IN ('active', 'creating'))) AS _has_active_review,
-                              EXISTS (SELECT 1 FROM review_steps WHERE actor_id = b.thread_id LIMIT 1) AS _has_review_steps,
-                              EXISTS (SELECT 1 FROM browser_inbox_wake w WHERE w.thread_id = b.thread_id
-                                      AND (w.paused != 0 OR w.dispatching != 0 OR w.error IS NOT NULL OR w.pause_kind IS NOT NULL
-                                           OR w.wake_message_id IS NOT NULL OR w.recovery_turn_id IS NOT NULL
-                                           OR w.retry_count != 0 OR w.retry_at IS NOT NULL OR w.paused_at IS NOT NULL
-                                           OR w.reconciled_turn_id IS NOT NULL OR w.recovery_after_message_id != 0)) AS _wake_dirty
-                       FROM browser_sessions b WHERE b.thread_id = ?""",
-                    (thread_id,),
-                ).fetchone()
-            record = self._record_from_row(thread_id, session_row)
-            thread_attention = record.pop("_thread_attention", None)
-            thread_snoozed = bool(record.pop("_thread_snoozed", 0))
-            has_active_review = bool(record.pop("_has_active_review", 0))
-            has_review_steps = bool(record.pop("_has_review_steps", 0))
-            wake_dirty = bool(record.pop("_wake_dirty", 0))
+                pre_loaded = thread_id in self.loaded
+                pre_active_turn = self.active.get(thread_id)
+            cached_preflight = (
+                steer_cache.get((thread_id, expected_turn))
+                if (
+                    owned
+                    and ordinary_input
+                    and expected_turn is not None
+                    and pre_loaded
+                    and pre_active_turn == expected_turn
+                )
+                else None
+            )
+            if cached_preflight is not None and cached_preflight[0] == unsafe_epoch:
+                record = dict(cached_preflight[1])
+                thread_attention = "now"
+                thread_snoozed = False
+                has_active_review = False
+                has_review_steps = False
+                wake_dirty = False
+            else:
+                with self.store.reading(), self.store._connection() as preflight_db:
+                    session_row = preflight_db.execute(
+                        """SELECT b.*,
+                                  (SELECT attention FROM work_threads WHERE thread_id = b.thread_id) AS _thread_attention,
+                                  (SELECT snoozed_until IS NOT NULL FROM work_threads WHERE thread_id = b.thread_id) AS _thread_snoozed,
+                                  (EXISTS (SELECT 1 FROM review_runs WHERE owner_id = b.thread_id AND state IN ('active', 'creating'))
+                                   OR EXISTS (SELECT 1 FROM review_runs WHERE critic_id = b.thread_id AND state IN ('active', 'creating'))) AS _has_active_review,
+                                  EXISTS (SELECT 1 FROM review_steps WHERE actor_id = b.thread_id LIMIT 1) AS _has_review_steps,
+                                  EXISTS (SELECT 1 FROM browser_inbox_wake w WHERE w.thread_id = b.thread_id
+                                          AND (w.paused != 0 OR w.dispatching != 0 OR w.error IS NOT NULL OR w.pause_kind IS NOT NULL
+                                               OR w.wake_message_id IS NOT NULL OR w.recovery_turn_id IS NOT NULL
+                                               OR w.retry_count != 0 OR w.retry_at IS NOT NULL OR w.paused_at IS NOT NULL
+                                               OR w.reconciled_turn_id IS NOT NULL OR w.recovery_after_message_id != 0)) AS _wake_dirty
+                           FROM browser_sessions b WHERE b.thread_id = ?""",
+                        (thread_id,),
+                    ).fetchone()
+                record = self._record_from_row(thread_id, session_row)
+                thread_attention = record.pop("_thread_attention", None)
+                thread_snoozed = bool(record.pop("_thread_snoozed", 0))
+                has_active_review = bool(record.pop("_has_active_review", 0))
+                has_review_steps = bool(record.pop("_has_review_steps", 0))
+                wake_dirty = bool(record.pop("_wake_dirty", 0))
+                if (
+                    owned
+                    and not record["archived"]
+                    and thread_attention == "now"
+                    and not thread_snoozed
+                    and not has_active_review
+                    and not has_review_steps
+                    and not wake_dirty
+                    and pre_active_turn
+                    and self.store._writer.search_unsafe_epoch == unsafe_epoch
+                ):
+                    if len(steer_cache) >= 1024:
+                        steer_cache.clear()
+                    steer_cache[(thread_id, pre_active_turn)] = (unsafe_epoch, dict(record))
             if automatic:
                 # The wake worker has claimed the message durably. Closed is
                 # organization, while Stop/failure/queued user input remain gates.
@@ -3229,6 +3270,20 @@ class BrowserSessions:
                     publish_changed=True,
                     active_steer_clean=(thread_attention == "now" and not thread_snoozed and not wake_dirty),
                 )
+                if (
+                    owned
+                    and not record["archived"]
+                    and thread_attention == "now"
+                    and not thread_snoozed
+                    and not has_active_review
+                    and not has_review_steps
+                    and not wake_dirty
+                    and turn_id
+                    and self.store._writer.search_unsafe_epoch == unsafe_epoch
+                ):
+                    if len(steer_cache) >= 1024:
+                        steer_cache.clear()
+                    steer_cache[(thread_id, turn_id)] = (unsafe_epoch, dict(record))
                 if accepted_input is not None:
                     accepted_input["turnId"] = turn_id
                 return result

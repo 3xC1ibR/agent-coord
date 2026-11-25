@@ -908,11 +908,20 @@ class CoordinationStore:
                     connection.close()
 
     def _database_file_identity(self):
+        from .desktop_runtime import _OWNED_DATABASES
+        owned = self._database_identity in _OWNED_DATABASES
+        if owned:
+            cached = getattr(self, "_owned_file_identity", None)
+            if cached is not None:
+                return cached
         try:
             status = self.database_path.stat()
         except FileNotFoundError:
             return None
-        return status.st_dev, status.st_ino
+        identity = (status.st_dev, status.st_ino)
+        if owned:
+            self._owned_file_identity = identity
+        return identity
 
     @property
     def transcripts(self):
