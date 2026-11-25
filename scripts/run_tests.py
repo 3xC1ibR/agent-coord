@@ -273,6 +273,12 @@ def main(argv=None):
     args.report.write_text(json.dumps(report, indent=2) + "\n")
     print(f"{len(report['started'])} test occurrences in {report['wall_seconds']:.2f}s; "
           f"report: {args.report}")
+    if not report["successful"]:
+        for test_id, outcome, detail in report["events"]:
+            if outcome in {"failure", "error", "subtest_failure", "unexpected_success"}:
+                print(f"FAIL [{outcome}] {test_id}", file=sys.stderr)
+                if detail:
+                    print(detail.rstrip(), file=sys.stderr)
     for error in report["integrity_errors"] + report["comparison_errors"]:
         print(error, file=sys.stderr)
     return 0 if report["successful"] and not report["comparison_errors"] else 1

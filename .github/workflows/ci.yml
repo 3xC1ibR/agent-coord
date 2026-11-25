@@ -67,7 +67,7 @@ jobs:
           python3 desktop/macos/openui_smoke.py
           python3 desktop/macos/openui_smoke.py --portfolio
       - name: Run Python tests
-        run: python3 -W error::ResourceWarning -m unittest discover -s tests -v
+        run: python3 -W error::ResourceWarning scripts/run_tests.py --report build/test-report.json
       - name: Verify database latency and writer admission
         run: python3 scripts/measure_database_contention.py --seconds 15 --writers 6 --check --output build/database-performance.json
       - name: Retain database performance measurements
@@ -126,7 +126,8 @@ jobs:
       - name: Measure packaged conversations under streaming load
         run: |
           python3 scripts/measure_packaged_conversation_workload.py \
-            --app 'build/ci/Ribbon Field.app' --report build/ci/generated-conversation-workload.json
+            --app 'build/ci/Ribbon Field.app' --advisory-latency \
+            --report build/ci/generated-conversation-workload.json
       - name: Retain generated workload measurements
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

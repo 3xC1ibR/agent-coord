@@ -23,23 +23,49 @@ When selected, run `bd prime`, claim the issue with `bd update <id> --claim` bef
 `--bead`, and close completed issues with `bd close`. Use `bd remember` for project memory.
 Dolt sync uses `bd dolt pull/push` and `refs/dolt/data`; the JSONL export is passive.
 
-Run the test suite with:
+Run the full Python test suite in parallel with:
 
 ```bash
-python3 -W error::ResourceWarning -m unittest discover -s tests -v
+python3 -W error::ResourceWarning scripts/run_tests.py --report build/test-report.json
 ```
 
-From an agent shell, prefix this command with
+During iteration, run focused `python3 -W error::ResourceWarning -m unittest tests/test_<area>.py -v` targets first.
+From an agent shell, prefix test commands with
 `env -u AGENT_COORD_SESSION_ID -u CODEX_THREAD_ID` so fixture callers do not
 inherit the executing agent's identity.
 
-## Production performance, reliability, and operational excellence
+## Verification and release tiers
 
-Own the outcome I experience. Turn each production failure into a permanent release test. Show that the affected build fails it. Upgrade the exact signed candidate on a representative copy of my workload while agents stream large outputs and a client continuously opens threads and sends messages. Fail the release if the app becomes unreachable beyond its stated allowance, misses its latency budgets, or loses or duplicates accepted work. After activation, verify those same outcomes on the backend actually serving my Mac before calling it fixed.
+Scale verification to the blast radius of the change. Do not run a full-release
+pipeline for ordinary bugfixes or local development installs.
 
-Keep the private incident record at `/opt/projects/agent-coord/docs/rf-performance-reliability-and-operational-excellence.md` up to date in the primary checkout, including when working in another worktree. Read it when investigating a production failure or preparing a release that affects a previously reported interaction. Add a dated section for each new incident of slowness, conversation refresh failure, or other user-visible reliability failure as soon as it is reported or observed. Preserve each repeated user complaint with its timestamp and source, even when it describes an open incident.
+- **Tier 1 — Normal changes, bugfixes, UI/CLI edits, and local Mac installs (default):**
+  Run focused tests for the changed area, plus the parallel Python suite
+  (`scripts/run_tests.py`) and JS tests (`node --test tests/*.js`) when relevant.
+  For local testing on this Mac, build and install a local `arm64` Developer ID
+  app directly. Do **not** trigger GitHub notarization, Intel (`x86_64`) builds,
+  full-size database upgrade rehearsals, historical signed-binary proofs, or
+  incident-record updates unless explicitly requested.
+- **Tier 2 — Storage, schema, search indexing, or runtime-update edge changes:**
+  In addition to Tier 1, run `python3 scripts/measure_database_contention.py --check --output build/database-performance.json`
+  and focused schema/runtime-update tests. Prefer **deterministic work-count
+  regressions** (SQLite read/write admissions, decoded turns, HTTP fetches per
+  action) over noisy wall-clock millisecond assertions. Local installs still use
+  a local `arm64` build unless a signed release artifact is explicitly requested.
+- **Tier 3 — Public releases (`publish: true`) and explicitly scoped production-incident closures:**
+  Own the user-experienced outcome end to end: turn the production failure into a
+  permanent regression test, validate the signed candidate on a representative
+  workload (failing on unreachability beyond allowance, lost/duplicated work, or
+  unexplained latency regressions), and verify the installed serving backend.
+  Keep the private incident record at
+  `/opt/projects/agent-coord/docs/rf-performance-reliability-and-operational-excellence.md`
+  (outside Git) updated **only** for explicitly tracked production incidents and
+  public-release closures—not for routine bugfixes or normal development. Use the
+  budgets in [Responsiveness](docs/responsiveness.md) and allowances in the
+  [runtime update contract](docs/runtime-updates.md).
 
-Record the interaction, user impact, workload, affected build, evidence, cause or outstanding question, permanent regression test and owner. Append the failing baseline, signed-candidate measurements, release decision and installed-backend verification as they become available. Use the interaction budgets in [Responsiveness](docs/responsiveness.md) and the upgrade allowances in the [runtime update contract](docs/runtime-updates.md). Keep incidents open when verification is pending. Keep the incident record outside Git.
+**Anti-loop rule:** Fixing an unrelated flaky test or harness check does **not**
+invalidate an already-built app binary or require re-signing or re-rehearsing it.
 
 ## Database correctness and latency
 
@@ -47,11 +73,11 @@ For database, persistence, search, provider-event or request-path changes, run
 `python3 scripts/measure_database_contention.py --check --output build/database-performance.json`.
 CI enforces this gate. Report errors, throughput, foreground p95, writer hold p95
 and admission timeouts with the workload and revision. Never raise budgets merely
-to make a change pass. Compare matched workloads before and after optimization;
-on signed upgrade rehearsals, compare candidate latency against the unmodified
-baseline captured in the same run—if the baseline itself breaches its budgets,
-diagnose run noise before rejecting a candidate for a modest latency miss while
-keeping correctness, continuity, and exact-once delivery non-negotiable.
+to make a change pass. In hosted CI, packaged Playwright wall-clock latency
+measurements are advisory (shared runners are noisy), while correctness,
+continuity, and exact-once delivery remain non-negotiable. On signed upgrade
+rehearsals, compare candidate latency against an unmodified baseline on the same
+host before rejecting for modest latency noise.
 The integration harness and HTTP budgets are documented in `docs/responsiveness.md`;
 use large histories and sustained mixed traffic when changing storage/indexing.
 
@@ -93,9 +119,12 @@ and the [runtime update contract](docs/runtime-updates.md).
 - Local development builds select a unique Developer ID Application certificate
   when available to preserve macOS privacy approvals; ad hoc installation requires
   explicit `--sign-identity -` and cannot replace a certificate-signed app. Local
-  builds disable automatic updates. Use the existing release CI for notarized,
-  update-enabled builds; its Apple credentials and updater signing identity are already
-  configured. Do not require local notarization setup or regenerate signing keys
+  builds disable automatic updates. Use the existing release CI (`release-macos.yml`)
+  for notarized, update-enabled builds; its Apple credentials and updater signing
+  identity are already configured. Private candidate runs (`publish: false`) build
+  `arm64` only and support `skip_tests: true` when CI already passed on that commit;
+  public releases (`publish: true` or `v*` tags) build and notarize both `arm64`
+  and `x86_64`. Do not require local notarization setup or regenerate signing keys
   for that CI workflow.
 - Local installation, successful CI, and public publication are separate
   outcomes. Customer update notifications require published signed feeds and

@@ -202,6 +202,22 @@ class Cases(unittest.TestCase):
                 changed = {**base, key: value}
                 self.assertTrue(any(key in error for error in runner.differences(base, changed)))
 
+    def test_failures_print_details_to_stderr(self):
+        self.write("test_fail.py", '''import unittest
+class Cases(unittest.TestCase):
+    def test_boom(self):
+        self.assertEqual(1, 2, "expected mismatch marker")
+''')
+        report = self.root / "fail-report.json"
+        command = [sys.executable, "-W", "error::ResourceWarning", str(RUNNER),
+                   "--jobs", "2", "--start-directory", str(self.tests),
+                   "--report", str(report)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL [failure]", result.stderr)
+        self.assertIn("test_boom", result.stderr)
+        self.assertIn("expected mismatch marker", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

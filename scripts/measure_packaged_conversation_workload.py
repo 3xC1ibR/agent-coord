@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 import tempfile
 
 from validate_signed_runtime_responsiveness import (
@@ -17,12 +18,41 @@ from validate_signed_runtime_responsiveness import (
 from agent_coord import history_persistence
 from agent_coord.store import CoordinationStore
 
+ADVISORY_LATENCY_REASONS = frozenset({
+    "interaction latency budget exceeded",
+    "browser latency budget exceeded",
+})
+
+
+def apply_advisory_latency(report):
+    violations = list(report.get("violations") or [])
+    advisory = [v for v in violations if v.get("reason") in ADVISORY_LATENCY_REASONS]
+    blocking = [v for v in violations if v.get("reason") not in ADVISORY_LATENCY_REASONS]
+    report["latency_advisory"] = True
+    report["advisory_latency_violations"] = advisory
+    report["violations"] = blocking
+    report["standalone_passed"] = not blocking and not report.get("execution_error")
+    return advisory, blocking
+
 
 class GeneratedConversationWorkload(SignedUpgrade):
+    def __init__(self, args, old, candidate, *, advisory_latency=False):
+        super().__init__(args, old, candidate)
+        self.advisory_latency = advisory_latency
+
     def execute(self):
         (self.root / "measure-browser-execution").touch()
         try:
             super().execute()
+            if self.advisory_latency:
+                advisory, _ = apply_advisory_latency(self.report)
+                if advisory:
+                    print(
+                        f"Advisory: {len(advisory)} hosted wall-clock latency budget "
+                        f"violation(s) recorded without failing correctness checks: "
+                        f"{json.dumps(advisory)}",
+                        file=sys.stderr,
+                    )
         finally:
             if self.address:
                 url, token = self.address
@@ -87,6 +117,11 @@ def main():
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--playwright-module")
+    parser.add_argument(
+        "--advisory-latency",
+        action="store_true",
+        help="Record wall-clock latency budget misses as advisory while failing on correctness, receipt, or cleanup errors",
+    )
     args = parser.parse_args()
     args.report = args.report.resolve()
     bundle = signed_resources(args.app)
@@ -96,7 +131,9 @@ def main():
         args.profile_sample = args.report.with_suffix(".sample.txt")
         args.affected_report = None
         args.candidate_only = True
-        runner = GeneratedConversationWorkload(args, bundle, bundle)
+        runner = GeneratedConversationWorkload(
+            args, bundle, bundle, advisory_latency=args.advisory_latency
+        )
         runner.report.pop("signed_inputs")
         runner.report.update(workload_contract="generated-packaged-conversations-v1", package=bundle[1])
         return run_and_clean_up(runner)

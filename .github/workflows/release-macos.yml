@@ -23,6 +23,10 @@ on:
         default: alpha
         type: choice
         options: [alpha, beta, stable]
+      skip_tests:
+        description: 'Skip re-running the full test suite on private (publish=false) candidates when CI already passed'
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -40,6 +44,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       commit: ${{ steps.release.outputs.commit }}
       build_number: ${{ steps.release.outputs.build_number }}
+      matrix: ${{ steps.release.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +55,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           REQUESTED_BUILD_NUMBER: ${{ inputs.build_number }}
+          PUBLISH_RELEASE: ${{ github.event_name == 'push' || inputs.publish }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == push ]]; then
@@ -63,24 +69,33 @@ jobs:
           [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || { echo 'Build number must be a positive integer'; exit 1; }
           commit=$(git rev-parse HEAD)
           git merge-base --is-ancestor "$commit" origin/main
+          if [[ "$PUBLISH_RELEASE" == true ]]; then
+            matrix='[{"arch":"arm64","runner":"macos-15"},{"arch":"x86_64","runner":"macos-15-intel"}]'
+          else
+            matrix='[{"arch":"arm64","runner":"macos-15"}]'
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
           echo "build_number=$build_number" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: github.event_name == 'push' || inputs.publish || !inputs.skip_tests
         with:
           python-version: '3.12'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: github.event_name == 'push' || inputs.publish || !inputs.skip_tests
         with:
           node-version: '22'
           package-manager-cache: false
       - name: Test release source
+        if: github.event_name == 'push' || inputs.publish || !inputs.skip_tests
         run: |
           sudo apt-get update
           sudo apt-get install -y ripgrep
           python3 scripts/plugin_tools.py validate
           python3 -m compileall -q plugins/agent-coord/scripts scripts tests desktop/macos
           node --test tests/*.js
-          python3 -W error::ResourceWarning -m unittest discover -s tests -v
+          python3 -W error::ResourceWarning scripts/run_tests.py --report build/test-report.json
 
   build:
     needs: validate
@@ -88,11 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: arm64
-            runner: macos-15
-          - arch: x86_64
-            runner: macos-15-intel
+        include: ${{ fromJson(needs.validate.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     env:
