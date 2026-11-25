@@ -115,6 +115,59 @@ class RemoteAccessTests(unittest.TestCase):
             other.disable()
         self.assertTrue(self.remote.authenticated(cookie))
 
+    def test_committed_successor_retries_after_predecessor_releases_route(self):
+        cookie = self.pair()
+        other = self.new_remote()
+        other.restore("http://127.0.0.1:9999")
+        self.assertFalse(other.status()["enabled"])
+        calls = list(self.ts.calls)
+        other.retry_restore()
+        self.assertEqual(self.ts.calls, calls)
+        self.now += 1
+        other.retry_restore()
+        self.assertEqual(self.ts.calls, calls)
+        self.assertTrue(self.remote.authenticated(cookie))
+        self.remote.close()
+        self.now += 1
+        other.retry_restore()
+        self.assertTrue(other.authenticated(cookie))
+        self.assertEqual(other.status()["error"], "")
+        self.assertEqual(self.ts.calls[-1], ("enable", 443, "http://127.0.0.1:9999"))
+        calls = list(self.ts.calls)
+        self.now += 1
+        other.retry_restore()
+        self.assertEqual(self.ts.calls, calls)
+
+    def test_pending_restore_respects_explicit_disable_and_candidate_shutdown(self):
+        for disable in (True, False):
+            with self.subTest(disable=disable):
+                self.remote = self.new_remote()
+                self.remote.enable()
+                other = self.new_remote()
+                other.restore("http://127.0.0.1:9999")
+                if disable:
+                    self.remote.disable()
+                else:
+                    other.close()
+                self.remote.close()
+                calls = list(self.ts.calls)
+                self.now += 1
+                other.retry_restore()
+                self.assertFalse(other.status()["enabled"])
+                self.assertEqual(self.ts.calls, calls)
+
+    def test_restore_does_not_retry_unrelated_route_conflicts(self):
+        self.remote.enable()
+        self.remote.close()
+        self.ts.enable(443, "http://127.0.0.1:1234")
+        other = self.new_remote()
+        other.restore("http://127.0.0.1:9999")
+        calls = list(self.ts.calls)
+        self.now += 1
+        other.retry_restore()
+        self.assertFalse(other.status()["enabled"])
+        self.assertEqual(self.ts.calls, calls)
+
     def test_shared_listener_survives_restart_and_disable(self):
         cookie = self.pair()
         siblings = {"/reader": {"Proxy": "http://127.0.0.1:8767"},

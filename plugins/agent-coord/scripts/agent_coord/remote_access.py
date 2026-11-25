@@ -26,6 +26,10 @@ PAIR_SECONDS = 300
 DEVICE_SECONDS = 30 * 24 * 60 * 60
 
 
+class RemoteAccessInUse(CoordinationError):
+    """The preceding backend still owns the private route."""
+
+
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -140,6 +144,8 @@ class RemoteAccess:
         self.target = ""
         self.error = ""
         self.closed = False
+        self._restore_pending = False
+        self._restore_retry_at = 0.0
 
     def _read(self) -> dict:
         try:
@@ -170,7 +176,7 @@ class RemoteAccess:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             lease.close()
-            raise CoordinationError("Remote access is owned by another Ribbon Field window/server. Manage it there.") from exc
+            raise RemoteAccessInUse("Remote access is owned by another Ribbon Field window/server. Manage it there.") from exc
         self.lease = lease
         try:
             self.data = self._read()
@@ -184,14 +190,29 @@ class RemoteAccess:
             self.lease = None
 
     def restore(self, target: str) -> None:
-        self.target = target
-        try:
-            saved = self._read()
-            self.data = saved
-            if saved.get("enabled"):
-                self.enable(saved.get("port", 443))
-        except (CoordinationError, OSError) as exc:
-            self.error = str(exc)
+        with self.lock:
+            if self.closed:
+                return
+            self.target = target
+            self._restore_pending = False
+            try:
+                saved = self._read()
+                self.data = saved
+                if saved.get("enabled"):
+                    self.enable(saved.get("port", 443))
+                else:
+                    self.error = ""
+            except (CoordinationError, OSError) as exc:
+                self.error = str(exc)
+                self._restore_pending = isinstance(exc, RemoteAccessInUse)
+                self._restore_retry_at = self.clock() + 1
+
+    def retry_restore(self) -> None:
+        """Called only by the committed runtime after overlapping startup."""
+        with self.lock:
+            if self._restore_pending and not self.closed and self.clock() >= self._restore_retry_at:
+                # Reload preferences so an explicit disable always wins.
+                self.restore(self.target)
 
     def enable(self, port: int = 443) -> dict:
         with self.lock:
@@ -219,6 +240,7 @@ class RemoteAccess:
                     raise CoordinationError("Tailscale did not create the expected private HTTPS route. Remote access remains locked.")
                 self.origin = f"https://{hostname}" + (f":{port}" if port != 443 else "")
                 self.error = ""
+                self._restore_pending = False
                 return self.status()
             except Exception:
                 self.origin = ""
@@ -336,6 +358,7 @@ class RemoteAccess:
     def close(self) -> None:
         with self.lock:
             self.closed = True
+            self._restore_pending = False
             self.origin = ""
             self.pairs.clear()
             if self.lease is not None:

@@ -290,6 +290,68 @@ class RuntimeTests(unittest.TestCase):
         record = runtime.discover(self.database)
         self.assertTrue(runtime.control(record, "status")["paused"])
 
+    def test_overlapping_upgrade_restores_private_route_and_existing_phone_grant(self):
+        tailscale = self.root / "bin/tailscale"
+        tailscale.write_text(f"#!{sys.executable}\n" + r'''
+import json, os, pathlib, sys
+path = pathlib.Path(os.environ['RIBBON_FAKE_ROOT']) / 'tailscale.json'
+args = sys.argv[1:]
+config = json.loads(path.read_text()) if path.exists() else {}
+if args == ['status', '--json']:
+    print(json.dumps({'BackendState':'Running','Self':{'DNSName':'mac.test.ts.net'}}))
+elif args == ['serve', 'status', '--json']:
+    print(json.dumps(config))
+else:
+    assert args[0] == 'serve', args
+    port = next(x.split('=')[1] for x in args if x.startswith('--https='))
+    authority = 'mac.test.ts.net:' + port
+    handlers = config.setdefault('Web', {}).setdefault(authority, {}).setdefault('Handlers', {})
+    if args[-1] == 'off':
+        handlers.pop('/', None)
+    else:
+        config.setdefault('TCP', {})[port] = {'HTTPS':True}
+        handlers['/'] = {'Proxy':args[-1]}
+    temporary = path.with_suffix('.' + str(os.getpid()))
+    temporary.write_text(json.dumps(config))
+    temporary.replace(path)
+''')
+        tailscale.chmod(0o755)
+        first = self.launch()
+        self.api(first['url'], 'api/remote/enable', {'port':443})
+        pairing = self.api(first['url'], 'api/remote/pairing', {})['url'].split('#pair=')[1]
+
+        def target():
+            mapping = json.loads((self.root / 'tailscale.json').read_text())
+            return mapping['Web']['mac.test.ts.net:443']['Handlers']['/']['Proxy']
+
+        original_target = target()
+        request = urllib.request.Request(original_target + '/api/remote/pair',
+            data=json.dumps({'token':pairing,'name':'Test phone'}).encode(),
+            headers={'Host':'mac.test.ts.net','Origin':'https://mac.test.ts.net',
+                     'Content-Type':'application/json'})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            cookie = response.headers['Set-Cookie'].split(';')[0]
+            response.read()
+        candidate = self.root / 'Candidate/Contents/Resources'
+        shutil.copytree(self.resources, candidate)
+        metadata = json.loads((candidate / 'backend.json').read_text())
+        metadata['runtime_version'] = '2+2'
+        (candidate / 'backend.json').write_text(json.dumps(metadata))
+        staged = self.launch(candidate, confirm_updates=True)
+        runtime.control(runtime.discover(self.database), 'activate-update',
+                        request_id='remote-access-upgrade', payload=staged['pending'])
+        current = self.wait_update('committed')
+        self.assertNotEqual(current['pid'], first['pid'])
+        self.wait(lambda: self.api(current['url'], 'api/remote/status')['enabled'])
+        self.assertNotEqual(target(), original_target)
+        request = urllib.request.Request(target() + '/api/browser/config',
+            headers={'Host':'mac.test.ts.net','Cookie':cookie})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertTrue(json.load(response)['remote'])
+        status = self.api(current['url'], 'api/remote/status')
+        self.assertEqual(status['error'], '')
+        self.assertEqual([device['name'] for device in status['devices']], ['Test phone'])
+
     def test_detached_reconnect_preserves_provider_approval_output_and_queue_after_bundle_deletion(self):
         first = self.launch()
         url = first["url"]

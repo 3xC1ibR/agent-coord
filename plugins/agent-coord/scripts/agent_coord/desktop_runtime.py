@@ -1552,6 +1552,9 @@ class Runtime:
                 self.wake_event.clear()
                 if self.stopping.is_set():
                     break
+                # Candidates start before the preceding backend releases its
+                # remote route. Only the committed owner may retry adoption.
+                self.server.remote_access.retry_restore()
                 with self.mutex:
                     if not self.pending or self.maintenance:
                         continue
