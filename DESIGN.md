@@ -68,12 +68,9 @@ working/input status is explicit text beneath the title, with Stop a distinct
 thread options sheet; reuse their original controls and handlers. Keep 44px touch
 targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
-Jump to latest uses a downward arrow, floating above the desktop composer in a
-44px button. The phone adds a visible Latest label immediately before thread
-options in its existing header, retaining a 44px target height. At 360px and below,
-the same control moves into thread actions to preserve title space.
-Its desktop anchor never reserves a layout row;
-phone navigation stays apart from Send and never covers the transcript or draft.
+Jump to latest is an arrow-only 44px button floating above the composer on
+desktop and phones. Its anchor never reserves a layout row, and the control
+stays clear of the draft and Send. Reaching the latest message hides the button.
 Retain the accessible name and tooltip. Mobile error notices occupy a dedicated
 row before the transcript, with a 44px dismiss target; they return to the global
 notice position in the overview and on desktop. Checkpoint provenance and
@@ -178,6 +175,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-25 | Restore the arrow-only jump-to-latest control above the composer on every viewport | The user preferred its original placement after using the new chat layout. |
 | 2026-11-25 | Approved chat composition: aligned reading and composing, quiet task chrome, compact reference context | User approved integration after reviewing the alternatives. Narrow phones retain title space and allocate a layout row for alerts. |
 | 2026-11-24 | A Pinned section leads the inbox; inbox row menus offer Dismiss from Attention and Mark as read; a phone opens a conversation on the conversation, not the agent tree | The owner expected pins at the top regardless of state, had no way to dismiss or read from an inbox row, and had to close the tree sheet to read a thread with agents |
 | 2026-11-24 | The tab dot and the agent tree badge share one needs-you derivation built on the inbox's request rule; closed tree children fold to icons | Dismissing a request left the tree badge and the parent's tab dot orange, and a parent showed orange while working, because three copies derived attention differently |
