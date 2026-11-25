@@ -1443,27 +1443,25 @@ function renderThread() {
   const opened = new Set([...$("context-info").querySelectorAll("details[open]")].map(el => el.dataset.section));
   $("checkpoint").dataset.signature = signature; $("checkpoint").dataset.thread = work.thread_id;
   const phase = checkpoint?.phase;
-  $("checkpoint").replaceChildren(node("h3", "Status"), node("p", phase ? phase[0].toUpperCase() + phase.slice(1) : "No status saved yet."));
-  const next = node("p", null, "checkpoint-next");
-  const owner = checkpoint?.next_action && {user: "You", agent: "Agent", external: "External"}[checkpoint.next_actor];
-  next.append(node("strong", owner ? owner + " next: " : "Next: "), node("span", checkpoint?.next_action || "No next action saved."));
-  $("checkpoint").append(next, node("h3", "Latest"), node("p", checkpoint?.summary || "No checkpoint yet. The agent will save one when it has a result to report."));
+  const contextHeading = node("div", null, "context-heading");
+  contextHeading.append(node("h3", "Context"));
+  if (phase) contextHeading.append(node("span", phase[0].toUpperCase() + phase.slice(1), "context-phase"));
+  $("checkpoint").replaceChildren(contextHeading);
+  if (checkpoint?.summary) $("checkpoint").append(node("p", checkpoint.summary, "checkpoint-summary"));
+  if (checkpoint?.next_action) {
+    const next = node("p", null, "checkpoint-next");
+    const owner = {user: "You", agent: "Agent", external: "External"}[checkpoint.next_actor];
+    next.append(node("strong", owner ? owner + " next: " : "Next: "), node("span", checkpoint.next_action));
+    $("checkpoint").append(next);
+  }
   if (work.checkpoint_stale) $("checkpoint").append(node("p", "This checkpoint predates the latest turn. Review the conversation for newer work.", "stale-checkpoint"));
-  const original = node("section", null, "original-request-section");
-  original.append(node("h3", "Original request"));
-  if (work.original_request?.length > 240) {
-    const expanded = sameThread && opened.has("original");
-    const preview = node("p", work.original_request.slice(0, 240).trimEnd() + "…", "original-request");
-    const full = node("details"); full.dataset.section = "original"; full.open = expanded;
-    preview.hidden = expanded;
-    const toggle = node("summary", expanded ? "Show less" : "Show full request");
-    full.append(toggle, node("p", work.original_request, "original-request"));
-    full.addEventListener("toggle", () => { preview.hidden = full.open; toggle.textContent = full.open ? "Show less" : "Show full request"; });
-    original.append(preview, full);
-  } else original.append(node("p", work.original_request || "No original request saved.", "original-request"));
+  const original = node("details", null, "original-request-section");
+  original.dataset.section = "original";
+  original.open = sameThread && opened.has("original");
+  original.append(node("summary", "Original request"), node("p", work.original_request || "No original request saved.", "original-request"));
   $("checkpoint").append(original);
   $("context-reuse").replaceChildren();
-  globalThis.agentCoordContextLifecycle?.render($("context-reuse"), work, {sameThread, opened});
+  if (checkpoint?.context_lifecycle) globalThis.agentCoordContextLifecycle?.render($("context-reuse"), work, {sameThread, opened});
   $("checkpoint-extras").replaceChildren();
   const links = node("div", null, "thread-links");
   for (const link of work.links) {
@@ -1711,9 +1709,11 @@ function renderStatus() {
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   if (state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
-  $("message").placeholder = $("composer-hint").textContent;
-  state.mobileChat?.placeholder($("composer-hint").textContent, archived || state.detailRefreshing ? $("composer-hint").textContent :
-    dispatcher ? "Send a request…" : running ? "Add a follow-up…" : "Message…");
+  const prompt = archived || state.detailRefreshing ? $("composer-hint").textContent :
+    dispatcher ? "Send a request…" : running ? "Add a follow-up…" : "Message…";
+  $("message").placeholder = prompt;
+  $("message").title = $("composer-hint").textContent;
+  state.mobileChat?.placeholder(prompt, prompt);
   state.attachments?.render();
   state.slashCommands?.render();
   state.mentions?.render();
@@ -3846,9 +3846,10 @@ function setupAgentTree() {
     $("panel-" + next).focus(); $("panel-" + next).click();
   };
   const grip = $("agent-panel-resize");
-  let resizing = false, width = 52, contextWidth = 340;
+  const defaultContextWidth = parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.getPropertyValue("--chat-reference-width")) || 340;
+  let resizing = false, width = 52, contextWidth = defaultContextWidth;
   try { width = Number(localStorage.getItem("agent-coord.agent-panel-width")) || 52; } catch { /* Optional preference. */ }
-  try { contextWidth = Number(localStorage.getItem("agent-coord.context-panel-width")) || 340; } catch { /* Optional preference. */ }
+  try { contextWidth = Number(localStorage.getItem("agent-coord.context-panel-width")) || defaultContextWidth; } catch { /* Optional preference. */ }
   var syncGrip = () => {
     const agents = controller.mode === "agents";
     grip.setAttribute("aria-label", agents ? "Resize agent tree panel" : "Resize thread context panel");

@@ -34,8 +34,10 @@ test("running composer offers steering alongside Stop, then returns to Send", ()
   assert.equal(c.$("stop").hidden, false);
   assert.equal(c.$("queue").hidden, false);
   assert.equal(c.$("queue").disabled, false);
-  assert.match(c.$("message").placeholder, /Tab to queue/);
-  assert.match(c.$("message").placeholder, /steer/i);
+  assert.equal(c.$("message").placeholder, "Add a follow-up…");
+  assert.match(c.$("message").title, /Tab to queue/);
+  assert.match(c.$("message").title, /steer/i);
+  assert.match(c.$("composer-hint").textContent, /Tab to queue/);
   c.state.detail.running = false;
   c.renderStatus();
   assert.match(c.$("send").title, /Send/);

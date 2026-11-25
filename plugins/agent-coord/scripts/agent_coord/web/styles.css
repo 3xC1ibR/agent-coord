@@ -48,6 +48,34 @@
   --mobile-chat-control-padding: 6px; /* drift-ok: mobile layout token in the DESIGN.md implementation source. */
   --mobile-draft-max-height: 320px;
   --mobile-input-max-height: 240px;
+  /* Conversation composition: one aligned measure for reading and writing. */
+  --chat-reading-width: 760px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-reference-width: 288px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-reading-inset: 32px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-reading-gap: 28px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-message-size: 14px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-message-leading: 1.75;
+  --chat-title-size: 18px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-title-leading: 1.35;
+  --chat-heading-height: 68px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-reference-title-size: 14px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-reference-inset: 24px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-meta-size: 12px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-code-size: 12px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-radius: 10px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-rule: 1px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-message-padding: 16px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-request-width: 88%;
+  --chat-note-height: 80px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-note-active-height: 128px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-composer-inset: 16px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-composer-edge: 20px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-editor-height: 32px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-working-mark: 6px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-working-mark-inset: 12px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-stop-mark: 8px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-header-control: 36px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-toolbar-gap: 12px; /* drift-ok: conversation token source declared in DESIGN.md. */
   --chat-control-size: 44px;
   --chat-control-icon: 20px;
   --chat-placeholder-leading: 1.375;
@@ -984,4 +1012,117 @@ body.mobile-chat .mobile-thread-sheet .session-statusbar { display: flex; paddin
 @media (pointer: coarse) {
   #composer .model-trigger, #composer .composer-footer button, #edit-permissions, #status-group { min-height: var(--chat-control-size); }
   #message:placeholder-shown { line-height: var(--chat-placeholder-leading); }
+}
+
+
+/* Conversation composition. Reading, requests and drafts share an explicit measure. */
+body:has(#conversation:not([hidden])) .sidebar .session.active-thread::after {
+  inset: 50% var(--chat-working-mark-inset) auto auto;
+  width: var(--chat-working-mark); height: var(--chat-working-mark); padding: 0;
+  border-radius: 50%; background: var(--sb-accent); transform: translateY(-50%);
+  mask: none; -webkit-mask: none; animation: none;
+}
+body:has(#conversation:not([hidden])) .sidebar .session.active-thread { padding-right: var(--chat-reading-gap); }
+body:has(#conversation:not([hidden])) .sidebar .session.selected { font-weight: 600; }
+.conversation .conversation-head {
+  min-height: var(--chat-heading-height);
+  padding: var(--chat-toolbar-gap) max(var(--chat-reading-inset), calc((100% - var(--chat-reading-width)) / 2));
+  border-bottom-color: transparent;
+}
+.conversation .conversation-head h1, .conversation .title-editor input {
+  font-family: inherit; font-size: var(--chat-title-size); font-weight: 600;
+  letter-spacing: normal; line-height: var(--chat-title-leading);
+}
+.conversation .conversation-controls { gap: var(--chat-menu-gap); }
+.conversation .conversation-controls > button {
+  min-width: var(--chat-header-control); min-height: var(--chat-header-control);
+  border-color: transparent; background: transparent; color: var(--muted);
+}
+.conversation .conversation-controls > button:hover,
+.conversation .conversation-controls > button[aria-expanded="true"] { color: var(--ink); background: var(--tint); }
+.conversation .timeline {
+  padding: var(--chat-message-padding) max(var(--chat-reading-inset), calc((100% - var(--chat-reading-width)) / 2)) var(--chat-reading-gap);
+  scrollbar-width: thin;
+}
+.conversation .message { font-size: var(--chat-message-size); line-height: var(--chat-message-leading); margin-bottom: var(--chat-reading-gap); }
+.conversation .message-time { font-family: inherit; font-size: var(--chat-meta-size); line-height: var(--chat-title-leading); margin-top: var(--chat-menu-gap); }
+.conversation .message.user {
+  width: fit-content; max-width: var(--chat-request-width); margin-left: auto;
+  padding: var(--chat-message-padding); border-radius: var(--chat-radius);
+  border-color: transparent;
+}
+.conversation .message.user.outgoing[data-status="failed"] { border-color: var(--danger); }
+.conversation .message.user .message-time { color: var(--muted); }
+.conversation .message.agent .markdown { line-height: var(--chat-message-leading); }
+.conversation .message .markdown pre { font-size: var(--chat-code-size); padding: var(--chat-message-padding); border-radius: var(--response-action-radius); }
+.conversation .message .markdown pre code { font-size: inherit; }
+.conversation .turn-work { border-top: var(--chat-rule) solid var(--line); border-bottom: var(--chat-rule) solid var(--line); background: transparent; border-radius: 0; padding: 0; margin-bottom: var(--chat-reading-gap); }
+.conversation .turn-work > summary { padding: var(--chat-toolbar-gap) 0; }
+.conversation .turn-work > .tool { margin-bottom: var(--chat-menu-gap); }
+.conversation .composer {
+  width: calc(100% - var(--chat-reading-inset) * 2); max-width: var(--chat-reading-width);
+  margin: 0 auto var(--chat-composer-edge); padding: var(--chat-composer-inset);
+  border-radius: var(--chat-radius); border-color: var(--line-strong); box-shadow: none;
+}
+.conversation .composer:focus-within { border-color: var(--hover-line); }
+.conversation .composer textarea { font-size: var(--chat-message-size); line-height: var(--chat-message-leading); min-height: var(--chat-editor-height); }
+.conversation .composer-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--chat-menu-gap); }
+.conversation .composer-model { margin: 0; min-width: 0; flex: 1; gap: var(--chat-menu-gap); }
+.conversation .model-trigger { min-height: var(--chat-control-size); margin-left: 0; }
+.conversation .composer-footer { margin: 0 0 0 auto; }
+.conversation .composer-footer > div { flex-wrap: nowrap; }
+.conversation .composer-footer .quiet { border-color: transparent; background: transparent; min-height: var(--chat-control-size); color: var(--muted); }
+.conversation #stop { display: inline-flex; gap: var(--chat-menu-gap); align-items: center; min-height: var(--chat-control-size); color: var(--ink); border-color: var(--line-strong); }
+.conversation #stop::before { content: ""; width: var(--chat-stop-mark); height: var(--chat-stop-mark); background: currentColor; }
+.conversation .context-panel { background: var(--paper); }
+.conversation .thread-context, .conversation .thread-scratchpad { padding: var(--chat-reference-inset); }
+.conversation #checkpoint h3, .conversation .thread-context h3 { font-size: var(--chat-reference-title-size); font-weight: 600; margin: 0; }
+.conversation .context-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--chat-menu-gap); margin-bottom: var(--chat-reference-inset); }
+.conversation .context-phase { color: var(--muted); font-size: var(--chat-meta-size); }
+.conversation .thread-context p { font-size: var(--chat-meta-size); margin: var(--chat-toolbar-gap) 0 0; }
+.conversation .checkpoint-next { margin-top: var(--chat-reference-inset); }
+.conversation .original-request-section { margin-top: var(--chat-reference-inset); }
+.conversation #checkpoint .original-request-section > summary { min-height: var(--chat-header-control); display: list-item; padding-block: var(--chat-menu-gap); color: var(--muted); font-size: var(--chat-meta-size); }
+.conversation .thread-scratchpad { border-top: var(--chat-rule) solid var(--line); border-bottom: 0; }
+.conversation .scratchpad-heading { margin-bottom: var(--chat-toolbar-gap); }
+.conversation .scratchpad-heading label { font-size: var(--chat-reference-title-size); font-weight: 600; }
+.conversation .thread-scratchpad textarea { min-height: var(--chat-note-height); height: var(--chat-note-height); padding: var(--chat-toolbar-gap); font-size: var(--chat-meta-size); background: var(--surface); border-color: var(--line); border-radius: var(--response-action-radius); }
+.conversation .thread-scratchpad textarea:focus { min-height: var(--chat-note-active-height); }
+.conversation .context-secondary { border-top: var(--chat-rule) solid var(--line); }
+.conversation #context-reuse:empty + #checkpoint-extras { border: 0; padding: 0; margin: 0; }
+.conversation .context-actions { gap: var(--chat-menu-gap); }
+.conversation .context-actions button { font-size: var(--chat-meta-size); padding: var(--chat-menu-gap) 0; border: 0; }
+.conversation .context-actions button + button { margin-left: var(--chat-menu-gap); }
+.conversation .session-statusbar { background: var(--paper); font-family: inherit; font-size: var(--chat-meta-size); }
+.conversation .thread-usage > summary, .conversation .session-settings > button { font-family: inherit; }
+body.chat-expanded .conversation .timeline { padding-inline: max(var(--chat-reading-inset), calc((100% - var(--chat-reading-width)) / 2)); }
+body.chat-expanded .conversation .composer { margin-inline: auto; }
+
+/* The phone preserves the same reading rhythm; live status belongs to its title. */
+body.mobile-chat .conversation .conversation-head { min-height: var(--mobile-chat-header-height); padding: var(--mobile-chat-header-inset) var(--mobile-chat-inset); border-bottom: var(--chat-rule) solid var(--line); }
+body.mobile-chat .conversation .conversation-head h1 { font-size: var(--mobile-chat-title-size); }
+body.mobile-chat .conversation .conversation-controls > button { min-width: var(--chat-control-size); min-height: var(--chat-control-size); }
+body.mobile-chat .conversation-heading { display: flex; flex-direction: column; }
+body.mobile-chat .conversation-heading:has(.mobile-chat-status:is([data-status="running"], [data-status="input"])) .thread-title { padding-block: 0; }
+body.mobile-chat .mobile-chat-status { display: inline-flex; width: auto; height: auto; border-radius: 0; background: none; color: var(--muted); justify-content: flex-start; gap: var(--chat-menu-gap); font-size: var(--chat-meta-size); line-height: var(--chat-title-leading); }
+body.mobile-chat .mobile-chat-status:is([data-status="running"], [data-status="input"]) { display: inline-flex; background: none; }
+body.mobile-chat .mobile-chat-status::before { content: ""; width: var(--chat-working-mark); height: var(--chat-working-mark); border-radius: 50%; background: var(--accent); }
+body.mobile-chat .mobile-chat-status[data-status="input"]::before { background: var(--warm); }
+body.mobile-chat .mobile-chat-status::after { content: attr(aria-label); }
+body.mobile-chat .conversation .timeline { padding: var(--chat-message-padding) var(--chat-message-padding) var(--chat-reading-gap); }
+body.mobile-chat .conversation .message { font-size: var(--mobile-chat-message-size); line-height: var(--chat-message-leading); }
+body.mobile-chat .conversation .message.user { max-width: calc(100% - var(--chat-toolbar-gap)); }
+body.mobile-chat .conversation .message .markdown { line-height: var(--chat-message-leading); }
+body.mobile-chat .conversation .composer { width: calc(100% - var(--mobile-chat-inset) * 2); margin: 0 var(--mobile-chat-inset) max(var(--mobile-chat-gap), env(safe-area-inset-bottom)); padding: var(--mobile-chat-inset); }
+body.mobile-chat .conversation .composer textarea { font-size: var(--mobile-chat-input-size); }
+body.mobile-chat .conversation .composer-toolbar { flex-wrap: nowrap; margin-top: var(--mobile-chat-gap); gap: var(--mobile-chat-control-padding); }
+body.mobile-chat .conversation .composer-model { gap: var(--mobile-chat-control-padding); flex-wrap: nowrap; }
+body.mobile-chat .conversation .model-trigger { padding-inline: 0; }
+body.mobile-chat .conversation .composer-footer button { padding-inline: var(--mobile-chat-gap); }
+body.mobile-chat .conversation #stop { padding-inline: var(--mobile-chat-gap); font-size: var(--chat-meta-size); }
+body.mobile-chat .conversation #stop::before { display: none; }
+body.mobile-chat .conversation .composer-footer > div { gap: var(--mobile-chat-control-padding); }
+
+body.mobile-chat .mobile-chat-status:not(:is([data-status="running"], [data-status="input"])) {
+  position: absolute; width: var(--chat-rule); height: var(--chat-rule); overflow: hidden; clip-path: inset(50%);
 }

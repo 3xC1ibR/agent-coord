@@ -25,7 +25,7 @@ spacing:
 Ribbon Field is a persistent workspace for conversations and coordinated agent work.
 Its quiet, dense workspace keeps the work prominent. Auxiliary pages such as Usage
 and Activity use the same paper, ink, controls and type with more reading room.
-This contract records the existing interface; it does not authorize a redesign.
+The chat composition candidate deliberately revises the conversation surface for review; other surfaces retain this contract.
 
 ## Colors
 `web/styles.css` is the implementation source of truth; `web/theme.css` replaces
@@ -48,8 +48,22 @@ and 8px control gaps. Declare additional module dimensions once as CSS propertie
 Narrow layouts stack controls and keep tables in labelled horizontal scroll areas.
 Mobile conversations use one 56px header with Back, a single truncated title,
 status and thread options. Workspace and conversation tabs return in the overview.
-The composer has a short touch-oriented prompt above one row of attachment, model,
-effort and send controls. Send work, Review and Schedule live in the existing
+The composer has a short state-aware prompt above one row of attachment, model,
+effort and send controls on desktop and mobile. Its width and insets align with the
+transcript reading column. Desktop shortcut instructions remain available through
+the editor description and tooltip; they do not occupy the prompt. The reading
+column is capped at 760px. User messages sit at its trailing edge as restrained
+request blocks; assistant responses use the full measure. Tool disclosures use
+quiet horizontal rules instead of a filled strip. Message metadata uses the
+system font at 12px and code uses the monospace font at 12px. The conversation
+heading uses the system font at 18px. Context is a compact reference column: phase
+beside its heading, checkpoint summary, a next action only when saved, and the
+original request in a closed disclosure. Empty scratchpads start at 80px and grow
+on focus; unsaved context-reuse advice does not reserve a section. Sidebar running
+work uses a small status mark; the selected thread owns the row emphasis. Mobile
+working/input status is explicit text beneath the title, with Stop a distinct
+44px control. Composer and message geometry uses the chat-composition tokens in
+`web/styles.css`. Send work, Review and Schedule live in the existing
 thread options sheet; reuse their original controls and handlers. Keep 44px touch
 targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
@@ -154,6 +168,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-24 | Chat composition review candidate: aligned reading and composing, quiet task chrome, compact reference context | Give the conversation a confident reading hierarchy while preserving every existing action. Candidate only; no rollout is authorized. |
 | 2026-11-24 | A Pinned section leads the inbox; inbox row menus offer Dismiss from Attention and Mark as read; a phone opens a conversation on the conversation, not the agent tree | The owner expected pins at the top regardless of state, had no way to dismiss or read from an inbox row, and had to close the tree sheet to read a thread with agents |
 | 2026-11-24 | The tab dot and the agent tree badge share one needs-you derivation built on the inbox's request rule; closed tree children fold to icons | Dismissing a request left the tree badge and the parent's tab dot orange, and a parent showed orange while working, because three copies derived attention differently |
 | 2026-11-24 | Runtime-generated prompts render as Agent Coord system rows with a popover, or fold into the matching message card | Deliveries and subscription events appeared as user bubbles of raw JSON beside their own cards; they are not the user's words |
