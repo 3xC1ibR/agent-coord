@@ -120,7 +120,12 @@ class BrowserInboxWake:
             db.execute("""UPDATE browser_inbox_wake SET paused = 0, dispatching = 0,
                 error = NULL, pause_kind = NULL, wake_message_id = NULL, recovery_turn_id = NULL,
                 retry_count = 0, retry_at = NULL, paused_at = NULL,
-                reconciled_turn_id = NULL, recovery_after_message_id = 0 WHERE thread_id = ?""",
+                reconciled_turn_id = NULL, recovery_after_message_id = 0
+                WHERE thread_id = ?
+                  AND (paused != 0 OR dispatching != 0 OR error IS NOT NULL OR pause_kind IS NOT NULL
+                       OR wake_message_id IS NOT NULL OR recovery_turn_id IS NOT NULL
+                       OR retry_count != 0 OR retry_at IS NOT NULL OR paused_at IS NOT NULL
+                       OR reconciled_turn_id IS NOT NULL OR recovery_after_message_id != 0)""",
                        (thread_id,))
 
     def stopped_conversations(self):

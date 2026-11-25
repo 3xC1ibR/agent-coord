@@ -16,7 +16,15 @@ SUCCESS_CHECK_SECONDS = 60
 
 def cancel_pending(db, thread_id: str, now: float) -> None:
     """Called inside the transaction accepting new user input or a new turn."""
-    if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone():
+    has_table = getattr(db, "_has_thread_close_requests", False)
+    if not has_table:
+        has_table = bool(db.execute("SELECT 1 FROM sqlite_master WHERE name = 'thread_close_requests'").fetchone())
+        if has_table:
+            try:
+                db._has_thread_close_requests = True
+            except AttributeError:
+                pass
+    if has_table:
         db.execute("""UPDATE thread_close_requests SET status = 'cancelled', updated_at = ?,
                       error = 'New input superseded the pending close request.'
                       WHERE thread_id = ? AND status = 'queued'""", (now, thread_id))

@@ -38,6 +38,12 @@ class SessionControl:
                 );
             """
             )
+            bound = {row[0] for row in db.execute("SELECT thread_id FROM interactive_bindings")}
+        existing_bound = getattr(store, "_interactive_bound_threads", None)
+        if existing_bound is None:
+            store._interactive_bound_threads = bound
+        else:
+            existing_bound.update(bound)
 
     def authorize(self, sender, thread):
         self.store.get_session(sender)
@@ -80,6 +86,9 @@ class SessionControl:
                 "INSERT OR IGNORE INTO interactive_bindings(thread_id,sender_id,touched_at) VALUES (?,?,?)",
                 (thread, sender, self.store.clock()),
             )
+        bound = getattr(self.store, "_interactive_bound_threads", None)
+        if bound is not None:
+            bound.add(thread)
 
     def bind(self, sender, thread):
         self.authorize(sender, thread)
@@ -90,6 +99,9 @@ class SessionControl:
                 touched_at=excluded.touched_at""",
                 (thread, sender, self.store.clock()),
             )
+        bound = getattr(self.store, "_interactive_bound_threads", None)
+        if bound is not None:
+            bound.add(thread)
 
     def snapshot(self, sender, thread, after=0):
         self.authorize(sender, thread)

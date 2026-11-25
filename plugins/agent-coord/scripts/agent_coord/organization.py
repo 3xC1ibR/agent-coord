@@ -14,10 +14,23 @@ CREATION_MODE_SQL = """CASE WHEN json_valid(payload_json) THEN
         THEN 'orchestration' END END"""
 
 
-def app_agent_creators(db, thread_id=None):
-    """Read the first identified creation, including uncertain deliveries."""
+def _app_control_schema(db) -> set[str]:
+    cached = getattr(db, "_cached_app_control_schema", None)
+    if cached is not None:
+        return cached
     schema = {row[0] for row in db.execute("""SELECT name FROM sqlite_master
         WHERE name IN ('app_control_requests', 'app_control_creator_metadata')""")}
+    if len(schema) == 2:
+        try:
+            db._cached_app_control_schema = schema
+        except AttributeError:
+            pass
+    return schema
+
+
+def app_agent_creators(db, thread_id=None):
+    """Read the first identified creation, including uncertain deliveries."""
+    schema = _app_control_schema(db)
     if "app_control_requests" not in schema:
         return {}
     if thread_id is not None and not db.execute(

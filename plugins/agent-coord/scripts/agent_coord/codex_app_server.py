@@ -999,6 +999,10 @@ class BrowserSessions:
         turn_id = params.get("turnId") or turn.get("id")
         if not thread_id or not turn_id:
             return
+        from .desktop_runtime import _OWNED_DATABASES
+        bound = getattr(self.store, "_interactive_bound_threads", None)
+        if bound is not None and self.store._database_identity in _OWNED_DATABASES and thread_id not in bound:
+            return
         items = [params.get("item") or {}] if method == "item/completed" else turn.get("items", [])
         for item in items:
             if (item.get("type") != "agentMessage" or not item.get("id")
@@ -3082,16 +3086,18 @@ class BrowserSessions:
                 self.last_used[thread_id] = time.monotonic()
             with self.store.reading(), self.store._connection() as preflight_db:
                 session_row = preflight_db.execute(
-                    "SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)
-                ).fetchone()
-                thread_attention, has_active_review, has_review_steps = preflight_db.execute(
-                    """SELECT
-                        (SELECT attention FROM work_threads WHERE thread_id = ?),
-                        EXISTS (SELECT 1 FROM review_runs WHERE (owner_id = ? OR critic_id = ?) AND state IN ('active', 'creating')),
-                        EXISTS (SELECT 1 FROM review_steps WHERE actor_id = ? LIMIT 1)""",
-                    (thread_id, thread_id, thread_id, thread_id),
+                    """SELECT b.*,
+                              (SELECT attention FROM work_threads WHERE thread_id = b.thread_id) AS _thread_attention,
+                              (EXISTS (SELECT 1 FROM review_runs WHERE owner_id = b.thread_id AND state IN ('active', 'creating'))
+                               OR EXISTS (SELECT 1 FROM review_runs WHERE critic_id = b.thread_id AND state IN ('active', 'creating'))) AS _has_active_review,
+                              EXISTS (SELECT 1 FROM review_steps WHERE actor_id = b.thread_id LIMIT 1) AS _has_review_steps
+                       FROM browser_sessions b WHERE b.thread_id = ?""",
+                    (thread_id,),
                 ).fetchone()
             record = self._record_from_row(thread_id, session_row)
+            thread_attention = record.pop("_thread_attention", None)
+            has_active_review = bool(record.pop("_has_active_review", 0))
+            has_review_steps = bool(record.pop("_has_review_steps", 0))
             if automatic:
                 # The wake worker has claimed the message durably. Closed is
                 # organization, while Stop/failure/queued user input remain gates.
@@ -3282,10 +3288,30 @@ class BrowserSessions:
 
     def _apply_accepted_input_db(self, db, thread_id, turn_id, context, *, user_input, original_request=None):
         self.store.threads.remember_notification_context(thread_id, turn_id, context, connection=db)
+        now = self.store.clock()
         if user_input:
-            self.store.threads.user_message(thread_id, connection=db)
+            from .thread_control import cancel_pending
+            cancel_pending(db, thread_id, now)
             if original_request is not None:
-                self.store.threads.capture_request(thread_id, original_request, connection=db)
+                req = original_request.strip()[:100000]
+                auto_title = " ".join(req.split())[:100]
+                db.execute(
+                    """UPDATE work_threads SET
+                        attention = CASE WHEN attention = 'later' THEN 'now' ELSE attention END,
+                        snoozed_until = CASE WHEN attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL) THEN NULL ELSE snoozed_until END,
+                        updated_at = CASE WHEN attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL) THEN ? ELSE updated_at END,
+                        original_request = CASE WHEN original_request = '' THEN ? ELSE original_request END,
+                        title = CASE WHEN original_request = '' AND title_source = 'auto' AND title IN ('New session', 'New thread') THEN ? ELSE title END
+                       WHERE thread_id = ?
+                         AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL) OR original_request = '')""",
+                    (now, req, auto_title, thread_id),
+                )
+            else:
+                db.execute(
+                    """UPDATE work_threads SET attention = 'now', snoozed_until = NULL, updated_at = ?
+                       WHERE thread_id = ? AND (attention = 'later' OR (attention = 'now' AND snoozed_until IS NOT NULL))""",
+                    (now, thread_id),
+                )
             self.inbox_wake.resume(thread_id, connection=db)
         db.execute("UPDATE browser_sessions SET updated_at=? WHERE thread_id=?", (time.time(), thread_id))
 

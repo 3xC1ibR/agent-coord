@@ -24,6 +24,22 @@ def record_context(db, thread_id, turn_id, context):
         (thread_id, turn_id, context["origin"], context.get("owner_thread_id")))
 
 
+def record_and_snapshot_context(db, thread_id, turn_id, context):
+    db.execute(
+        """INSERT INTO turn_notification_context (thread_id, turn_key, origin, owner_thread_id, checkpoint_id)
+        VALUES (?, ?, ?, ?, (
+            SELECT cp.id FROM thread_checkpoints cp JOIN turn_completions c ON c.thread_id = cp.thread_id
+            WHERE cp.thread_id = ? AND cp.turn_id IS ? AND c.turn_key = ? AND cp.created_at <= c.completed_at
+            ORDER BY cp.id DESC LIMIT 1
+        ))
+        ON CONFLICT(thread_id, turn_key) DO UPDATE SET
+            origin = CASE WHEN turn_notification_context.origin = 'user' THEN turn_notification_context.origin ELSE excluded.origin END,
+            owner_thread_id = CASE WHEN turn_notification_context.origin = 'user' THEN turn_notification_context.owner_thread_id ELSE excluded.owner_thread_id END,
+            checkpoint_id = COALESCE(turn_notification_context.checkpoint_id, excluded.checkpoint_id)""",
+        (thread_id, turn_id, context["origin"], context.get("owner_thread_id"), thread_id, turn_id, turn_id),
+    )
+
+
 def snapshot_checkpoint(db, thread_id, turn_id):
     db.execute("""UPDATE turn_notification_context SET checkpoint_id = (
         SELECT cp.id FROM thread_checkpoints cp JOIN turn_completions c ON c.thread_id = cp.thread_id

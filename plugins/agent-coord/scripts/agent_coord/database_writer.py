@@ -224,15 +224,17 @@ class DatabaseWriter:
                     "send.record_accepted_input",
                 }
                 self._scope_search_threads = set()
-                if self.database_path is not None:
-                    with self.search_cache_lock:
-                        cur_sig = sqlite_commit_signature(self.database_path)
-                        if self.search_cache is not None and self.search_dirty_threads is not None:
-                            if cur_sig != self.search_cache["sig"]:
-                                self.search_dirty_threads = None
-                        if self._search_build_token is not None and cur_sig != self._search_build_sig:
-                            self._search_build_token = None
-                            self._search_build_dirty = None
+                if self.database_path is not None and (self.search_cache is not None or self._search_build_token is not None):
+                    from .desktop_runtime import _OWNED_DATABASES
+                    if str(self.database_path) not in _OWNED_DATABASES:
+                        with self.search_cache_lock:
+                            cur_sig = sqlite_commit_signature(self.database_path)
+                            if self.search_cache is not None and self.search_dirty_threads is not None:
+                                if cur_sig != self.search_cache["sig"]:
+                                    self.search_dirty_threads = None
+                            if self._search_build_token is not None and cur_sig != self._search_build_sig:
+                                self._search_build_token = None
+                                self._search_build_dirty = None
             self.connections.append(connection)
         failed = False
         try:
@@ -241,7 +243,7 @@ class DatabaseWriter:
             failed = True
             raise
         finally:
-            if not nested and self.database_path is not None:
+            if not nested and self.database_path is not None and (self.search_cache is not None or self._search_build_token is not None):
                 with self.search_cache_lock:
                     if failed or not self._scope_search_safe:
                         self.search_dirty_threads = None

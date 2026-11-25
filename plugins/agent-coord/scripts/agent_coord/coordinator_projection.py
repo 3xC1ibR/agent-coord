@@ -627,7 +627,7 @@ class CoordinatorProjection:
         with self._publication_lock:
             self._pending_publications.append(value)
             pending_count = len(self._pending_publications)
-            due = pending_count >= 24 or (now - self._last_publication_flush) >= 0.12
+            due = pending_count >= 256 or (now - self._last_publication_flush) >= 0.50
         if not due:
             return
         persistence = getattr(self.sessions, "persistence", None)
@@ -659,6 +659,7 @@ class CoordinatorProjection:
         if not rows:
             return
         with self.store.database_operation("coordinator.publication", priority="background"), self.store._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             self._publish_rows(db, rows)
 
     def buffer_publication(self, event):

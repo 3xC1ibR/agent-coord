@@ -75,6 +75,8 @@ class ReviewRuntime:
                 CREATE INDEX IF NOT EXISTS review_actors ON review_steps(actor_id,turn_id);
                 CREATE UNIQUE INDEX IF NOT EXISTS review_owner_active ON review_runs(owner_id)
                     WHERE state IN ('creating','active');
+                CREATE INDEX IF NOT EXISTS review_critic_active ON review_runs(critic_id)
+                    WHERE state IN ('creating','active');
             """)
 
     def _get(self, db, run_id):

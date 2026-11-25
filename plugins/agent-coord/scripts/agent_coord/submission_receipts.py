@@ -47,20 +47,26 @@ class SubmissionReceipts:
         now = self.store.clock()
         with self.store.database_operation("submission_receipts.reserve", priority="foreground"), self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT * FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
-                             (thread_id, key)).fetchone()
-            if row:
-                if row["payload_hash"] != digest:
-                    raise CoordinationError("Submission request ID was already used for different input.")
-                if row["state"] == "completed":
-                    return json.loads(row["result_json"])
-                if row["state"] != "rejected":
-                    raise CoordinationError("This submission has an unconfirmed outcome. Check the conversation before sending again; it has not been replayed.")
-                db.execute("UPDATE browser_submission_receipts SET state='accepted', error=NULL, updated_at=? WHERE thread_id=? AND request_id=?",
-                           (now, thread_id, key))
-            else:
-                db.execute("INSERT INTO browser_submission_receipts VALUES (?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?)",
-                           (thread_id, key, digest, encoded, now, now))
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO browser_submission_receipts VALUES (?, ?, ?, ?, 'accepted', NULL, NULL, ?, ?)",
+                (thread_id, key, digest, encoded, now, now),
+            )
+            if inserted.rowcount == 0:
+                row = db.execute(
+                    "SELECT * FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
+                    (thread_id, key),
+                ).fetchone()
+                if row:
+                    if row["payload_hash"] != digest:
+                        raise CoordinationError("Submission request ID was already used for different input.")
+                    if row["state"] == "completed":
+                        return json.loads(row["result_json"])
+                    if row["state"] != "rejected":
+                        raise CoordinationError("This submission has an unconfirmed outcome. Check the conversation before sending again; it has not been replayed.")
+                    db.execute(
+                        "UPDATE browser_submission_receipts SET state='accepted', error=NULL, updated_at=? WHERE thread_id=? AND request_id=?",
+                        (now, thread_id, key),
+                    )
         # No database transaction spans the external operation.
         outermost = getattr(self._local, "effects", None) is None
         if outermost:
@@ -93,13 +99,12 @@ class SubmissionReceipts:
                 db.execute("BEGIN IMMEDIATE")
                 with self.store.sharing_transaction(db):
                     if effects:
-                        db.execute("SAVEPOINT submission_effects")
                         try:
                             for db_callback, _ in effects:
                                 db_callback(db)
                         except Exception as effect_error:
-                            db.execute("ROLLBACK TO SAVEPOINT submission_effects")
-                            db.execute("RELEASE SAVEPOINT submission_effects")
+                            db.rollback()
+                            db.execute("BEGIN IMMEDIATE")
                             from .codex_app_server import BrowserBusyError, BrowserNotSubmittedError
                             state = "rejected" if isinstance(effect_error, (BrowserBusyError, BrowserNotSubmittedError)) else "uncertain"
                             try:
@@ -110,8 +115,6 @@ class SubmissionReceipts:
                             except Exception:
                                 pass
                             effect_failure.append(effect_error)
-                        else:
-                            db.execute("RELEASE SAVEPOINT submission_effects")
                     if not effect_failure:
                         db.execute("UPDATE browser_submission_receipts SET state='completed', result_json=?, updated_at=? WHERE thread_id=? AND request_id=?",
                                    (json.dumps(result), self.store.clock(), thread_id, key))

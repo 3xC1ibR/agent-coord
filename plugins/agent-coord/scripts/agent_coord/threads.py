@@ -593,8 +593,7 @@ class ThreadStore:
 
     def remember_notification_context(self, session_id: str, turn_id: str, context: dict, *, connection=None) -> None:
         with (nullcontext(connection) if connection is not None else self.store._connection()) as db:
-            notification_policy.record_context(db, session_id, turn_id, context)
-            notification_policy.snapshot_checkpoint(db, session_id, turn_id)
+            notification_policy.record_and_snapshot_context(db, session_id, turn_id, context)
 
     def start_turn(self, session_id: str, *, prompt=None, turn_id=None, notification_context=None, occurred_at=None) -> None:
         from .thread_control import cancel_pending

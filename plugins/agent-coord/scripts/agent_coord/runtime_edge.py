@@ -48,6 +48,7 @@ class EdgeProxy:
         proxy = self
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            disable_nagle_algorithm = True
             do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = lambda self: proxy.handle_http(self)
             log_message = lambda self, *_args: None
         for port in ([preferred_port, 0] if preferred_port > 0 else [0]):

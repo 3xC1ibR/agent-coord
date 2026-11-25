@@ -281,18 +281,62 @@ class ActivityStore:
     def _record(self, db, kind, thread_id, *, event_id, occurred_at, actor, source,
                 window_id=None, visit_id=None, turn_id=None, details_json="{}"):
         """Insert validated metadata using the caller's transaction."""
-        threads = self._thread_rows(db, thread_id)
-        if not threads:
+        from .organization import _app_control_schema
+        has_app_table = "app_control_requests" in _app_control_schema(db)
+        app_creator_expr = (
+            "EXISTS(SELECT 1 FROM app_control_requests r WHERE r.thread_id=t.thread_id AND r.operation='create')"
+            if has_app_table
+            else "0"
+        )
+        combined = db.execute(
+            f"""SELECT t.thread_id, t.title, COALESCE(t.project_cwd, s.cwd) AS project_cwd,
+                       t.domain, s.cwd, s.client, o.project_id AS group_id, p.name AS group_name,
+                       t.forked_from_thread_id, t.forked_from_turn_id,
+                       st.enabled AS _act_enabled, st.cursor_secret AS _act_secret,
+                       st.cleared_before AS _act_cleared_before, st.recording_started_at AS _act_started_at,
+                       {app_creator_expr} AS _has_app_creator,
+                       EXISTS(SELECT 1 FROM delegations d WHERE d.child_session_id=t.thread_id) AS _has_delegation
+                FROM work_threads t
+                JOIN sessions s ON s.session_id=t.thread_id
+                JOIN activity_settings st ON st.id=1
+                LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
+                LEFT JOIN named_projects p ON p.id=o.project_id
+                WHERE t.thread_id=?""",
+            (thread_id,),
+        ).fetchone()
+        if combined is None:
             raise CoordinationError("Work thread not found.")
-        previous = db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone()
+        combined_dict = dict(combined)
+        settings = {
+            "enabled": combined_dict.pop("_act_enabled"),
+            "cursor_secret": combined_dict.pop("_act_secret"),
+            "cleared_before": combined_dict.pop("_act_cleared_before"),
+            "recording_started_at": combined_dict.pop("_act_started_at"),
+        }
+        has_creator = bool(combined_dict.pop("_has_app_creator") or combined_dict.pop("_has_delegation"))
         fields = dict(kind=kind, thread_id=thread_id, actor=actor, source=source,
                       window_id=window_id, visit_id=visit_id, turn_id=turn_id, details_json=details_json)
+        if kind not in VISIT_KINDS and settings["enabled"]:
+            received_at = _timestamp(self.store.clock(), "Clock")
+            actual_occurred_at = received_at if occurred_at is None else occurred_at
+            creators = self._creators(db, thread_id) if has_creator else {}
+            snapshot = self._snapshot(combined_dict, creators)
+            cursor = db.execute(
+                """INSERT OR IGNORE INTO activity_events (event_id, kind, thread_id, occurred_at,
+                    received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, kind, thread_id, actual_occurred_at, received_at, actor, source,
+                 window_id, visit_id, turn_id, details_json, _json(snapshot)),
+            )
+            if cursor.rowcount == 1:
+                return self._receipt({"event_id": event_id, "sequence": cursor.lastrowid,
+                                      "occurred_at": actual_occurred_at, "received_at": received_at})
+        previous = db.execute("SELECT * FROM activity_events WHERE event_id=?", (event_id,)).fetchone()
         if previous is not None:
             if (any(previous[key] != value for key, value in fields.items())
                     or occurred_at is not None and previous["occurred_at"] != occurred_at):
                 raise CoordinationError("Event ID already belongs to different activity.")
             return self._receipt(previous, duplicate=True)
-        settings = self._settings(db)
         visit_key = self._visit_key(settings, event_id) if kind in VISIT_KINDS else None
         if visit_key is not None:
             discarded = db.execute("SELECT reason FROM activity_discarded_visits WHERE event_key=?",
@@ -314,7 +358,7 @@ class ActivityStore:
                               AND (ended_at IS NULL OR ?<ended_at) LIMIT 1""",
                           (occurred_at, occurred_at)).fetchone():
                 return self._skip(db, event_id, "recording_paused_at_occurrence", visit_key=visit_key)
-        snapshot = self._snapshot(threads[0], self._creators(db, thread_id))
+        snapshot = self._snapshot(combined_dict, self._creators(db, thread_id) if has_creator else {})
         cursor = db.execute("""INSERT INTO activity_events (event_id, kind, thread_id, occurred_at,
             received_at, actor, source, window_id, visit_id, turn_id, details_json, snapshot_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",

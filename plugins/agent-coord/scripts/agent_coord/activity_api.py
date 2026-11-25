@@ -75,19 +75,11 @@ def activity_context(body):
 def record_accepted(store, kind, thread_id, *, context=None, source="app", turn_id=None, details=None, event_id=None, connection=None):
     """Telemetry failure must never turn an accepted action into a failed send."""
     context = context or {}
-    if connection is not None:
-        connection.execute("SAVEPOINT activity_record_accepted")
     try:
-        result = store.threads.activity.record(kind, thread_id, event_id=event_id or context.get("event_id"),
+        return store.threads.activity.record(kind, thread_id, event_id=event_id or context.get("event_id"),
             window_id=context.get("window_id"), visit_id=context.get("visit_id"),
             actor="human", source=source, turn_id=turn_id, details=details, connection=connection)
-        if connection is not None:
-            connection.execute("RELEASE SAVEPOINT activity_record_accepted")
-        return result
     except (CoordinationError, sqlite3.Error, OSError):
-        if connection is not None:
-            connection.execute("ROLLBACK TO SAVEPOINT activity_record_accepted")
-            connection.execute("RELEASE SAVEPOINT activity_record_accepted")
         # Avoid logging message bodies or making the caller retry an accepted turn.
         warnings.warn("Activity recording unavailable; the user action was accepted.", RuntimeWarning, stacklevel=2)
         return {"status": "unavailable"}

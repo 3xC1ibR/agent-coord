@@ -358,6 +358,9 @@ class AppControl:
                     # produce its first public message before the journal exists.
                     db.execute('INSERT OR IGNORE INTO interactive_bindings(thread_id,sender_id,touched_at) VALUES (?,?,?)',
                                (row['thread_id'],row['sender_session_id'],now))
+                    bound = getattr(self.store, '_interactive_bound_threads', None)
+                    if bound is not None and row['thread_id']:
+                        bound.add(row['thread_id'])
             # The message can refresh the timeline before creation is confirmed.
             if changed.rowcount and status == "completed" and isinstance(result, dict) and type(result.get("message_id")) is int:
                 db.execute("""INSERT INTO message_changes(sender_session_id, recipient_session_id)
