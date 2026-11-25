@@ -1709,8 +1709,11 @@ function renderStatus() {
   if (!archived && !running && work?.client === "codex") $("composer-hint").textContent += " · $ skills";
   if (dispatcher && !archived) $("composer-hint").textContent = "Requests route to conversations that answer you directly.";
   if (state.detailRefreshing) $("composer-hint").textContent = "Opening conversation…";
-  const prompt = archived || state.detailRefreshing ? $("composer-hint").textContent :
+  let prompt = archived || state.detailRefreshing ? $("composer-hint").textContent :
     dispatcher ? "Send a request…" : running ? "Add a follow-up…" : "Message…";
+  if (!archived && !state.detailRefreshing && !dispatcher && !running &&
+      typeof document !== "undefined" && document.activeElement === $("message") &&
+      !document.body.classList.contains("mobile-chat")) prompt = "Shift+Enter for a new line · / for commands";
   $("message").placeholder = prompt;
   $("message").title = $("composer-hint").textContent;
   state.mobileChat?.placeholder(prompt, prompt);
@@ -4123,6 +4126,8 @@ async function sendMessage(mode = "send") {
   }
 }
 $("composer").onsubmit = event => { event.preventDefault(); action(sendMessage); };
+$("message").addEventListener("focus", renderStatus);
+$("message").addEventListener("blur", renderStatus);
 async function toggleDispatcher(thread = state.detail?.work_thread) {
   if (!thread) return;
   await api(sessionPath(thread.thread_id) + "/dispatch", {enabled: !thread.dispatcher});

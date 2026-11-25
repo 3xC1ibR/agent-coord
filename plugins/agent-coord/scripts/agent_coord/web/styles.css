@@ -64,6 +64,8 @@
   --chat-code-size: 12px; /* drift-ok: conversation token source declared in DESIGN.md. */
   --chat-radius: 10px; /* drift-ok: conversation token source declared in DESIGN.md. */
   --chat-rule: 1px; /* drift-ok: conversation token source declared in DESIGN.md. */
+  --chat-chevron-size: 6px; /* drift-ok: conversation disclosure token. */
+  --chat-chevron-stroke: 1.5px; /* drift-ok: conversation disclosure token. */
   --chat-message-padding: 16px; /* drift-ok: conversation token source declared in DESIGN.md. */
   --chat-request-width: 88%;
   --chat-note-height: 80px; /* drift-ok: conversation token source declared in DESIGN.md. */
@@ -1126,3 +1128,19 @@ body.mobile-chat .conversation .composer-footer > div { gap: var(--mobile-chat-c
 body.mobile-chat .mobile-chat-status:not(:is([data-status="running"], [data-status="input"])) {
   position: absolute; width: var(--chat-rule); height: var(--chat-rule); overflow: hidden; clip-path: inset(50%);
 }
+
+/* Disclosure, secondary actions and scroll navigation stay clear of the text. */
+.conversation .turn-work .work-state { margin-left: 0; }
+.conversation .turn-work > summary::after { content: ""; flex-shrink: 0; width: var(--chat-chevron-size); height: var(--chat-chevron-size); margin-left: auto; margin-right: var(--chat-menu-gap); border-right: var(--chat-chevron-stroke) solid currentColor; border-bottom: var(--chat-chevron-stroke) solid currentColor; transform: rotate(-45deg); }
+.conversation .turn-work[open] > summary::after { transform: rotate(45deg); }
+.conversation .context-actions button { border: var(--chat-rule) solid var(--line); border-radius: var(--response-action-radius); padding-inline: var(--chat-menu-gap); color: var(--ink); }
+.conversation .context-actions button + button { margin-left: 0; }
+.composer > .jump-to-latest-anchor { position: absolute; inset-inline: 0; top: 0; }
+body.mobile-chat .conversation .message:has(+ .turn-work),
+body.mobile-chat .conversation .turn-work { margin-bottom: var(--chat-message-padding); }
+body.mobile-chat .conversation .turn-work > summary { min-height: var(--chat-control-size); }
+body.mobile-chat .conversation .composer textarea { min-height: var(--chat-control-size); }
+body.mobile-chat .composer > .jump-to-latest-anchor { top: var(--mobile-chat-inset); inset-inline: var(--mobile-chat-inset); }
+body.mobile-chat .composer .jump-to-latest { top: 0; bottom: auto; right: 0; left: auto; transform: none; box-shadow: none; }
+body.mobile-chat .composer:has(.jump-to-latest:not([hidden])) #message { padding-inline-end: calc(var(--chat-control-size) + var(--chat-menu-gap)); }
+body.mobile-chat .error { top: calc(var(--mobile-chat-header-height) + var(--mobile-chat-gap)); bottom: auto; }
