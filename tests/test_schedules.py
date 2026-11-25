@@ -509,20 +509,21 @@ class ScheduledPromptTests(unittest.TestCase):
                         self.assertIsNone(item["turn_id"])
         self.assertEqual([p["input"][0]["text"] for p in self.starts()], ["A person sent this first"] * 2)
 
-    def test_new_antigravity_schedule_starts_once_after_session_configuration(self):
+    def test_new_antigravity_schedule_starts_once_after_available_commands_update(self):
         transcripts = self.store.transcripts
 
-        class ConfiguringConnection(FakeACP):
+        class StartingConnection(FakeACP):
             def request(self, method, params, **kwargs):
-                if method == "session/set_config_option":
-                    event = {"method": "session/update", "params": {"sessionId": params["sessionId"],
-                             "update": {"sessionUpdate": "config_option_update", "configOptions": []}}}
+                result = super().request(method, params, **kwargs)
+                if method == "session/new" and "threadId" in self.options:
+                    event = {"method": "session/update", "params": {"sessionId": result["sessionId"],
+                             "update": {"sessionUpdate": "available_commands_update", "availableCommands": []}}}
                     self.callback(event)
                     transcripts.append_live(self.options["threadId"], {"stream": "stdout", "data": json.dumps(event)})
-                return super().request(method, params, **kwargs)
+                return result
 
         with patch.object(Path, "home", return_value=self.root), \
-                patch.object(self.sessions.antigravity, "connection_factory", ConfiguringConnection):
+                patch.object(self.sessions.antigravity, "connection_factory", StartingConnection):
             item = self.launch(settings={"cwd": str(self.root), "client": "antigravity", "model": "gemini-test"})
             self.assertEqual(item["state"], "running", item["error"])
             self.schedules.process_once()
