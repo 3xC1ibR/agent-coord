@@ -330,7 +330,7 @@ class TranscriptStore:
         return events
 
     def reconstruct_live_turn(self, thread_id: str, base_turn: dict | None = None) -> dict | None:
-        """Replay non-empty live.jsonl frames to reconstruct an in-progress turn."""
+        """Reconstruct a turn from turn activity in the provider journal."""
         events = self.read_live_events(thread_id)
         if not events:
             return base_turn
@@ -343,6 +343,7 @@ class TranscriptStore:
             item["id"]: item for item in turn.get("items", []) if isinstance(item, dict) and item.get("id")
         }
         claude_blocks: dict[int, dict] = {}
+        has_turn_activity = False
         for entry in events:
             payload = entry
             if "stream" in entry and "data" in entry:
@@ -356,6 +357,9 @@ class TranscriptStore:
                 continue
             method = payload.get("method")
             params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+            if (isinstance(method, str) and method.startswith(("turn/", "item/"))
+                    or payload.get("type") in ("user", "assistant", "stream_event")):
+                has_turn_activity = True
             if method in {"turn/started", "turn/completed"}:
                 incoming = params.get("turn") if isinstance(params.get("turn"), dict) else {}
                 if incoming.get("id"):
@@ -404,6 +408,9 @@ class TranscriptStore:
             elif method == "session/update":
                 update = params.get("update") if isinstance(params.get("update"), dict) else {}
                 kind = update.get("sessionUpdate")
+                if kind in ("user_message_chunk", "agent_message_chunk", "agent_thought_chunk",
+                            "tool_call", "tool_call_update", "plan"):
+                    has_turn_activity = True
                 if kind in {"agent_message_chunk", "agent_thought_chunk"}:
                     content = update.get("content") if isinstance(update.get("content"), dict) else {}
                     text_chunk = content.get("text")
@@ -488,6 +495,9 @@ class TranscriptStore:
                             summary = target.setdefault("summary", [""])
                             summary[0] = (summary[0] or "") + delta.get("thinking", "")
         if not turn.get("id"):
+            # Providers also journal configuration and usage before the first prompt.
+            if not has_turn_activity and base_turn is None:
+                return None
             turn["id"] = "recovered-live-turn"
         return turn
 

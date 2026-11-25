@@ -21,6 +21,7 @@ from agent_coord.store import CoordinationError, CoordinationStore
 from agent_coord.ui import make_ui_server
 from agent_coord.app_control import AppControlWorker
 from agent_coord.checkpoint_mcp import schedule_prompt, dispatch
+from test_antigravity import FakeACP
 from test_codex_app_server import FakeCodex
 from test_browser_providers import claude_factory
 
@@ -491,16 +492,45 @@ class ScheduledPromptTests(unittest.TestCase):
 
     def test_other_input_in_new_thread_is_not_treated_as_scheduled_execution(self):
         original = self.sessions.create
-        def interrupted_creation(body):
-            result = original(body)
-            self.sessions.rpc.fast_turn = True
-            self.sessions.send(result["session"]["thread_id"], {"message": "A person sent this first"})
-            return result
-        with patch.object(self.sessions, "create", interrupted_creation):
-            item = self.launch()
-        self.assertEqual(item["state"], "failed")
-        self.assertEqual(len(self.starts()), 1)
-        self.assertEqual(self.starts()[0]["input"][0]["text"], "A person sent this first")
+        with ThreadPoolExecutor(max_workers=1) as user:
+            def interrupted_creation(body):
+                result = original(body)
+                user.submit(self.sessions.send, result["session"]["thread_id"],
+                            {"message": "A person sent this first"}).result(timeout=5)
+                return result
+
+            with patch.object(self.sessions, "create", interrupted_creation):
+                for completed in (False, True):
+                    with self.subTest(completed=completed):
+                        self.sessions.rpc.fast_turn = completed
+                        item = self.launch()
+                        self.assertEqual(item["state"], "failed")
+                        self.assertIn("received other input", item["error"])
+                        self.assertIsNone(item["turn_id"])
+        self.assertEqual([p["input"][0]["text"] for p in self.starts()], ["A person sent this first"] * 2)
+
+    def test_new_antigravity_schedule_starts_once_after_session_configuration(self):
+        transcripts = self.store.transcripts
+
+        class ConfiguringConnection(FakeACP):
+            def request(self, method, params, **kwargs):
+                if method == "session/set_config_option":
+                    event = {"method": "session/update", "params": {"sessionId": params["sessionId"],
+                             "update": {"sessionUpdate": "config_option_update", "configOptions": []}}}
+                    self.callback(event)
+                    transcripts.append_live(self.options["threadId"], {"stream": "stdout", "data": json.dumps(event)})
+                return super().request(method, params, **kwargs)
+
+        with patch.object(Path, "home", return_value=self.root), \
+                patch.object(self.sessions.antigravity, "connection_factory", ConfiguringConnection):
+            item = self.launch(settings={"cwd": str(self.root), "client": "antigravity", "model": "gemini-test"})
+            self.assertEqual(item["state"], "running", item["error"])
+            self.schedules.process_once()
+            thread_id = item["thread_id"]
+            connection = self.sessions.antigravity.connections[thread_id]
+            prompts = [params["prompt"] for method, params in connection.calls if method == "session/prompt"]
+            self.assertEqual([prompt[-1]["text"] for prompt in prompts], [item["message"]])
+            self.assertEqual([t["id"] for t in self.sessions.history_snapshot(thread_id)["turns"]], [item["turn_id"]])
 
     def test_failed_and_interrupted_turns_show_failed(self):
         for status in ("failed", "interrupted"):

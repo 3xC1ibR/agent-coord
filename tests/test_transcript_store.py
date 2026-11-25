@@ -185,6 +185,19 @@ class TranscriptStoreTests(unittest.TestCase):
         finally:
             blocker.execute("ROLLBACK")
 
+    def test_session_metadata_cannot_create_a_turn_but_user_activity_can(self):
+        tid = "configuring-thread"
+        for kind in ("config_option_update", "usage_update"):
+            self.transcripts.append_live(tid, {"method": "session/update", "params": {"update": {"sessionUpdate": kind}}})
+        self.assertEqual(self.transcripts.read_full_history(tid)["turns"], [])
+        self.assertEqual(self.transcripts.read_window(tid)["turns"], [])
+        base = {"id": "known-turn", "status": "inProgress", "items": []}
+        self.assertEqual(self.transcripts.reconstruct_live_turn(tid, base), base)
+
+        self.transcripts.append_live(tid, {"method": "session/update", "params": {"update": {
+            "sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Hello"}}}})
+        self.assertEqual(self.transcripts.read_full_history(tid)["turns"][0]["id"], "recovered-live-turn")
+
     def test_live_jsonl_append_recovery_and_zero_byte_truncation_on_commit(self):
         tid = "live-thread"
         self.transcripts.append_live(
