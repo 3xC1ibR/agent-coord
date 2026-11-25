@@ -67,9 +67,9 @@ working/input status is explicit text beneath the title, with Stop a distinct
 thread options sheet; reuse their original controls and handlers. Keep 44px touch
 targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
-Jump to latest is a 44px button with a down-arrow ending at a horizontal line,
-floating above the desktop composer and immediately before thread options in
-the phone's existing header. Its desktop anchor never reserves a layout row;
+Jump to latest uses a down chevron, floating above the desktop composer in a
+44px button. The phone adds a visible Latest label immediately before thread
+options in its existing header, retaining a 44px target height. Its desktop anchor never reserves a layout row;
 phone navigation stays apart from Send and never covers the transcript or draft.
 Retain the accessible name and tooltip. Mobile error notices sit below the
 header so they do not cover the composer controls. Checkpoint provenance and

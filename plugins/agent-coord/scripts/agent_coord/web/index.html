@@ -265,7 +265,7 @@
       <div id="speech-player" class="speech-player" hidden><span id="speech-status" role="status"></span><button id="speech-play" class="quiet" type="button" hidden>Play</button><button id="speech-stop" class="quiet" type="button">Stop speech</button></div>
       </div>
       <form id="composer" class="composer">
-        <div class="jump-to-latest-anchor"><button id="jump-to-latest" class="jump-to-latest" type="button" aria-label="Jump to latest" title="Jump to latest" aria-controls="timeline" hidden><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 20h14"/></svg></button></div>
+        <div class="jump-to-latest-anchor"><button id="jump-to-latest" class="jump-to-latest" type="button" aria-label="Jump to latest" title="Jump to latest" aria-controls="timeline" hidden><span class="jump-latest-label" aria-hidden="true">Latest</span><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></div>
         <p id="agent-recipient" class="agent-recipient" hidden></p>
         <label id="dispatch-direct-label" class="dispatch-direct" hidden><input id="dispatch-direct" type="checkbox">Ask dispatcher directly</label>
         <div id="thread-mentions" class="thread-mentions" role="listbox" aria-label="File and thread references" hidden></div>
