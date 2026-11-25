@@ -47,6 +47,7 @@ class EdgeProxy:
     def _bind(self, preferred_port: int) -> LocalHTTPServer:
         proxy = self
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
             do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = lambda self: proxy.handle_http(self)
             log_message = lambda self, *_args: None
         for port in ([preferred_port, 0] if preferred_port > 0 else [0]):
@@ -88,17 +89,21 @@ class EdgeProxy:
         return upstream_token or ""
 
     @staticmethod
-    def _reply_json(handler: BaseHTTPRequestHandler, code: int, payload: dict, drain: int = 0) -> None:
+    def _reply_json(handler: BaseHTTPRequestHandler, code: int, payload: dict, drain: int = 0, keep_alive: bool = False) -> None:
         raw = json.dumps(payload).encode("utf-8")
+        reuse = keep_alive and drain == 0 and handler.headers.get("Connection", "").lower() != "close"
         try:
             handler.send_response(code)
-            for name, value in (("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(raw))), ("Cache-Control", "no-store"), ("Connection", "close")):
+            for name, value in (("Content-Type", "application/json; charset=utf-8"), ("Content-Length", str(len(raw))), ("Cache-Control", "no-store"), ("Connection", "keep-alive" if reuse else "close")):
                 handler.send_header(name, value)
             handler.end_headers()
             if handler.command != "HEAD": handler.wfile.write(raw)
+            if reuse: handler.wfile.flush()
             if drain > 0: handler.wfile.flush(); handler.connection.settimeout(0.5); handler.rfile.read(drain)
-        except OSError: pass
-        handler.close_connection = True
+        except OSError:
+            reuse = False
+        if not reuse:
+            handler.close_connection = True
 
     def handle_http(self, handler: BaseHTTPRequestHandler) -> None:
         parsed = urlsplit(handler.path)
@@ -120,10 +125,10 @@ class EdgeProxy:
             if update and (self._read_cached(self._cancel_path) or {}).get("id") == update.get("id"):
                 update = {**update, "cancelled": True}
             if (state := route.get("state")) in {"cutover", "updating", "preparing"}:
-                return self._reply_json(handler, 200, {**(route.get("health") or {}), "status": "preparing" if state == "preparing" else "updating", "url": self.url, "edge_pid": os.getpid(), "update": update})
+                return self._reply_json(handler, 200, {**(route.get("health") or {}), "status": "preparing" if state == "preparing" else "updating", "url": self.url, "edge_pid": os.getpid(), "update": update}, keep_alive=True)
             if state != "serving" or self._failed_instance == route.get("instance"):
-                return self._reply_json(handler, 503, {"status": "unavailable", "url": self.url, "update": update})
-            return self._reply_json(handler, 200, {**(route.get("health") or {}), "status": "serving", "url": self.url, "edge_pid": os.getpid(), "update": update})
+                return self._reply_json(handler, 503, {"status": "unavailable", "url": self.url, "update": update}, keep_alive=True)
+            return self._reply_json(handler, 200, {**(route.get("health") or {}), "status": "serving", "url": self.url, "edge_pid": os.getpid(), "update": update}, keep_alive=True)
         if handler.headers.get("Transfer-Encoding"): return self._reply_json(handler, 415, {"error": "Chunked request bodies are unsupported."})
         try: length = int(handler.headers.get("Content-Length", "0"))
         except ValueError: return self._reply_json(handler, 400, {"error": "Invalid Content-Length."})

@@ -702,8 +702,9 @@ def supervise_managed_pty(
                     child.wait(timeout=terminal_grace_seconds)
             exit_code = int(child.returncode or 0)
             while _drain_master(master_fd, output_path):
-                readable, _, _ = select.select([master_fd], [], [], 0)
+                readable, _, _ = select.select([master_fd], [], [], 0.05)
                 if not readable:
+                    _drain_master(master_fd, output_path)
                     break
             result = store.record_delegation_runtime_exit(
                 delegation_id, exit_code=exit_code

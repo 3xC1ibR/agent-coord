@@ -260,15 +260,15 @@ class EdgeProxyProtocolTests(unittest.TestCase):
         self._set_route("v1", upstream.port, upstream.csrf_token)
 
         durations_ms = []
-        for _ in range(40):
-            start = time.perf_counter()
-            with closing(http.client.HTTPConnection("127.0.0.1", edge.port, timeout=2)) as conn:
+        with closing(http.client.HTTPConnection("127.0.0.1", edge.port, timeout=2)) as conn:
+            for _ in range(40):
+                start = time.perf_counter()
                 conn.request("GET", "/_runtime/health", headers={"Host": f"127.0.0.1:{edge.port}"})
                 resp = conn.getresponse()
                 body = json.loads(resp.read())
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(body["status"], "serving")
-            durations_ms.append((time.perf_counter() - start) * 1000.0)
+                durations_ms.append((time.perf_counter() - start) * 1000.0)
         durations_ms.sort()
         self.assertLess(durations_ms[len(durations_ms) // 2], 1.0, f"Median health latency {durations_ms[len(durations_ms)//2]:.3f} ms >= 1 ms")
 
