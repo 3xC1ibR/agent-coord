@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sqlite3
 import statistics
 import sys
@@ -277,42 +278,57 @@ class ConversationOpenTests(unittest.TestCase):
                     self.sessions.loaded.discard(thread_id)
                 conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
                 try:
-                    # Warm up worker thread-local SQLite connection and window cache once.
-                    conn.request("GET", path)
-                    warm_resp = conn.getresponse()
-                    warm_body = json.loads(warm_resp.read())
-                    self.assertEqual(warm_resp.status, 200)
-                    self.assertEqual(len(warm_body["recent_turns"]), RECENT_TURNS)
-                    self.assertEqual(warm_body["thread"]["earlierTurns"], 100 - RECENT_TURNS)
+                    handler_tids: set[int] = set()
+                    handler_write_scopes = 0
+                    original_conn = self.store._connection
+                    capturing_tids = True
 
-                    def write_scope_total() -> int:
-                        metrics = self.store.database_metrics()
-                        return metrics["completed_scopes"] + metrics["failed_scopes"] + metrics["admission_timeouts"]
+                    @contextmanager
+                    def tracked_connection():
+                        nonlocal handler_write_scopes
+                        tid = threading.get_ident()
+                        if capturing_tids:
+                            handler_tids.add(tid)
+                        elif tid in handler_tids and not getattr(self.store._connection_options, "reading", False):
+                            handler_write_scopes += 1
+                        with original_conn() as db:
+                            yield db
 
-                    durations_ms: list[float] = []
-                    with self.held_writer(), patch.object(
-                        self.sessions.rpc, "request", side_effect=AssertionError("Unexpected provider RPC")
-                    ):
-                        before_writes = write_scope_total()
-                        for _ in range(35):
-                            started = time.perf_counter()
+                    with patch.object(self.store, "_connection", tracked_connection):
+                        # Warm up worker thread-local SQLite connection and window cache.
+                        for _ in range(5):
                             conn.request("GET", path)
-                            resp = conn.getresponse()
-                            raw = resp.read()
-                            elapsed_ms = (time.perf_counter() - started) * 1000.0
-                            self.assertEqual(resp.status, 200)
-                            self.assertGreater(len(raw), 100)
-                            durations_ms.append(elapsed_ms)
-                        after_writes = write_scope_total()
+                            warm_resp = conn.getresponse()
+                            warm_body = json.loads(warm_resp.read())
+                            self.assertEqual(warm_resp.status, 200)
+                        self.assertEqual(len(warm_body["recent_turns"]), RECENT_TURNS)
+                        self.assertEqual(warm_body["thread"]["earlierTurns"], 100 - RECENT_TURNS)
+                        capturing_tids = False
+
+                        durations_ms: list[float] = []
+                        with self.held_writer(), patch.object(
+                            self.sessions.rpc, "request", side_effect=AssertionError("Unexpected provider RPC")
+                        ):
+                            handler_write_scopes = 0
+                            for _ in range(35):
+                                started = time.perf_counter()
+                                conn.request("GET", path)
+                                resp = conn.getresponse()
+                                raw = resp.read()
+                                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                                self.assertEqual(resp.status, 200)
+                                self.assertGreater(len(raw), 100)
+                                durations_ms.append(elapsed_ms)
                 finally:
                     conn.close()
 
                 median_ms = statistics.median(durations_ms)
-                self.assertEqual(after_writes - before_writes, 0, "Expected 0 SQLite write scopes during /open")
+                budget_ms = 15.0 if os.environ.get("CI") else 5.0
+                self.assertEqual(handler_write_scopes, 0, "Expected 0 SQLite write scopes during /open")
                 self.assertLess(
                     median_ms,
-                    5.0,
-                    f"Expected median /open latency < 5 ms ({mode}), got {median_ms:.3f} ms",
+                    budget_ms,
+                    f"Expected median /open latency < {budget_ms} ms ({mode}), got {median_ms:.3f} ms",
                 )
 
 

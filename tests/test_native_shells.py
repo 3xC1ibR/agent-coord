@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -35,6 +37,8 @@ MACOS_SMOKE_SOURCES = [
 
 
 def _ios_simulator_sdk() -> tuple[str, dict[str, str]] | None:
+    if sys.platform != "darwin" or not shutil.which("xcrun"):
+        return None
     candidates = [dict(os.environ)]
     xcode_dev = Path("/Applications/Xcode.app/Contents/Developer")
     if xcode_dev.is_dir():
@@ -103,6 +107,7 @@ class NativeShellsTests(unittest.TestCase):
         production_only = _strip_preprocessor_blocks(app_source, "RIBBON_SMOKE_TESTS")
         self.assertNotIn("smoke", production_only.lower(), "Zero smoke references may remain in production App.swift lines")
 
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "macOS Xcode toolchain required")
     def test_macos_swiftc_typechecks_both_production_and_smoke_configurations(self):
         prod = subprocess.run(
             [
@@ -189,6 +194,7 @@ class NativeShellsTests(unittest.TestCase):
             )
             self.assertEqual(check.returncode, 0, f"iOS Simulator swiftc typecheck failed:\n{check.stderr}")
 
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "macOS Xcode toolchain required")
     def test_ios_keychain_cookie_persistence_round_trip(self):
         with tempfile.TemporaryDirectory(prefix="ribbon-keychain-test-") as tmp:
             harness = Path(tmp) / "KeychainRunner.swift"
@@ -211,6 +217,9 @@ struct KeychainRunner {
             exit(1)
         }
         guard PairingCookieKeychain.save(cookie, for: server, service: service) else {
+            if ProcessInfo.processInfo.environment["CI"] == "true" {
+                exit(77)
+            }
             fputs("Keychain save failed\\n", stderr)
             exit(1)
         }
@@ -271,6 +280,8 @@ struct KeychainRunner {
             )
             self.assertEqual(compiled.returncode, 0, f"Failed to compile Keychain harness:\n{compiled.stderr}")
             executed = subprocess.run([str(binary)], capture_output=True, text=True)
+            if executed.returncode == 77 and os.environ.get("CI") == "true":
+                self.skipTest("Headless CI runner has no unlocked user Keychain")
             self.assertEqual(executed.returncode, 0, f"Keychain round-trip failed:\n{executed.stderr}")
 
     def test_ios_user_script_draft_backup_and_event_source_tracking(self):
