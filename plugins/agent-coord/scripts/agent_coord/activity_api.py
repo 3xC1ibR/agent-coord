@@ -14,7 +14,11 @@ import warnings
 from .activity import ActivityStore
 from .history_window import messages
 from .store import CoordinationError
-from .workspaces import matches_workspace, require_thread_workspaces
+from .workspaces import (
+    matches_any_workspace,
+    require_thread_workspaces,
+    thread_in_workspace,
+)
 
 
 QUERY_FIELDS = {"start", "end", "project", "domain", "group", "thread_id", "group_by", "limit", "cursor", "include_turns"}
@@ -105,7 +109,12 @@ def record_browser_events(sessions, body):
         stamp = query_arguments({"start": event["occurred_at"]})["start"]
         if stamp > sessions.store.clock() + 60:
             raise CoordinationError("The activity timestamp is in the future; check this device's clock.")
-    require_thread_workspaces(sessions.store, (event["thread_id"] for event in events), sessions.cwd)
+    require_thread_workspaces(
+        sessions.store,
+        (event["thread_id"] for event in events),
+        sessions.cwd,
+        extra_workspaces=getattr(sessions, "extra_workspaces", ()),
+    )
     activity = sessions.activity
     receipts = []
     for event in events:
@@ -118,7 +127,7 @@ def record_browser_events(sessions, body):
     return {"status": "ok", "receipts": receipts}
 
 
-def read_activity_history(store, thread_id, *, start=None, end=None, limit=50, cursor=None, allowed_cwd=None):
+def read_activity_history(store, thread_id, *, start=None, end=None, limit=50, cursor=None, allowed_cwd=None, extra_workspaces=()):
     """Page saved prose losslessly, including large messages, without provider RPCs."""
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise CoordinationError("Choose a thread ID.")
@@ -127,12 +136,19 @@ def read_activity_history(store, thread_id, *, start=None, end=None, limit=50, c
     if not 1 <= limit <= 200 or (start is not None and end is not None and start >= end):
         raise CoordinationError("Choose an increasing time range and a history limit of 1–200.")
     thread = store.threads.get(thread_id)
-    if not (matches_workspace(thread["cwd"], allowed_cwd) and
-            matches_workspace(thread.get("project_cwd") or thread["cwd"], allowed_cwd)):
+    extras = tuple(extra_workspaces)
+    if not thread_in_workspace(
+        store,
+        thread_id,
+        allowed_cwd,
+        cwd=thread["cwd"],
+        project_cwd=thread.get("project_cwd") or thread["cwd"],
+        extra_workspaces=extras,
+    ):
         raise CoordinationError("Work thread not found in this workspace.")
     with store.reading(), store._connection() as db:
         db.execute("BEGIN")
-        requests = _saved_requests(db, thread_id, allowed_cwd)
+        requests = _saved_requests(db, thread_id, allowed_cwd, extras)
     try:
         history = read_history(store, thread_id)
         if history is not None and not isinstance(history, dict):
@@ -177,12 +193,22 @@ def read_activity_history(store, thread_id, *, start=None, end=None, limit=50, c
             "note": "Saved provider prose and durable request/coordination records. Sources can repeat delivered text; use activity events for counts. Provider user roles are not proof of human origin. Unknown timestamps are included as context."}
 
 
-def _saved_requests(db, thread_id, allowed_cwd):
+def _saved_requests(db, thread_id, allowed_cwd, extra_workspaces=()):
     """Original routed/reviewed input may never appear in provider history."""
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     records = []
-    visible = {row["session_id"] for row in db.execute("SELECT session_id,cwd FROM sessions")
-               if matches_workspace(row["cwd"], allowed_cwd)}
+    visible = {thread_id} | {
+        row["session_id"]
+        for row in db.execute("SELECT session_id,cwd FROM sessions")
+        if matches_any_workspace(row["cwd"], allowed_cwd, extra_workspaces)
+    }
+    if allowed_cwd is not None and "thread_organization" in tables and "named_projects" in tables:
+        for row in db.execute(
+            """SELECT o.thread_id, p.cwd AS group_cwd FROM thread_organization o
+               JOIN named_projects p ON p.id = o.project_id"""
+        ):
+            if row["group_cwd"] is None or matches_any_workspace(row["group_cwd"], allowed_cwd, extra_workspaces):
+                visible.add(row["thread_id"])
     def add(source, identity, text, stamp, *, role="user", **metadata):
         if isinstance(text, str) and text.strip():
             records.append({"source": source, "item_id": source + ":" + str(identity), "turn_id": None,

@@ -9,7 +9,11 @@
       this.dialog = this.node("dialog", "", "sidecar-dialog");
       this.dialog.setAttribute("aria-labelledby", "sidecar-heading");
       this.document.body.append(this.dialog);
-      this.timer = setInterval(() => { if (this.thread && !this.document.hidden) this.refresh().catch(onError); }, 5000);
+      this.timer = setInterval(() => {
+        if (this.thread && !this.hasZeroSidecars && !this.document.hidden && !globalThis.agentCoordEventsConnected) {
+          this.refresh().catch(onError);
+        }
+      }, 5000);
     }
     node(tag, text, className) {
       const element = this.document.createElement(tag);
@@ -28,19 +32,42 @@
     option(value, label) {
       const option = this.node("option", label); option.value = value; return option;
     }
-    showThread(thread, container) {
+    showThread(thread, container, preloadedSidecars) {
       const id = thread?.browser_session && thread.thread_id !== "new-session" ? thread.thread_id : null;
       this.container = container;
-      if (this.thread === id) return;
-      this.thread = id; this.sequence++;
-      container.replaceChildren(); container.hidden = true;
-      if (id) this.refresh().catch(this.onError);
+      const changed = this.thread !== id;
+      this.thread = id;
+      if (!id) {
+        this.hasZeroSidecars = false;
+        if (changed) { this.sequence++; container.replaceChildren(); container.hidden = true; }
+        return;
+      }
+      if (preloadedSidecars && Array.isArray(preloadedSidecars.watches) && Array.isArray(preloadedSidecars.requests)) {
+        this.sequence++;
+        this.hasZeroSidecars = !preloadedSidecars.watches.length && !preloadedSidecars.requests.length;
+        this.render(preloadedSidecars);
+        return;
+      }
+      if (thread.sidecar_count === 0) {
+        this.sequence++;
+        this.hasZeroSidecars = true;
+        this.render({watches: [], requests: []});
+        return;
+      }
+      if (typeof thread.sidecar_count === "number" && thread.sidecar_count > 0) this.hasZeroSidecars = false;
+      else if (changed) this.hasZeroSidecars = false;
+      if (changed) {
+        this.sequence++;
+        container.replaceChildren(); container.hidden = true;
+        this.refresh().catch(this.onError);
+      }
     }
     async refresh() {
       const id = this.thread, sequence = ++this.sequence;
       if (!id) return;
       const data = await this.api("threads/" + encodeURIComponent(id) + "/sidecars");
       if (id !== this.thread || sequence !== this.sequence) return;
+      this.hasZeroSidecars = !data.watches?.length && !data.requests?.length;
       this.render(data);
     }
     render(data) {
@@ -157,6 +184,7 @@
         for (const control of form.querySelectorAll("input, select, textarea, button")) control.disabled = true;
         try {
           await this.api("threads/" + encodeURIComponent(thread.thread_id) + "/sidecars", this.submitted);
+          this.hasZeroSidecars = false;
           dialog.close();
           if (this.thread !== thread.thread_id) await this.openThread(thread.thread_id);
           else await this.refresh();

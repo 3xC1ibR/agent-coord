@@ -38,7 +38,12 @@ from .thread_preview import thread_preview
 from .views import ViewStore
 from .web_push import WebPush
 from .native_push import NativePush
-from .workspaces import matches_workspace, require_thread_workspaces, resolve_workspace
+from .workspaces import (
+    matches_workspace,
+    require_thread_workspaces,
+    resolve_workspace,
+    thread_in_workspace,
+)
 from .organization import repository_root
 from .workspace_files import workspace_files
 from .skill_catalog import skill_catalog
@@ -55,7 +60,7 @@ DEFAULT_OUTPUT_BYTES = 24 * 1024
 SORT_KEYS = {"created", "last_activity", "name"}
 _CLIENT_DISCONNECT_ERRNOS = {errno.ECONNABORTED, errno.ECONNRESET, errno.EPIPE}
 _WEB_ROOT = Path(__file__).with_name("web")
-_WORKSPACE_ASSET = re.compile(rb'(?:src|href)="/([a-zA-Z0-9_-]+\.(?:js|css))"')
+_WORKSPACE_ASSET = re.compile(rb'(?:src|href)="/((?:dist/)?[a-zA-Z0-9_-]+\.(?:js|css))"')
 
 
 @lru_cache(maxsize=192)
@@ -481,18 +486,36 @@ def _handler(
                 operation = "sidecar_status"
             elif method == "GET" and path.startswith("/api/browser/threads/"):
                 operation = "thread_detail"
+            elif method == "GET" and path.startswith("/api/browser/conversations/") and path.endswith("/open"):
+                operation = "conversation_open"
             elif method == "GET" and path.startswith("/api/browser/sessions/"):
                 operation = "conversation_read"
             self._metric_operation = operation
             self._metric_started = time.monotonic()
 
         def _static_asset(self, parsed) -> None:
-            body = (_WEB_ROOT / parsed.path[1:]).read_bytes()
+            web_root = _WEB_ROOT.resolve()
+            try:
+                candidate = (_WEB_ROOT / parsed.path.lstrip("/")).resolve()
+            except (OSError, RuntimeError, ValueError):
+                self._send(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", b'{"error":"not found"}')
+                return
+            if candidate == web_root or not candidate.is_relative_to(web_root) or not candidate.is_file():
+                self._send(HTTPStatus.NOT_FOUND, "application/json; charset=utf-8", b'{"error":"not found"}')
+                return
+            body = candidate.read_bytes()
             version = parse_qs(parsed.query).get("v")
             policy = "no-store"
             if version and version == [hashlib.sha256(body).hexdigest()]:
                 policy = "private, max-age=31536000, immutable"
-            content_type = "text/javascript" if parsed.path.endswith(".js") else "text/css"
+            if parsed.path.endswith(".map"):
+                content_type = "application/json"
+            elif parsed.path.startswith("/dist/") and parsed.path.endswith(".js"):
+                content_type = "application/javascript"
+            elif parsed.path.endswith(".js"):
+                content_type = "text/javascript"
+            else:
+                content_type = "text/css"
             self._send(HTTPStatus.OK, content_type + "; charset=utf-8", body, cache_control=policy)
 
         def _send(self, status: HTTPStatus, content_type: str, body: bytes, *, cookie: str | None = None,
@@ -647,6 +670,9 @@ def _handler(
             if parsed.path in {"/reviews.js", "/reviews.css", "/sidecars.js", "/sidecars.css", "/asks.js", "/asks.css", "/transient-notice.js", "/send-work.js", "/send-work.css", "/dispatcher-workspace.js", "/dispatcher-workspace.css", "/dispatch.js", "/dispatch.css", "/thread-actions.js", "/view-drops.js", "/speech.js", "/speech.css", "/agent-messages.js", "/agent-messages.css", "/thread-mentions.js", "/thread-mentions.css", "/conversation-search.js", "/conversation-search.css"}:
                 self._static_asset(parsed)
                 return
+            if parsed.path in {"/dist/app.js", "/dist/app.css", "/dist/app.js.map", "/dist/app.css.map", "/tokens.css"}:
+                self._static_asset(parsed)
+                return
             if parsed.path in {"/folders.js", "/folders.css", "/theme.js", "/theme.css", "/app.js", "/schedules.js", "/model-picker.js", "/permission-menu.js", "/response-actions.js", "/conversation-scroll.js", "/mobile-chat.js", "/roll-up.js", "/navigation.js", "/markdown.js", "/thread-groups.js", "/notifications.js", "/organization.js", "/styles.css", "/thread-hover.js", "/thread-hover.css", "/filter-menu.js", "/filter-menu.css", "/image-attachments.js", "/slash-commands.js", "/image-attachments.css", "/views.js", "/views.css", "/remote-access.js", "/remote-access.css", "/thread-panes.js", "/thread-panes.css", "/thread-tabs.js", "/thread-tabs.css"}:
                 self._static_asset(parsed)
                 return
@@ -661,7 +687,7 @@ def _handler(
                 try:
                     route = parsed.path.removeprefix("/api/browser/")
                     if route in {"config", "organization", "asks", "sessions", "threads", "views",
-                                 "activity", "activity/settings", "activity/history", "workspaces/scratchpad"} or route.startswith(("threads/", "sessions/", "projects/")):
+                                 "activity", "activity/settings", "activity/history", "workspaces/scratchpad"} or route.startswith(("threads/", "sessions/", "projects/", "conversations/")):
                         # Sidecar receipts still perform explicit stale-request
                         # reconciliation; they have a separate mutation boundary.
                         with (nullcontext() if route.endswith("/sidecars") else store.reading()):
@@ -801,7 +827,12 @@ def _handler(
         def _check_thread_workspace(self, thread_id):
             # Sidebar panels need the saved workspace boundary. Building a
             # live thread card here waits on unrelated provider checkpoints.
-            require_thread_workspaces(store, [thread_id], browser_sessions.cwd)
+            require_thread_workspaces(
+                store,
+                [thread_id],
+                browser_sessions.cwd,
+                extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+            )
 
         def _browser_get(self, parsed) -> None:
             route = parsed.path.removeprefix("/api/browser/")
@@ -820,6 +851,7 @@ def _handler(
                                           "remote": self._remote_request(),
                                           "eventCursor": event_cursor,
                                           "conversationSnapshotControls": True,
+                                          "compositeOpen": True,
                                           "ordinaryTransferReceipts": bool(getattr(self.server, "transfer_receiver", None)),
                                           "completionCursor": store.threads.completion_cursor()})
             elif route == "performance":
@@ -841,7 +873,14 @@ def _handler(
                     thread_id, file_path = query["thread"][0], query["path"][0]
                 # Read saved metadata only. Opening output must not resume an agent.
                 thread = store.threads.get(thread_id, history=False)
-                if not matches_workspace(thread["cwd"], browser_sessions.cwd):
+                if not thread_in_workspace(
+                    store,
+                    thread_id,
+                    getattr(browser_sessions, "cwd", None),
+                    cwd=thread["cwd"],
+                    project_cwd=thread.get("project_cwd"),
+                    extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                ):
                     raise CoordinationError("Work thread not found in this workspace.")
                 result = read_html(thread["cwd"], file_path)
                 if content:
@@ -868,7 +907,13 @@ def _handler(
                 elif route == "activity/history":
                     if set(fields) - {"thread_id", "start", "end", "limit", "cursor"}:
                         raise CoordinationError("Choose a thread, optional history period, limit, and cursor.")
-                    result = read_activity_history(store, fields.pop("thread_id", None), allowed_cwd=browser_sessions.cwd, **fields)
+                    result = read_activity_history(
+                        store,
+                        fields.pop("thread_id", None),
+                        allowed_cwd=browser_sessions.cwd,
+                        extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                        **fields,
+                    )
                 else:
                     # Preserve the dashboard's interaction rows even while an
                     # older interface remains attached during a runtime update.
@@ -876,7 +921,11 @@ def _handler(
                     result = browser_sessions.activity.query(allowed_cwd=browser_sessions.cwd, **query_arguments(fields))
                 self._json(HTTPStatus.OK, result)
             elif route == "workspaces/scratchpad":
-                directory = resolve_workspace(query.get("path", [None])[0], workspace=browser_sessions.cwd)
+                directory = resolve_workspace(
+                    query.get("path", [None])[0],
+                    workspace=browser_sessions.cwd,
+                    extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                )
                 self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory))
             elif route == "speech/settings":
                 self._json(HTTPStatus.OK, speech.settings())
@@ -973,7 +1022,10 @@ def _handler(
             elif route.startswith("threads/") and route.endswith("/preview"):
                 self._json(HTTPStatus.OK, thread_preview(browser_sessions, unquote(route[8:-8])))
             elif route.startswith("threads/") and route.endswith("/messages"):
-                self._json(HTTPStatus.OK, {"data": message_timeline(store, unquote(route[8:-9]), browser_sessions.cwd)})
+                thread_id = unquote(route[8:-9])
+                self._check_thread_workspace(thread_id)
+                session = store.get_session(thread_id)
+                self._json(HTTPStatus.OK, {"data": browser_sessions._message_timeline(thread_id, session["cwd"])})
             elif route.startswith("threads/"):
                 from .thread_control import ThreadControl
                 thread_id = unquote(route[8:])
@@ -981,6 +1033,49 @@ def _handler(
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif route.startswith("conversations/") and route.endswith("/open"):
+                parts = route.split("/")
+                if len(parts) != 3 or parts[0] != "conversations" or parts[2] != "open" or not unquote(parts[1]).strip():
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                thread_id = unquote(parts[1])
+                if set(query) - {"view", "full", "before_seq", "limit"} or any(len(v) != 1 for v in query.values()):
+                    raise CoordinationError("Conversation open accepts optional view, full, before_seq, and limit parameters.")
+                is_full = False
+                if "full" in query:
+                    if query["full"][0] not in {"0", "1", "false", "true"}:
+                        raise CoordinationError("full must be 0, 1, false, or true.")
+                    is_full = query["full"][0] in {"1", "true"}
+                view = query.get("view", [self.headers.get("X-Agent-Coord-History-View", "recent")])[0]
+                if view not in {"complete", "recent"}:
+                    raise CoordinationError("History view must be complete or recent.")
+                if is_full:
+                    view = "complete"
+                before_seq = None
+                if "before_seq" in query:
+                    try:
+                        before_seq = int(query["before_seq"][0])
+                        if before_seq < 0:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise CoordinationError("before_seq must be a nonnegative integer.") from exc
+                from .history_window import RECENT_TURNS
+                limit = RECENT_TURNS
+                if "limit" in query:
+                    try:
+                        limit = int(query["limit"][0])
+                        if not 1 <= limit <= 200:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise CoordinationError("History limit must be between 1 and 200.") from exc
+                with store.reading():
+                    result = browser_sessions.open_conversation(
+                        thread_id,
+                        recent=view == "recent" or before_seq is not None,
+                        before_seq=before_seq,
+                        limit=limit,
+                    )
+                self._json(HTTPStatus.OK, result)
             elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
                 parts = route.split("/")
                 if len(parts) != 5 or parts[0] != "sessions" or parts[2] != "turns" or parts[4] != "full":
@@ -1356,7 +1451,11 @@ def _handler(
                 if route[:3] == ["api", "browser", "views"]:
                     if len(route) == 3:
                         if body.get("cwd") is not None:
-                            body["cwd"] = resolve_workspace(body["cwd"], workspace=browser_sessions.cwd)
+                            body["cwd"] = resolve_workspace(
+                                body["cwd"],
+                                workspace=browser_sessions.cwd,
+                                extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                            )
                         self._json(HTTPStatus.CREATED, views.create(body))
                     elif len(route) == 4:
                         self._json(HTTPStatus.OK, views.update(unquote(route[3]), body))
@@ -1372,13 +1471,21 @@ def _handler(
                 if route == ["api", "browser", "workspaces", "scratchpad"]:
                     if set(body) != {"path", "text"}:
                         raise CoordinationError("Project scratchpad accepts a path and text.")
-                    directory = resolve_workspace(body["path"], workspace=browser_sessions.cwd)
+                    directory = resolve_workspace(
+                        body["path"],
+                        workspace=browser_sessions.cwd,
+                        extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                    )
                     self._json(HTTPStatus.OK, store.threads.project_scratchpad(directory, body["text"]))
                     return
                 if route == ["api", "browser", "workspaces", "open"]:
                     if set(body) != {"path"}:
                         raise CoordinationError("Opening a folder accepts a path.")
-                    directory = resolve_workspace(body["path"], workspace=browser_sessions.cwd)
+                    directory = resolve_workspace(
+                        body["path"],
+                        workspace=browser_sessions.cwd,
+                        extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                    )
                     repository = (browser_sessions.store.threads.organization.add_repository(directory)
                                   if repository_root(directory) else None)
                     self._json(HTTPStatus.OK, {"cwd": directory, "repository": repository})
@@ -1386,11 +1493,22 @@ def _handler(
                 if route == ["api", "browser", "projects"]:
                     if set(body) - {"name", "cwd"} or "name" not in body:
                         raise CoordinationError("Group creation accepts a name and project directory.")
-                    directory = body.get("cwd")
-                    if directory is None:
+                    if "cwd" not in body:
                         directory = browser_sessions.cwd or str(Path.cwd())
-                    cwd = resolve_workspace(directory, workspace=browser_sessions.cwd)
-                    self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], cwd))
+                        group_cwd = resolve_workspace(
+                            directory,
+                            workspace=browser_sessions.cwd,
+                            extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                        )
+                    elif body["cwd"] is None or body["cwd"] == "":
+                        group_cwd = None
+                    else:
+                        group_cwd = resolve_workspace(
+                            body["cwd"],
+                            workspace=browser_sessions.cwd,
+                            extra_workspaces=getattr(browser_sessions, "extra_workspaces", ()),
+                        )
+                    self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.create_project(body["name"], group_cwd))
                     return
                 if route[:3] == ["api", "browser", "projects"] and len(route) == 4:
                     if set(body) != {"name"}:
@@ -1406,7 +1524,9 @@ def _handler(
                 if route == ["api", "browser", "repositories"]:
                     if set(body) != {"path"}:
                         raise CoordinationError("Repository registration accepts a path.")
-                    self._json(HTTPStatus.CREATED, browser_sessions.store.threads.organization.add_repository(body["path"]))
+                    repository = browser_sessions.store.threads.organization.add_repository(body["path"])
+                    browser_sessions.allow_workspace(repository["root"])
+                    self._json(HTTPStatus.CREATED, repository)
                     return
                 if route[:3] == ["api", "browser", "asks"]:
                     if len(route) not in (4, 5) or (len(route) == 5 and route[4] not in {"snooze", "reply"}):

@@ -31,21 +31,17 @@
       history: "Resolved asks",
       earlier(count) { return count + " earlier in the " + copy.viewName + "'s " + copy.sections.resolved + " section."; },
     },
-    // A reply in the user's own words. It goes to the asking conversation as the user's message and leaves the ask open.
+    // Typing an answer and pressing Enter resolves the ask; Shift+Enter or Discuss in thread comments without closing it.
     reply: {
-      placeholder: "Reply in your own words…",
-      label: "Reply",
-      send: "Send reply",
-      sendTitle: "Send this to the agent. The ask stays open.",
-      answer: "Answer with my text",
-      answerTitle: "Record this as your answer and close the ask.",
-      // Shown once something is typed: what each control does with the text.
-      hint: "Send reply keeps the ask open. Choosing a resolution closes it with this text attached.",
-      converse: "Reply in conversation",
-      converseTitle: "Open the conversation with this ask referenced in your message.",
-      // The same control inside the asking conversation, where the message box is just below.
-      converseHere: "Quote in message",
-      converseHereTitle: "Put this ask and your text in the message below.",
+      placeholder: "Type an answer…",
+      label: "Answer",
+      send: "Answer",
+      sendTitle: "Resolve this ask with your answer.",
+      hint: "Enter resolves · Shift+Enter discusses in thread",
+      converse: "Discuss in thread",
+      converseTitle: "Send a comment to the thread without closing this ask, or open the thread.",
+      converseHere: "Discuss in thread",
+      converseHereTitle: "Send a comment to this thread without closing this ask, or quote in the composer below.",
       mark: age => "You replied " + (age === "just now" ? age : age + " ago"),
       external: "This thread runs outside Ribbon Field, so a reply cannot reach it from here. Choose a resolution to send your text as its note.",
       /* How a reply names its ask to the agent: number, title and that it is still open. */
@@ -301,44 +297,60 @@
       };
       const text = () => input.value.trim();
       const note = () => text() ? {note: text()} : {};
-      // Once there is text, say what Send reply and a resolution each do with it.
+      // Once there is text, show concise shortcut guidance for resolving vs discussing.
       record.sync = () => { hint.hidden = !text(); };
       input.oninput = record.sync;
       const resolveWith = resolution => () => this.resolve(ask, {resolution, ...note()}, record);
-      // Enter sends the reply and never picks a resolution for the user.
+      const submitAnswer = () => {
+        if (!text()) { input.focus?.(); return; }
+        if (legacy) return this.resolve(ask, {answer: text()}, record);
+        if (decision || resolutions.includes("answered")) {
+          return this.resolve(ask, {resolution: "answered", answer: text()}, record);
+        }
+        const primaryResolution = resolutions.find(r => r !== "dismissed") || resolutions[0] || "answered";
+        return this.resolve(ask, primaryResolution === "answered"
+          ? {resolution: "answered", answer: text()}
+          : {resolution: primaryResolution, note: text()}, record);
+      };
+      // Enter and the primary Answer button resolve the ask directly.
       form.onsubmit = event => {
         event?.preventDefault?.();
-        if (!text()) { input.focus?.(); return; }
-        return this.reply(ask, text(), record);
+        return submitAnswer();
+      };
+      // Shift+Enter sends a non-resolving comment to the asking thread.
+      input.onkeydown = event => {
+        if (event?.isComposing || event?.keyCode === 229) return;
+        if (event?.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          event.preventDefault?.();
+          if (!text()) { input.focus?.(); return; }
+          return Promise.resolve().then(() => this.reply(ask, text(), record)).catch(err => this.fail(err));
+        }
       };
       // One row of controls: the kind's resolutions at a fixed left edge, quiet text controls after them.
       const entry = this.node("div", "", "ask-entry");
       const later = this.node("div", "", "ask-later");
       if (decision) {
-        // A decision closes on one of its options, or on the typed text as its answer.
-        for (const option of ask.options) {
+        // A decision closes on one of its options, or via Enter / Answer with typed text.
+        for (const option of ask.options || []) {
           const choice = this.button(option, () => this.resolve(ask,
             legacy ? {option} : {resolution: "answered", option, ...note()}, record), "ask-option");
           controls.push(choice); entry.append(choice);
         }
-        const answer = this.button(copy.reply.answer, () => {
-          if (!text()) { input.focus?.(); return; }
-          return this.resolve(ask, legacy ? {answer: text()} : {resolution: "answered", answer: text()}, record);
-        }, "ask-affirm");
-        answer.title = copy.reply.answerTitle;
-        controls.push(answer); entry.append(answer);
       } else {
         const [affirm, ...others] = resolutions.filter(resolution => resolution !== "dismissed");
-        const primary = this.button(copy.resolve[affirm] || affirm, resolveWith(affirm), "ask-affirm");
-        controls.push(primary); entry.append(primary);
+        if (affirm) {
+          const primary = this.button(copy.resolve[affirm] || affirm, resolveWith(affirm), "ask-affirm");
+          controls.push(primary); entry.append(primary);
+        }
         for (const resolution of others) {
           const other = this.button(copy.resolve[resolution] || resolution, resolveWith(resolution), "quiet");
           controls.push(other); entry.append(other);
         }
       }
       form.append(reply, hint);
+      const discuss = () => text() ? this.reply(ask, text(), record) : this.converse(ask, "", record);
       const converse = this.button(thread ? copy.reply.converse : copy.reply.converseHere,
-        () => this.converse(ask, text(), record), "ask-text-control");
+        discuss, "ask-text-control");
       converse.title = thread ? copy.reply.converseTitle : copy.reply.converseHereTitle;
       controls.push(converse); later.append(converse);
       if (legacy) {
@@ -505,6 +517,32 @@
       if (legacy) this.section = "open";
       this.records.clear();
       this.signature = null;
+      this.render();
+    }
+    hydrate(asks, {threadId = null, resolved = null} = {}) {
+      const items = Array.isArray(asks) ? asks : Array.isArray(asks?.open) ? asks.open : Array.isArray(asks?.data) ? asks.data : null;
+      const resolvedItems = Array.isArray(resolved) ? resolved : Array.isArray(asks?.resolved) ? asks.resolved : null;
+      if (items) {
+        ++this.sequence;
+        if (threadId) {
+          this.open = [...this.open.filter(item => item.session_id !== threadId), ...items];
+        } else {
+          this.open = items.slice();
+          this.loaded = true;
+          this.forgetReplies();
+        }
+        this.failure = null;
+      }
+      if (resolvedItems) {
+        if (threadId && this.resolvedLoaded) {
+          this.resolved = [...resolvedItems, ...this.resolved.filter(item => item.session_id !== threadId)];
+        } else {
+          this.resolved = resolvedItems.slice();
+          this.resolvedLoaded = true;
+        }
+        this.resolvedDue = false;
+        this.resolvedReadAt = this.clock();
+      }
       this.render();
     }
     async refresh({background = false} = {}) {
@@ -932,6 +970,10 @@
       this.updateBadge();
     }
     get items() { return this.viewer.open; }
+    hydrate(asks, options) {
+      this.viewer.hydrate(asks, options);
+      if (options?.threadId) return this.showThread(options.threadId);
+    }
     refresh() { return this.viewer.refresh(); }
     /* Show one conversation's asks in its strip; no thread hides the strip. */
     showThread(thread) { return this.thread.setThread(thread); }
@@ -955,10 +997,12 @@
       const backdrop = this.document.getElementById("sidebar-backdrop");
       if (backdrop && !backdrop.hidden) backdrop.click();
       this.viewer.setVisible(true);
-      if (!this.dialog.open) this.dialog.showModal();
+      if (this.dialog && !this.dialog.open) this.dialog.showModal();
       this.view.clearInterval?.(this.timer);
       this.timer = this.view.setInterval?.(() => {
-        if (!this.document.hidden) this.refresh();
+        if (!this.document.hidden && !globalThis.agentCoordEventsConnected && !this.view?.agentCoordEventsConnected) {
+          this.refresh();
+        }
       }, REFRESH_MILLISECONDS);
       try {
         // A backend from before kinds serves this view until its update is applied.

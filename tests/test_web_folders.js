@@ -15,17 +15,20 @@ const api = async (route, body) => {
   return {cwd: body.path, repository: body.path.startsWith(rig.root) ? rig : null};
 };
 
-test("orchestration children appear in ancestor projects and their own project without broadening folder filters", () => {
+test("inProject matches empty/all workspace filters, subdirectories, orchestration workspaces, and workspace_cwds", () => {
   const child = {project_cwd: "/projects/foobar", cwd: "/projects/foobar/src",
-    orchestration_workspaces: ["/projects", "/another-repo"]};
+    orchestration_workspaces: ["/another-repo"], workspace_cwds: ["/shared-workspace"]};
   assert.equal(inProject(child, "/projects"), true);
+  assert.equal(inProject(child, "/projects/"), true);
   assert.equal(inProject(child, "/another-repo"), true);
+  assert.equal(inProject(child, "/another"), false);
+  assert.equal(inProject(child, "/shared-workspace"), true);
   assert.equal(inProject(child, "/projects/foobar"), true);
   assert.equal(inProject(child, "/projects/foobar/src"), false);
   assert.equal(inProject(child, "/"), false);
-  assert.equal(inProject(child, ""), false);
-  assert.equal(inProject({...child, orchestration_workspaces: []}, "/projects"), false);
-  assert.equal(inProject({cwd: "/projects/unrelated"}, "/projects"), false);
+  assert.equal(inProject(child, ""), true);
+  assert.equal(inProject(child, "all"), true);
+  assert.equal(inProject({cwd: "/projects-other"}, "/projects"), false);
 });
 
 test("project dots identify the project needing action and update when only the blocker reason changes", async () => {
@@ -55,14 +58,17 @@ test("project dots identify the project needing action and update when only the 
   } finally { delete global.threadViews; }
 });
 
-test("views inherit the active project directory and optional group, ignoring repository filters", () => {
+test("views allow cross-repo groups regardless of project.cwd and fall back to group cwd when no folder is open", () => {
+  const crossOrg = {repositories: [rig, stoic], projects: [{id: "evaluation"}, {id: "rig-group", cwd: rig.root}]};
   const folder = {cwd: "/projects/stoic", repository: stoic};
-  assert.deepEqual(newThreadContext(organization, {repository: "rig", project: "__none__"}, folder),
+  assert.deepEqual(newThreadContext(crossOrg, {repository: "rig", project: "__none__"}, folder),
     {cwd: stoic.root, project_id: null});
-  assert.deepEqual(newThreadContext(organization, {repository: "rig", project: "evaluation"}, folder),
+  assert.deepEqual(newThreadContext(crossOrg, {repository: "rig", project: "evaluation"}, folder),
     {cwd: stoic.root, project_id: "evaluation"});
-  assert.deepEqual(newThreadContext(organization, {project: "evaluation"}, folder),
-    {cwd: stoic.root, project_id: "evaluation"});
+  assert.deepEqual(newThreadContext(crossOrg, {project: "rig-group"}, folder),
+    {cwd: stoic.root, project_id: "rig-group"});
+  assert.deepEqual(newThreadContext(crossOrg, {project: "rig-group"}, null),
+    {cwd: rig.root, project_id: "rig-group"});
 });
 
 test("views preserve exact project subfolders and worktrees", () => {
@@ -181,14 +187,33 @@ test("dropdown chooses a native folder from first use and retains it on cancella
 });
 
 
-test("project membership uses the exact launch directory even after cwd changes", () => {
+test("project membership matches launch directory and subdirectories without false prefix collisions", () => {
   const parent = {project_cwd: "/projects", cwd: "/projects/website"};
   const child = {project_cwd: "/projects/website", cwd: "/projects"};
   assert.equal(inProject(parent, "/projects"), true);
-  assert.equal(inProject(child, "/projects"), false);
+  assert.equal(inProject(child, "/projects"), true);
   assert.equal(inProject(parent, "/projects/website"), false);
   assert.equal(inProject(child, "/projects/website"), true);
-  assert.equal(inProject(parent, ""), false);
+  assert.equal(inProject({project_cwd: "/projects-extra"}, "/projects"), false);
+  assert.equal(inProject(parent, ""), true);
+});
+
+test("ProjectTabs switching and closing is not blocked by unrelated background work", async () => {
+  const folders = new WorkingFolders({storage: storage(), api});
+  await folders.open("/a"); await folders.open("/b"); folders.activate("/a");
+  const visits = [];
+  const tabs = Object.assign(Object.create(ProjectTabs.prototype), {
+    folders,
+    canSwitch: () => false,
+    doc: {querySelector: () => null, getElementById: () => ({querySelector: () => null})},
+    render() {},
+    onSwitch: async () => { visits.push(folders.selected?.cwd || null); },
+  });
+  await tabs.activate("/b");
+  assert.equal(folders.selected.cwd, "/b");
+  await tabs.close("/b");
+  assert.equal(folders.selected.cwd, "/a");
+  assert.deepEqual(visits, ["/b", "/a"]);
 });
 
 test("project tabs retain exact directories, restore per window, and close without session mutations", async () => {

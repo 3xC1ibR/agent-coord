@@ -46,32 +46,33 @@ test("overview button toggles domain grouping, persists it, and reflects selecte
   assert.equal($("group-by").value, "domain");
   assert.equal($("group-by-domain").attributes["aria-pressed"], "true");
   assert.equal(values.get("agent-coord-group-by"), "domain");
-  assert.deepEqual(descendants($("overview")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["backend", "web"]);
+  assert.deepEqual(descendants($("sessions")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["backend", "web"]);
   $("group-by-domain").onclick();
   assert.equal($("group-by").value, "phase");
   assert.equal($("group-by-domain").attributes["aria-pressed"], "false");
   assert.equal(values.get("agent-coord-group-by"), "phase");
 });
 
-test("domain grouping keeps pins visible once, sorts by recency, and retains unassigned work", () => {
+test("domain grouping sorts sidebar sections by recency and retains unassigned work without Cards board", () => {
   const input = [thread("ordinary", {domain: "web", updated_at: 200}), thread("urgent", {domain: "web", response_state: "input", updated_at: 100}),
-    thread("pin", {domain: "backend", pinned: true}), thread("fallback", {scope_cluster: "backend"}), thread("unassigned")];
+    thread("pin", {domain: "backend", pinned: true, updated_at: 300}), thread("fallback", {scope_cluster: "backend", updated_at: 50}), thread("unassigned")];
   const before = JSON.stringify(input), {$, c} = setup(input, "domain");
   c.renderList();
-  const cards = descendants($("overview")).filter(el => el.dataset.cardThread);
-  assert.deepEqual(cards.map(el => el.dataset.cardThread), ["pin", "fallback", "ordinary", "urgent", "unassigned"]);
-  assert.equal(cards.find(el => el.dataset.cardThread === "urgent").urgent, true);
-  assert.equal(cards.filter(el => el.dataset.cardThread === "pin").length, 1);
-  assert.equal(descendants($("overview")).find(el => el.dataset.group === "domain-missing").attributes["aria-label"], "No domain");
+  assert.equal($("overview").children.length, 0, "Cards overview board is retired");
+  const groups = descendants($("sessions")).filter(el => el.dataset.group);
+  assert.deepEqual(groups.map(el => el.attributes["aria-label"]), ["backend", "web", "No domain"]);
+  assert.deepEqual(groups[0].children.slice(1).map(el => el.textContent), ["pin", "fallback"]);
+  assert.deepEqual(groups[1].children.slice(1).map(el => el.textContent), ["ordinary", "urgent"]);
+  assert.equal(groups.find(el => el.dataset.group === "domain-missing").attributes["aria-label"], "No domain");
   assert.equal(JSON.stringify(input), before);
 });
 
-test("domain mode groups Later and Closed and survives preference restoration", () => {
+test("domain mode groups Later and Closed in sidebar navigation and survives preference restoration", () => {
   for (const [view, placement] of [["later", "later"], ["archived", "archived"]]) {
     const input = [thread("web", {domain: "web", attention: placement}), thread("docs", {domain: "docs", attention: placement})];
     const {$, c} = setup(input, "domain");
     $("view").value = view; c.renderList();
     assert.equal($("group-by").value, "domain");
-    assert.deepEqual(descendants($("overview")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["docs", "web"]);
+    assert.deepEqual(descendants($("sessions")).filter(el => el.dataset.group).map(el => el.attributes["aria-label"]), ["docs", "web"]);
   }
 });

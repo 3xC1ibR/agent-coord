@@ -390,3 +390,24 @@ test("mobile dispatcher Enter edits a newline while explicit Send still submits"
   h.$("send-work-submit").onclick(); await settle();
   assert.equal(h.calls.filter(call => call.path === "send-work/send").length, 1);
 });
+
+test("Send work controls use Send work naming consistently instead of colliding with Dispatcher", () => {
+  const h = setup();
+  assert.equal(h.$("send-work-pin").textContent, "Send work");
+  assert.equal(h.$("send-work-pin").getAttribute("aria-label"), "Send work");
+  assert.equal(h.$("send-work-pin").getAttribute("aria-pressed"), "false");
+  assert.equal(h.$("send-work-logo").title, "Send work in /work");
+  assert.equal(h.$("send-work-logo").getAttribute("aria-label"), "Send work in /work");
+  assert.equal(h.palette.dialog.getAttribute("aria-label"), "Send work in /work");
+  assert.equal(h.palette.dock.getAttribute("aria-label"), "Send work in /work");
+  assert.equal(h.$("send-work-close").getAttribute("aria-label"), "Close send work");
+
+  h.palette.pin(true);
+  assert.equal(h.$("send-work-pin").textContent, "Hide send work");
+  assert.equal(h.$("send-work-pin").getAttribute("aria-label"), "Hide send work");
+  assert.equal(h.$("send-work-pin").getAttribute("aria-pressed"), "true");
+
+  h.workspace("");
+  assert.equal(h.$("send-work-logo").title, "Send work");
+  assert.equal(h.palette.dialog.getAttribute("aria-label"), "Send work");
+});

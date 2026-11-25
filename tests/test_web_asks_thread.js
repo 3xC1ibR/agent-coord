@@ -140,69 +140,72 @@ test("a failed resolution keeps the row and what was typed", async () => {
   assert.equal(control(row, "Decline").disabled, false);
 });
 
-test("a reply from the conversation's strip is sent as the user's message and marks the ask", async () => {
-  const {ui, state, rows, posts} = setup([request, elsewhere], {resolved: []});
+test("Shift+Enter and Discuss in thread send a non-resolving message from the strip, while Enter resolves", async () => {
+  const {ui, state, rows, posts} = setup([decision, request, elsewhere], {resolved: []});
   await ui.refresh();
   await ui.showThread("thread-1");
-  const row = rows("open")[0], field = row.byClass("ask-note")[0];
+  const reqRow = rows("open").find(node => node.dataset.id === "2"), field = reqRow.byClass("ask-note")[0];
   field.value = "what do you need for stripe?";
-  row.byTag("form")[0].onsubmit({preventDefault() {}});
+  field.onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   await settle();
   assert.deepEqual(posts(), [{path: "sessions/thread-1/messages", body: {
     message: 'Re ask #2 "Provide a Stripe test key" (still open): what do you need for stripe?', requestId: "request-1"}}]);
   assert.deepEqual(state.sent, ["thread-1"]);
-  assert.equal(rows("open")[0], row, "the ask stays, in the same row");
+  assert.equal(rows("open").find(node => node.dataset.id === "2"), reqRow, "the ask stays, in the same row");
   assert.equal(field.value, "");
-  assert.equal(row.byClass("ask-replied")[0].text, "You replied just now what do you need for stripe?");
+  assert.equal(reqRow.byClass("ask-replied")[0].text, "You replied just now what do you need for stripe?");
   // The Queue shows the same mark: both read one record.
   assert.deepEqual(ui.viewer.replyOf(request).text, "what do you need for stripe?");
+
+  // Pressing Enter on the decision ask in the strip resolves it directly.
+  const decRow = rows("open").find(node => node.dataset.id === "1");
+  decRow.byClass("ask-note")[0].value = "Annual first";
+  decRow.byTag("form")[0].onsubmit({preventDefault() {}});
+  await settle();
+  assert.deepEqual(posts().at(-1), {path: "asks/1", body: {resolution: "answered", answer: "Annual first"}});
+  assert.deepEqual(rows("open").map(node => node.dataset.id), ["2"]);
 });
 
-test("Quote in message names the ask in the conversation's draft without losing what is there", async () => {
+test("Discuss in thread with empty input quotes the ask in the conversation's draft without losing what is there", async () => {
   const {ui, state, draft, rows, control, posts} = setup([request, elsewhere], {resolved: []});
   await ui.refresh();
   await ui.showThread("thread-1");
   const row = rows("open")[0], field = row.byClass("ask-note")[0];
   draft.value = "Half a thought";
-  field.value = "which key?";
-  control(row, "Quote in message").onclick();
+  field.value = "";
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.deepEqual(state.opened, ["thread-1"]);
-  assert.equal(draft.value, 'Half a thought\n\nRe ask #2 "Provide a Stripe test key" (still open): which key?');
+  assert.equal(draft.value, 'Half a thought\n\nRe ask #2 "Provide a Stripe test key" (still open): ');
   assert.equal(draft.focused, true);
   assert.deepEqual(draft.selection, [draft.value.length, draft.value.length]);
-  assert.equal(field.value, "");
   assert.equal(posts().length, 0, "nothing is sent until the user sends the message");
-  assert.equal(control(row, "Reply in conversation"), undefined, "the conversation is already open");
   // Asking again does not repeat a reference the draft already has.
   draft.value = 'Re ask #2 "Provide a Stripe test key" (still open): ';
-  control(row, "Quote in message").onclick();
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.equal(draft.value, 'Re ask #2 "Provide a Stripe test key" (still open): ');
 });
 
-test("Reply in conversation from the Queue closes it and opens the asking conversation", async () => {
-  const {ui, $, state, draft, control} = setup([request, elsewhere], {resolved: []});
+test("Discuss in thread from the Queue closes it and opens the asking conversation when empty", async () => {
+  const {$, state, draft, control} = setup([request, elsewhere], {resolved: []});
   await $("open-asks-view").onclick({preventDefault() {}});
   assert.equal($("asks-dialog").open, true);
   const row = $("asks-list").byClass("ask-row").find(node => node.dataset.id === "5");
-  control(row, "Reply in conversation").onclick();
+  control(row, "Discuss in thread").onclick();
   await settle();
   assert.equal($("asks-dialog").open, false);
   assert.deepEqual(state.opened, ["thread-2"]);
   assert.equal(draft.value, 'Re ask #5 "Add payout details" (still open): ');
 });
 
-test("a conversation whose draft cannot take text is opened and the typed text stays with the ask", async () => {
+test("a conversation whose draft cannot take text still opens when Discuss in thread is clicked with empty input", async () => {
   const {ui, state, draft, rows, control} = setup([request], {resolved: [], composer: false});
   await ui.refresh();
   await ui.showThread("thread-1");
-  const field = rows("open")[0].byClass("ask-note")[0];
-  field.value = "which key?";
-  control(rows("open")[0], "Quote in message").onclick();
+  control(rows("open")[0], "Discuss in thread").onclick();
   await settle();
   assert.deepEqual(state.opened, ["thread-1"]);
-  assert.equal(field.value, "which key?");
   assert.equal(draft.value, "");
 });
 
@@ -418,4 +421,18 @@ test("a page without the strip or the toggle count still counts and opens the vi
   assert.equal($("asks-count").textContent, "1");
   assert.equal(reads("asks?status=resolved"), 0, "nothing shows the log, so it is not read");
   assert.deepEqual(errors, []);
+});
+
+test("hydrate seeds a conversation's open strip and resolved side-panel history with zero HTTP reads", async () => {
+  const {ui, strip, history, rows, calls} = setup([], {resolved: []});
+  await ui.hydrate(
+    {open: [decision, request], resolved: log.filter(item => item.session_id === "thread-1")},
+    {threadId: "thread-1"}
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(strip.hidden, false);
+  assert.deepEqual(rows("open").map(row => row.dataset.id), ["1", "2"]);
+  assert.equal(history.hidden, false);
+  assert.deepEqual(history.byClass("thread-asks-history-item").map(item => item.byTag("strong")[0].textContent),
+    ["Approve the launch discount", "Which currency first?", "Read the old memo"]);
 });

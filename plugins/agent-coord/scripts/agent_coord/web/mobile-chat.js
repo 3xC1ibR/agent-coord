@@ -46,7 +46,7 @@ class MobileChat {
     // Close before the original handler opens a confirmation or edit dialog.
     this.dialog.addEventListener("click", event => {
       const button = event.target.closest("button");
-      if (button && button.id !== "speech-toggle" && !button.closest(".context-panel-tabs, .agent-tree-panel") &&
+      if (button && button.id !== "speech-toggle" && button.id !== "composer-quiet" && !button.closest(".context-panel-tabs, .agent-tree-panel") &&
           !button.disabled && (this.actions.contains(button) || this.panel.contains(button) || this.info.contains(button) ||
             this.composerOptions.contains(button) || button === this.sendWork)) this.close();
     }, {capture: true});

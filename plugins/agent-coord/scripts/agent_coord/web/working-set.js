@@ -62,12 +62,13 @@ const WorkingSet = (() => {
         map.get(descriptor.key).levels[1].push(t); all.levels[1].push(t);
       }
     }
+    const idleOrder = (a, b) => (b.attention_since || touchOf(b)) - (a.attention_since || touchOf(a)) || a.thread_id.localeCompare(b.thread_id);
     for (const g of [all, ...map.values()]) {
       g.touch = 0;
-      for (const list of g.levels) {
-        list.sort((a, b) => (b.attention_since || touchOf(b)) - (a.attention_since || touchOf(a)) || a.thread_id.localeCompare(b.thread_id));
+      g.levels.forEach((list, idx) => {
+        list.sort(idx === 2 ? idleOrder : grouping.attentionOrder);
         for (const t of list) g.touch = Math.max(g.touch, touchOf(t));
-      }
+      });
     }
     const previous = new Set(order), newcomers = [...map.values()].filter(g => !previous.has(g.key))
       .sort((a, b) => b.touch - a.touch || a.name.localeCompare(b.name));
@@ -123,14 +124,21 @@ const WorkingSet = (() => {
         wrap.append(card);
         const links = el("div", "ws-card-links");
         if (t.pinned) links.append(el("span", "ws-pin", "Pinned"));
-        if (onDismiss && (t.can_handle_response ?? t.unhandled_response) && !running(t)) {
+        const livePrompt = t.status === "needs input" || Boolean(t.open_ask && !t.open_ask.snoozed);
+        const stickyReason = ["blocked", "review"].includes(grouping.reason(t).key) || t.response_state === "failed";
+        const canDismiss = Boolean(onDismiss && (t.can_handle_response ?? (t.unhandled_response || t.response_state === "failed")) &&
+          !running(t) && t.attention !== "archived" && !livePrompt);
+        const canRead = Boolean(onRead && t.unread_result && !running(t) && t.attention !== "archived" && !livePrompt);
+        const showDismiss = canDismiss && (stickyReason || !canRead);
+        const showRead = canRead && !showDismiss;
+        if (showDismiss) {
           const dismiss = button("Dismiss", "quiet ws-dismiss", event => { event?.stopPropagation(); onDismiss(t); }, "Dismiss response · " + t.title);
           dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss";
           const actions = card.querySelector(".card-actions") || el("div", "card-actions");
           const end = el("div", "card-end-actions"); end.append(dismiss); actions.append(end);
           if (!card.contains(actions)) card.append(actions);
         }
-        if (onRead && t.unread_result && !running(t) && t.attention !== "archived") {
+        if (showRead) {
           const read = button("Mark read", "quiet ws-read", () => onRead(t), "Mark response read · " + t.title);
           read.dataset.thread = t.thread_id; read.dataset.action = "read"; links.append(read);
         }
@@ -420,8 +428,6 @@ const WorkingSet = (() => {
       return t;
     };
     const agents = new Map(), workingRoots = new Set(), escalated = [];
-    const attentionOrder = (a, b) => Number(interrupts(requestOf(b))) - Number(interrupts(requestOf(a))) ||
-      arrivedAt(b) - arrivedAt(a) || a.thread_id.localeCompare(b.thread_id);
     for (const t of visible) {
       const parent = parents.get(t.thread_id);
       if (!parent) continue;
@@ -465,7 +471,7 @@ const WorkingSet = (() => {
       const empty = place === "idle" && !thread.checkpoint && !thread.turn_completion && !agents.has(thread.thread_id);
       sections[empty ? "empty" : place].push(thread);
     }
-    sections.attention.sort(attentionOrder);
+    sections.attention.sort(grouping.attentionOrder);
     // Pinned: what needs you, then what is working, then the rest by recency.
     const origins = new Map(rows.map(row => [row.thread.thread_id, row.origin]));
     const pinOrder = t => origins.get(t.thread_id) === "attention" || ["approval", "question", "needs-you", "failed"].includes(requestOf(t)) ? 0 : running(t) ? 1 : 2;
@@ -481,7 +487,7 @@ const WorkingSet = (() => {
     const s = Math.max(0, now - at);
     return !at ? "" : s < 3600 ? Math.max(1, Math.round(s / 60)) + "m" : s < DAY ? Math.round(s / 3600) + "h" : Math.round(s / DAY) + "d";
   }
-  function createList({document, onOpen, onRead, onClose, onMenu, now = () => Date.now() / 1000}) {
+  function createList({document, onOpen, onRead, onDismiss, onClose, onMenu, now = () => Date.now() / 1000}) {
     const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
     const button = (text, cls, fn, label) => {
       const b = el("button", cls, text); b.type = "button";
@@ -546,7 +552,17 @@ const WorkingSet = (() => {
       if (at) stamp.title = (place === "attention" ? "Arrived " : "Last active ") + new Date(at * 1000).toLocaleString();
       li.append(stamp);
       const actions = el("span", "tl-actions");
-      if (unread && onRead) {
+      const livePrompt = t.status === "needs input" || Boolean(t.open_ask && !t.open_ask.snoozed);
+      const stickyReason = ["blocked", "review"].includes(grouping.reason(t).key) || t.response_state === "failed" || request === "needs-you" || request === "failed";
+      const canDismiss = Boolean(onDismiss && !running(t) && t.attention !== "archived" && !livePrompt &&
+        (t.can_handle_response ?? (t.unhandled_response || request === "failed" || request === "needs-you")));
+      const canRead = Boolean(onRead && unread && !running(t) && t.attention !== "archived" && !livePrompt);
+      const showDismiss = canDismiss && (stickyReason || !canRead);
+      const showRead = canRead && !showDismiss;
+      if (showDismiss) {
+        const dismiss = button("Dismiss", "tl-action", () => onDismiss(t), "Dismiss · " + t.title);
+        dismiss.dataset.thread = t.thread_id; dismiss.dataset.action = "dismiss"; actions.append(dismiss);
+      } else if (showRead) {
         const read = button("Mark read", "tl-action", () => onRead(t), "Mark read · " + t.title);
         read.dataset.thread = t.thread_id; read.dataset.action = "read"; actions.append(read);
       }

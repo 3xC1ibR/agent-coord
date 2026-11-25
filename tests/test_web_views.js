@@ -775,17 +775,35 @@ test("groups appear immediately and preserve display preferences across projects
   assert.equal(fresh.records.length, 0);
 });
 
-test("project groups exclude unowned groups and identical names in other projects", () => {
-  const c = setup();
-  c.views.groups = [
-    {id: "a", name: "Launch", cwd: "/projects"},
-    {id: "b", name: "Launch", cwd: "/projects/website"},
-    {id: "legacy", name: "Old group", cwd: null},
-  ];
-  for (const [cwd, expected] of [["/projects", ["group-a"]], ["/projects/website", ["group-b"]], ["/other", []]]) {
+test("workspace groups include subdirectory groups and cross-repo threads belonging to a group or saved view", async () => {
+  const c = setup({
+    groups: [
+      {id: "a", name: "Launch", cwd: "/projects"},
+      {id: "b", name: "Website", cwd: "/projects/website"},
+      {id: "legacy", name: "Old group", cwd: null},
+    ],
+    saved: [
+      {id: "cross-saved", name: "Cross-repo view", cwd: "/projects", filters: {project: "external-group"}},
+    ],
+  });
+  await c.views.start();
+  for (const [cwd, expected] of [["/projects", ["group-a", "group-b"]], ["/projects/website", ["group-b"]], ["/other", []]]) {
     c.views.cwd = cwd;
     assert.deepEqual(c.views.groupItems().map(view => view.id), expected);
   }
+  await c.views.setProject("/projects");
+  const crossRepoThreads = [
+    thread("local-launch", {cwd: "/projects", project_cwd: "/projects", repository_id: "main", project_id: "a", response_state: "input", needs_attention: true}),
+    thread("remote-launch", {cwd: "/opt/other-repo", project_cwd: "/opt/other-repo", repository_id: "other", project_id: "a", response_state: "input", needs_attention: true}),
+    thread("external-saved", {cwd: "/opt/third-repo", project_cwd: "/opt/third-repo", repository_id: "third", project_id: "external-group", response_state: "input", needs_attention: true}),
+    thread("unrelated-remote", {cwd: "/opt/unrelated", project_cwd: "/opt/unrelated", repository_id: "unrelated", project_id: null, response_state: "input", needs_attention: true}),
+  ];
+  c.views.render(crossRepoThreads);
+  const groupTab = c.controls["saved-view-tabs"].children.find(tab => tab.dataset.viewId === "group-a");
+  assert.equal(groupTab.children.find(ch => ch.className === "view-attention").textContent, "2");
+  await c.views.activate("cross-saved");
+  c.views.render(crossRepoThreads);
+  assert.deepEqual(c.views.workspaceThreads(crossRepoThreads).filter(t => threadViews.matches(t, c.views.read().filters)).map(t => t.thread_id), ["external-saved"]);
 });
 
 test("clearing and resetting group filters cannot clear membership; renaming preserves identity", async () => {

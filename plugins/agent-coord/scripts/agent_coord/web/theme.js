@@ -2,6 +2,7 @@
 (() => {
   "use strict";
   const key = "agent-coord.theme";
+  const themeColors = {light: "#f5f5f4", dark: "#121215"};
   const normalize = value => ["light", "dark"].includes(value) ? value : "system";
   const media = window.matchMedia("(prefers-color-scheme: dark)");
   let preference = "system";
@@ -11,6 +12,10 @@
     const theme = preference === "system" ? (media.matches ? "dark" : "light") : preference;
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
+    if (typeof document.querySelector === "function") {
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) meta.setAttribute("content", themeColors[theme]);
+    }
     document.querySelectorAll("[data-theme-select]").forEach(select => { select.value = preference; });
   }
   apply();

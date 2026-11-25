@@ -2,7 +2,16 @@
 
 const tabViews = typeof module !== "undefined" ? require("./views.js").threadViews : threadViews;
 
-// Tabs are a window's working set, independent of thread placement and filters.
+function defineRootId(item, rootId) {
+  const effective = typeof rootId === "string" && rootId ? rootId : item.thread_id;
+  Object.defineProperty(item, "root_thread_id", {
+    value: effective,
+    writable: true,
+    configurable: true,
+    enumerable: effective !== item.thread_id,
+  });
+  return item;
+}
 class ThreadTabs {
   constructor({document, container, storage, fallbackStorage, scope = "", onSelect, onScratchpad, onOverviewMenu, onError, canNavigate = () => true}) {
     Object.assign(this, {document, container, storage, fallbackStorage, onSelect, onScratchpad, onOverviewMenu, onError, canNavigate});
@@ -26,9 +35,10 @@ class ThreadTabs {
       this.projects.set(cwd, Array.isArray(items) ? items.filter(item => {
         if (!item || typeof item.thread_id !== "string" || !item.thread_id || item.thread_id === "new-session" || ids.has(item.thread_id)) return false;
         ids.add(item.thread_id); return true;
-      }).map(item => ({thread_id: item.thread_id, title: typeof item.title === "string" ? item.title : "Conversation",
-        ...(typeof item.conversation_id === "string" && item.conversation_id ? {conversation_id: item.conversation_id} : {}),
-        ...(typeof item.tree_root === "string" && item.tree_root ? {tree_root: item.tree_root, tree_open: item.tree_open === true} : {})})) : []);
+      }).map(item => defineRootId({thread_id: item.thread_id,
+        title: typeof item.title === "string" ? item.title : "Conversation",
+        ...(typeof item.conversation_id === "string" && item.conversation_id && item.conversation_id !== item.thread_id ? {conversation_id: item.conversation_id} : {}),
+        ...(typeof item.tree_root === "string" && item.tree_root ? {tree_root: item.tree_root, tree_open: item.tree_open === true} : {})}, item.root_thread_id)) : []);
       this.selections.set(cwd, typeof saved?.selected === "string" ? saved.selected : null);
       this.scratchpads.set(cwd, saved?.scratchpadOpen === true);
     }
@@ -43,24 +53,89 @@ class ThreadTabs {
   save(rememberSelection = false, cwd = this.cwd) {
     if (rememberSelection) this.selections.set(this.cwd, this.selected ?? null);
     try { this.storage?.setItem(this.baseKey + ":" + cwd, JSON.stringify({
-      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, title, conversation_id, tree_root, tree_open}) =>
-        ({thread_id, title, ...(conversation_id && conversation_id !== thread_id ? {conversation_id} : {}),
+      items: (this.projects.get(cwd) || []).filter(item => item.thread_id !== "new-session").map(({thread_id, root_thread_id, title, conversation_id, tree_root, tree_open}) =>
+        ({thread_id, title,
+          ...(root_thread_id && root_thread_id !== thread_id ? {root_thread_id} : {}),
+          ...(conversation_id && conversation_id !== thread_id ? {conversation_id} : {}),
           ...(tree_root ? {tree_root, tree_open: tree_open === true} : {})})),
       selected: this.destination(cwd),
       scratchpadOpen: this.scratchpads.get(cwd) === true,
     })); } catch { /* Tabs still work without storage. */ }
   }
-  open(thread) {
+  parentIdOf(thread) {
+    if (!thread) return null;
+    const source = thread.forked_from?.thread_id || thread.forked_from_thread_id;
+    const parent = Object.hasOwn(thread, "agent_parent_id") ? thread.agent_parent_id
+      : Object.hasOwn(thread, "supervisor_thread_id") ? thread.supervisor_thread_id || thread.parent?.session_id || source
+      : (thread.creation_mode === "orchestration" ? thread.created_by_thread_id : thread.parent?.session_id) || source;
+    return parent && parent !== thread.thread_id ? parent : null;
+  }
+  findFamilyTab(thread) {
+    if (!thread?.thread_id) return null;
+    const byId = new Map((this.threads || []).map(t => [t.thread_id, t]));
+    byId.set(thread.thread_id, thread);
+    const seen = new Set([thread.thread_id]);
+    let cursor = thread, familyTab = null;
+    for (let parentId = this.parentIdOf(cursor); parentId && !seen.has(parentId); parentId = this.parentIdOf(cursor)) {
+      seen.add(parentId);
+      const match = this.items.find(item => item.thread_id === parentId || item.root_thread_id === parentId || item.tree_root === parentId);
+      if (match) familyTab = match;
+      cursor = byId.get(parentId);
+      if (!cursor) break;
+    }
+    if (familyTab) return familyTab;
+    return this.items.find(item => item.conversation_id === thread.thread_id && item.thread_id !== thread.thread_id) || null;
+  }
+  open(thread, {rootThread = null, standalone = false} = {}) {
     if (!thread?.thread_id) return;
-    const item = this.items.find(item => item.thread_id === thread.thread_id);
-    if (item) { Object.assign(item, thread, {conversation_id: thread.thread_id}); delete item.displayedThread; }
-    else this.items.push({...thread, title: thread.title || "Conversation"});
+    const rootObj = typeof rootThread === "string"
+      ? (this.threads?.find(t => t.thread_id === rootThread) || {thread_id: rootThread})
+      : rootThread;
+    if (rootObj?.thread_id && rootObj.thread_id !== thread.thread_id) {
+      let item = this.items.find(i => i.thread_id === rootObj.thread_id || i.root_thread_id === rootObj.thread_id);
+      if (!item) {
+        item = {...rootObj, thread_id: rootObj.thread_id, root_thread_id: rootObj.thread_id, title: rootObj.title || "Conversation"};
+        this.items.push(item);
+      } else if (rootObj.title && item.title === "Conversation") {
+        item.title = rootObj.title;
+      }
+      item.root_thread_id = item.root_thread_id || item.thread_id;
+      item.conversation_id = thread.thread_id;
+      item.displayedThread = thread;
+      this.selected = item.thread_id; this.save(true); this.render(); this.reveal(this.selected);
+      return;
+    }
+    const direct = this.items.find(item => item.thread_id === thread.thread_id);
+    if (!direct && !standalone) {
+      const familyTab = this.findFamilyTab(thread);
+      if (familyTab) {
+        familyTab.root_thread_id = familyTab.root_thread_id || familyTab.thread_id;
+        familyTab.conversation_id = thread.thread_id;
+        familyTab.displayedThread = thread;
+        this.selected = familyTab.thread_id; this.save(true); this.render(); this.reveal(this.selected);
+        return;
+      }
+    }
+    if (direct) {
+      const rootId = direct.root_thread_id || direct.thread_id;
+      Object.assign(direct, thread, {
+        thread_id: direct.thread_id,
+        title: thread.title || direct.title || "Conversation",
+      });
+      defineRootId(direct, rootId);
+      delete direct.conversation_id;
+      delete direct.displayedThread;
+    } else {
+      const entry = {...thread, title: thread.title || "Conversation"};
+      defineRootId(entry, entry.root_thread_id || entry.thread_id);
+      this.items.push(entry);
+    }
     this.selected = thread.thread_id; this.save(true); this.render(); this.reveal(this.selected);
   }
   // Includes saved project working sets that this window has not displayed yet.
   has(id) {
     if (!id) return false;
-    const matches = items => Array.isArray(items) && items.some(item => item?.thread_id === id);
+    const matches = items => Array.isArray(items) && items.some(item => item?.thread_id === id || item?.conversation_id === id);
     for (const items of this.projects.values()) if (matches(items)) return true;
     const prefix = this.baseKey + ":";
     for (const storage of [this.storage, this.fallbackStorage]) {
@@ -86,8 +161,13 @@ class ThreadTabs {
   selectConversation(tabId, conversationId) {
     const item = this.items.find(item => item.thread_id === tabId);
     if (!item || !conversationId) return false;
+    item.root_thread_id = item.root_thread_id || item.thread_id;
     item.conversation_id = conversationId;
-    if (item.displayedThread?.thread_id !== conversationId) delete item.displayedThread;
+    if (item.displayedThread?.thread_id !== conversationId) {
+      const known = this.threads?.find(t => t.thread_id === conversationId);
+      if (known && conversationId !== item.thread_id) item.displayedThread = known;
+      else delete item.displayedThread;
+    }
     this.selected = tabId; this.save(true); this.render();
     return true;
   }
@@ -108,8 +188,20 @@ class ThreadTabs {
     this.threads = threads;
     const available = new Map(threads.map(thread => [thread.thread_id, thread]));
     for (const item of this.items) {
-      if (available.has(item.thread_id)) Object.assign(item, available.get(item.thread_id));
-      if (item.conversation_id !== item.thread_id && available.has(item.conversation_id)) item.displayedThread = available.get(item.conversation_id);
+      const rootId = item.root_thread_id || item.thread_id;
+      if (available.has(rootId)) {
+        const root = available.get(rootId);
+        const conversationId = item.conversation_id;
+        Object.assign(item, root, {
+          thread_id: item.thread_id,
+          root_thread_id: rootId,
+          title: root.title || item.title,
+          ...(conversationId ? {conversation_id: conversationId} : {}),
+        });
+      }
+      if (item.conversation_id && item.conversation_id !== item.thread_id && available.has(item.conversation_id)) {
+        item.displayedThread = available.get(item.conversation_id);
+      }
     }
     this.save(); this.render();
   }
@@ -118,7 +210,7 @@ class ThreadTabs {
     const index = items.findIndex(item => item.thread_id === id);
     if (index < 0) return;
     items.splice(index, 1);
-    if (!items.some(item => item.thread_id === thread.thread_id)) items.splice(index, 0, {...thread});
+    if (!items.some(item => item.thread_id === thread.thread_id)) items.splice(index, 0, {...thread, root_thread_id: thread.thread_id});
     if (cwd === this.cwd) {
       if (this.selected === id) this.selected = thread.thread_id;
       this.save(true); this.render();

@@ -337,11 +337,11 @@ test("overview render cache rebuilds when a close or Undo changes button availab
   Object.assign(c, {savedViews: null, conversationSearch: null, renderClosedToggle() {},
     threadsInProject: threads => threads, threadOrganization: {matches: () => true},
     threadViews: {matches: () => true}, upcomingSchedules: () => []});
-  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set(),
-    overviewMotion: {capture() { throw rebuilding; }}});
+  Object.assign(c.state, {pinning: new Set(), updatingThreads: new Set()});
   for (const id of ["search", "view", "group-by", "phase-filter", "repository", "project", "group-by-domain", "back-home", "results-count"]) {
     Object.assign(c.$(id), {value: "", setAttribute() {}});
   }
+  c.$("sessions").replaceChildren = () => { throw rebuilding; };
   vm.runInContext(source.slice(source.indexOf("function renderList()"), source.indexOf("function upcomingSchedules(")), c);
   assert.throws(() => c.renderList(), error => error === rebuilding);
   assert.doesNotThrow(() => c.renderList(), "unchanged inventory can use the cache");

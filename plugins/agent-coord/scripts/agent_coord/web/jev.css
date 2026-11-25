@@ -1,14 +1,14 @@
-.jev-onboarding { position: fixed; z-index: 20; bottom: 24px; left: 24px; box-sizing: border-box; width: min(400px, calc(100vw - 48px)); padding: 22px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: 0 8px 32px #0002; }
-.jev-onboarding h2 { margin: 0 0 12px; font-size: 17px; line-height: 1.4; }
-.jev-onboarding p { margin: 0 0 14px; font-size: 13px; line-height: 1.6; color: var(--muted); }
-.jev-onboarding > div { display: flex; flex-wrap: wrap; gap: 8px; }
-.jev-onboarding button { min-height: 40px; padding: 8px 14px; }
+.jev-onboarding { position: fixed; z-index: var(--layer-floating); bottom: var(--space-6); left: var(--space-6); box-sizing: border-box; width: min(var(--dialog-xs), calc(100vw - var(--space-12))); padding: var(--space-6); border: 1px solid var(--line-strong); border-radius: var(--radius-lg); background: var(--paper); color: var(--ink); box-shadow: var(--shadow-md); }
+.jev-onboarding h2 { margin: 0 0 var(--space-3); font-size: var(--text-lg); line-height: var(--leading-snug); }
+.jev-onboarding p { margin: 0 0 var(--space-3); font-size: var(--text-md); line-height: var(--leading-relaxed); color: var(--muted); }
+.jev-onboarding > div { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.jev-onboarding button { min-height: var(--control-lg); padding: var(--space-2) var(--space-3); }
 .jev-onboarding .jev-onboarding-error, #jev-error { color: var(--danger); }
-@media (max-width: 540px) { .jev-onboarding { bottom: 16px; left: 16px; width: calc(100vw - 32px); } }
-.overview-statusbar .jev-status-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; min-height: 26px; padding: 4px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; }
-.jev-status-button svg { width: 19px; height: 19px; }
+@media (max-width: 540px) { .jev-onboarding { bottom: var(--space-4); left: var(--space-4); width: calc(100vw - var(--space-8)); } }
+.overview-statusbar .jev-status-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: var(--control-xs); min-height: var(--control-xs); padding: var(--space-1); border: 0; border-radius: var(--radius-sm); color: var(--muted); background: transparent; }
+.jev-status-button svg { width: var(--icon-md); height: var(--icon-md); }
 .jev-status-button[data-state="enabled"] { color: var(--accent); }
 .jev-status-button:hover { background: var(--surface); }
-.jev-status-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.jev-status-button:focus-visible { outline: 2px solid var(--accent); outline-offset: var(--ring-offset); }
 .jev-status-button .jev-status-on, .jev-status-button .jev-status-off, .jev-status-button .jev-status-unknown { display: none; }
 .jev-status-button[data-state="enabled"] .jev-status-on, .jev-status-button[data-state="disabled"] .jev-status-off, .jev-status-button[data-state="unknown"] .jev-status-unknown { display: block; }

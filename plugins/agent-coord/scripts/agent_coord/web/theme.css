@@ -1,46 +1,50 @@
-/* Theme overrides follow component styles; light keeps the tokens from styles.css. */
-.theme-control { display: flex; flex-direction: row; align-items: center; gap: 10px; margin: 0; font-size: 11px; }
-.theme-control select { width: auto; flex: 1; padding: 7px 9px; font-size: 11px; }
+/* Dark theme token overrides; light tokens live in tokens.css. */
+.theme-control { display: flex; flex-direction: row; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-xs); }
+.theme-control select { width: auto; flex: 1; padding: var(--space-2); font-size: var(--text-xs); }
 .sidebar .theme-control { color: var(--sb-ink); }
 .sidebar .theme-control select, .monitor-header .theme-control select { color-scheme: dark; color: var(--sb-ink); background: var(--sb-bg); border-color: var(--sb-line); }
 .monitor-header .theme-control { flex-shrink: 0; }
 @media (max-width: 720px) {
-  .monitor-header { flex-wrap: wrap; gap: 12px; }
+  .monitor-header { flex-wrap: wrap; gap: var(--space-3); }
 }
 
-/* Dark: neutral near-black surfaces so the single accent has something to contrast against. */
+/* Dark: neutral near-black surfaces so the single accent has clean contrast. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --paper: #141418;
-  --surface: #1c1c21;
-  --ink: #e6e6ea;
+  --paper: #121215;
+  --surface: #242429;
+  --panel: #242429;
+  --tint: #242429;
+  --hover-bg: #303036;
+  --ink: #f5f5f4;
   --muted: #8a8a93;
-  --line: #26262b;
-  --line-strong: #303036;
+  --line: #303036;
+  --line-strong: #3e3e46;
+  --hover-line: #55555c;
   --accent: #7fa3ff;
   --accent-hover: #9ab6ff;
-  --on-accent: #0d0f13;
-  --tint: #1c1c21;
+  --on-accent: #121215;
   --user-message-bg: #24344f;
   --user-message-line: #3b5278;
-  --panel: #1c1c21;
-  --hover-bg: #232328;
-  --hover-line: #3a3a41;
+  --user-message-muted: #a8b7d0;
   --warm: #ffa07a;
   --warm-tint: #3a2620;
   --danger: #ff8a80;
+  --danger-tint: color-mix(in srgb, var(--danger) 16%, var(--surface));
   --responded: #7fcea0;
+  --responded-tint: color-mix(in srgb, var(--responded) 16%, var(--surface));
   --dot-idle: #55555c;
-  --shadow: #0006;
-  --sb-bg: #101014;
-  --sb-line: #26262b;
-  --sb-hover: #1a1a1f;
+  --backdrop: #000000b3;
+  --shadow: #00000066;
+  --sb-bg: #121215;
+  --sb-line: #303036;
+  --sb-hover: #242429;
   color: var(--ink);
   background: var(--paper);
 }
-:root[data-theme="dark"] .message.user { --muted: #a8b7d0; }
+:root[data-theme="dark"] .message.user { --muted: var(--user-message-muted); }
 :root[data-theme="dark"] .thread-cards .session:hover { background: var(--hover-bg); }
 :root[data-theme="dark"] .error { color: var(--ink); }
-:root[data-theme="dark"] dialog::backdrop { background: #000000b3; }
+:root[data-theme="dark"] dialog::backdrop { background: var(--backdrop); }
 :root[data-theme="dark"] .thread-hover,
-:root[data-theme="dark"] .remote-access-dialog { box-shadow: 0 12px 42px var(--shadow); }
+:root[data-theme="dark"] .remote-access-dialog { box-shadow: var(--shadow-lg); }

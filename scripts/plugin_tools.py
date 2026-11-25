@@ -79,6 +79,15 @@ def validate(plugin: Path) -> None:
     for path in ("scripts/agent-coord", "scripts/agent-coord-hook", "scripts/agent_coord/cli.py"):
         if not (plugin / path).is_file():
             raise ValueError(f"Missing shared runtime: {path}")
+    web_root = plugin / "scripts/agent_coord/web"
+    if (web_root / "index.html").is_file():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("build_web", ROOT / "scripts/build_web.py")
+        if spec is None or spec.loader is None:
+            raise ValueError("Missing scripts/build_web.py validator.")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.verify(web_root)
 
 
 def cachebuster(plugin: Path, *, stamp: str | None = None) -> str:

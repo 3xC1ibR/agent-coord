@@ -29,14 +29,17 @@ The approved conversation composition gives reading and replying a shared measur
 other surfaces retain this contract.
 
 ## Colors
-`web/styles.css` is the implementation source of truth; `web/theme.css` replaces
-semantic tokens in dark mode. Use `--paper`, `--surface`, `--ink`, `--muted`,
-`--line`, `--accent` and `--danger`, not new literal colors. Cobalt indicates an
-action or link, orange attention, and green an unread response. No decorative color.
+`web/tokens.css` is the single canonical token source across the workspace and all
+auxiliary pages; `web/theme.css` replaces semantic tokens in dark mode. Use `--paper`,
+`--surface`, `--ink`, `--muted`, `--line`, `--accent` and `--danger`, not literal
+colors outside token files. Cobalt indicates an action or link, orange attention,
+and green an unread response. No decorative color.
 
 ## Typography
-Use the system font. Titles lead, supporting copy uses muted ink, and numeric
-comparisons use tabular figures. Use readable sentence case and explicit labels.
+Use the system font across the strict 7-step type scale (`11px`, `12px`, `13px`,
+`14px`, `16px`, `20px`, `24px`) declared in `web/tokens.css`. Titles lead, supporting
+copy uses muted ink, and numeric comparisons use tabular figures. Use readable
+sentence case and explicit labels.
 
 ## Layout
 The workspace has navigation, an overview or conversation, and optional context
@@ -97,8 +100,9 @@ Content precedes controls, popovers, dialogs, and notices. Reuse native dialogs 
 deliberate destructive confirmation. Avoid nested cards and unnecessary shadows.
 
 ## Shapes
-Use the existing 6px control and 10px panel radii, one-pixel dividers, and simple
-stroke icons. Auxiliary report sections use whitespace rather than card outlines.
+Use the 4-step radius scale (`4px` compact badge/code, `6px` control, `10px` panel,
+`999px` pill) from `web/tokens.css`, one-pixel dividers, and simple stroke icons.
+Auxiliary report sections use whitespace rather than card outlines.
 
 ## Components
 | Component | Use |
@@ -119,12 +123,13 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Native update action | The existing update menu stages and applies backend updates; reuse the native confirmation, progress screen and error presentation |
 | Available update dialog | Native alert with Install and Skip for Now; show each staged version once per launch, keep skipped updates available from the update menu, and require consent before restarting work |
 | Thread options menu | Thread actions on sidebar cards and in the conversation header; the mobile sheet lists the header actions inline |
-| Thread list row | List overview: status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. App agents start collapsed beneath their current supervisor at each depth; expanding a branch survives refresh. An app agent enters Attention on its own row only when it fails, stalls or needs a permission approval, and that row names it "App agent of <supervisor>"; its questions and checkpoint requests stay with its supervisor. Sections are Pinned and Quiet (each only when it holds threads), Attention, Working and Idle, with Pinned first; a pinned thread or app agent appears only in Pinned. The row menu adds Dismiss from Attention and Mark as read when they apply; live approvals and blocking questions resolve only by answering |
+| Thread list row | List overview (default; `Cards` board retired in favor of `List`, `Focus`, `Atlas`, and `Dispatcher`): status mark, provider logo, constant-width title, summary, request label, phase and time; actions replace label and phase on hover. `Attention` orders stakes-first (blocking asks/approvals/failures/stalls before reviews before informational updates). Reading an informational reply auto-clears both `seen` and `handled` watermarks, whereas sticky blockers stay in `Attention` until resolved or explicitly `Dismiss`ed. App agents start collapsed beneath their current supervisor at each depth; expanding a branch survives refresh. An app agent enters Attention on its own row only when it fails, stalls or needs a permission approval, and that row names it "App agent of <supervisor>"; its questions and checkpoint requests stay with its supervisor. Sections are Pinned and Quiet (each only when it holds threads), Attention, Working and Idle, with Pinned first; a pinned thread or app agent appears only in Pinned. Rows show at most one primary triage action (`Dismiss` for sticky requests or `Mark read` for unread informational updates) |
 | Agent tree connector | Solid for delegated agents; dotted from a source conversation to its fork, using the existing connector color |
+| Agent family breadcrumb | Multi-agent families keep a single root-titled conversation tab (`root_thread_id`) and show an inline `Root › Lead › Specialist ▾` switcher in the conversation header; the side panel never auto-expands over the conversation when switching threads |
 | Closed agent in the tree | A closed sub-agent folds to its provider icon at 40px with its title as the tooltip; a click or Enter opens its card in place and Minimize folds it again. The root and the selected agent always show their cards |
-| Role designation | A user-named role beside a conversation's metadata, muted 10px semibold, placed like the Dispatcher designation |
+| Role designation | A user-named role beside a conversation's metadata, muted 11px semibold, placed like the Dispatcher designation |
 | Stopped conversations | Quiet status-bar count of the user's Stops; a native dialog lists each with its supervising agent, all checked, before Release |
-| Asks view | Sidebar entry with an open count, red when an ask is blocking. Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta. Every row has a reply field in view with Send reply beside it; the kind's resolutions lead the next row (a decision's options and Answer with my text; Mark done and Not done, and so on), with Reply in conversation, Snooze and Dismiss after them as quiet text controls. The arrangement is the same for every kind. Enter sends the reply and never picks a resolution; once text is typed a muted line says what each control does with it. A replied ask shows the last reply and its time as a muted line. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in the copy block of `web/asks.js` |
+| Asks view | Sidebar entry with an open count, red when an ask is blocking (single entry point; duplicate footer `?` icon removed). Rows lead with the title; kind, effort, age, asking thread, state and the link follow as muted meta. Every row has an answer field in view with primary `Answer` beside it; pressing `Enter` or clicking `Answer` resolves the ask with the typed text, while `Shift+Enter` or quiet `Discuss in thread` posts a non-resolving comment or focuses the asking conversation. Preset option/affirm buttons resolve with the typed text as note, followed by `Discuss in thread`, `Snooze` and `Dismiss` as quiet text controls. Red marks only the Blocking group and the sidebar count; overdue and stale use the attention colour, and resolved outcomes stay muted. Groups use plain headings and one-pixel dividers, not cards. The view's name and wording live only in the copy block of `web/asks.js` |
 | Conversation asks | The asks view's rows above the composer, without the thread name: open asks only, with the Blocking flag in red on the row. Unfolded while an ask waits; the user's fold is kept per conversation. One ask shows in full, the first in order unless the user opens another by its title; the rest show title and meta. Folded, the summary line carries the blocking count and the first ask's title. No card, no heading: dividers and the summary line only |
 | Resolved asks in the side panel | A section of the thread context panel after the scratchpad: the panel's heading, then each resolution as its title, a muted outcome line (resolution, kind, time) and its answer or note. The ten most recent; a muted line says when earlier ones are in the asks view. Absent when the conversation has none |
 | Navigation toggle count | The sidebar entry's count pill on the corner of the navigation toggle, ringed in the paper colour, only while the navigation is closed (a phone, or a collapsed sidebar); red when an ask is blocking. The toggle's name and action do not change |
@@ -175,6 +180,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
+| 2026-11-25 | Canonical `web/tokens.css` (7 type sizes, 4 radii, zero literal drift), bundled `dist/app.css` + `dist/app.js`, `List` default (`Cards` retired), stakes-first `Attention` with smart auto-clear on read, `Enter`-to-resolve Asks (`Shift+Enter` / `Discuss in thread`), cross-repo groups, and root-thread tabs with inline Agent Breadcrumb | Consolidate visual tokens, eliminate the 51-script startup waterfall and multi-endpoint conversation open fan-out, remove duplicate triage friction, and keep multi-agent navigation calm without auto-popping the side panel. |
 | 2026-11-25 | Restore the arrow-only jump-to-latest control above the composer on every viewport | The user preferred its original placement after using the new chat layout. |
 | 2026-11-25 | Approved chat composition: aligned reading and composing, quiet task chrome, compact reference context | User approved integration after reviewing the alternatives. Narrow phones retain title space and allocate a layout row for alerts. |
 | 2026-11-24 | A Pinned section leads the inbox; inbox row menus offer Dismiss from Attention and Mark as read; a phone opens a conversation on the conversation, not the agent tree | The owner expected pins at the top regardless of state, had no way to dismiss or read from an inbox row, and had to close the tree sheet to read a thread with agents |

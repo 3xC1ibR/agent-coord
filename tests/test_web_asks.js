@@ -7,10 +7,10 @@ const {Element, makeDocument} = require("./web_dom_stub.js");
 const IDS = ["open-asks-view", "asks-entry-label", "asks-count", "open-asks", "asks-dialog", "sidebar-backdrop", "menu-toggle",
   "asks-title", "asks-summary", "close-asks", "asks-sections", "asks-filters", "asks-filter-project", "asks-filter-kind",
   "asks-filter-since", "asks-notice", "asks-error", "asks-status", "asks-list"];
-function setup(open, {config = {askKinds: true}} = {}) {
+function setup(open, {config = {askKinds: true}, ids = IDS} = {}) {
   const navigated = [], errors = [], calls = [], timers = [];
   const state = {open, config};
-  const document = makeDocument(IDS);
+  const document = makeDocument(ids);
   const $ = id => document.getElementById(id);
   $("asks-filter-project").append(Object.assign(new Element("option"), {textContent: "All projects"}));
   $("sidebar-backdrop").hidden = true;
@@ -130,4 +130,37 @@ test("a backend from before kinds is detected on opening and served the decision
   await open();
   assert.equal(errors.at(-1).message, "Connection lost.");
   assert.equal(ui.viewer.legacy, false);
+});
+
+test("deduplicated footer without #open-asks, composite hydrate, and SSE polling suppression work cleanly", async () => {
+  const idsWithoutFooter = IDS.filter(id => id !== "open-asks");
+  const {ui, $, calls, timers, errors, open} = setup([blocking, quiet, snoozedBlocking], {ids: idsWithoutFooter});
+  assert.equal($("open-asks"), null);
+
+  // Composite /open hydration updates counts and tooltips with zero HTTP fetches.
+  ui.hydrate([blocking, quiet, snoozedBlocking]);
+  assert.equal(calls.length, 0);
+  assert.equal($("asks-count").hidden, false);
+  assert.equal($("asks-count").textContent, "2");
+  assert.ok($("asks-count").classList.contains("asks-count-blocking"));
+  assert.equal($("open-asks-view").title, "2 asks waiting for you · 1 blocking");
+
+  await open();
+  assert.equal($("asks-dialog").open, true);
+  const tick = timers.at(-1);
+  assert.equal(typeof tick, "function");
+
+  try {
+    globalThis.agentCoordEventsConnected = true;
+    const before = calls.length;
+    tick();
+    assert.equal(calls.length, before, "SSE-connected windows skip interval refresh polling");
+
+    globalThis.agentCoordEventsConnected = false;
+    tick();
+    assert.equal(calls.length, before + 1);
+  } finally {
+    delete globalThis.agentCoordEventsConnected;
+  }
+  assert.deepEqual(errors, []);
 });

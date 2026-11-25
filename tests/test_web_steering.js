@@ -69,48 +69,43 @@ test("Tab queues a draft without steering, while Enter submits normally", async 
   assert.equal(prevented, 2);
 });
 
-test("Enter during the initial conversation read submits the same draft once after opening", async () => {
-  for (const outcome of ["ready", "navigated", "edited", "closed", "failed"]) {
-    const c = setup();
-    let finish, sends = 0;
-    const entry = {pending: new Promise(resolve => { finish = resolve; })};
-    c.state.conversations = new Map([["one", entry]]);
-    c.state.detail = null;
-    c.state.detailRefreshing = true;
-    c.state.navigationRevision = 1;
-    c.$("send").disabled = true;
-    c.$("composer").requestSubmit = () => { sends++; };
-    for (let i = 0; i < 2; i++) c.composerKeydown({key: "Enter", preventDefault() {}});
-    assert.equal(sends, 0);
-    if (outcome === "navigated") c.state.navigationRevision++;
-    if (outcome === "edited") c.$("message").value = "Changed";
-    c.state.detail = {work_thread: {thread_id: "one", browser_session: true}};
-    c.state.detailRefreshing = false;
-    c.$("send").disabled = outcome === "closed";
-    finish(outcome !== "failed");
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(sends, outcome === "ready" ? 1 : 0, outcome);
-  }
+test("Enter during an initial read submits immediately when the browser session is already known, and waits when unknown", async () => {
+  // Known browser_session in state.sessions: Send stays enabled during detailRefreshing so Enter is <16ms optimistic!
+  const cKnown = setup();
+  let knownSubmits = 0;
+  cKnown.state.sessions = [{thread_id: "one", browser_session: true, attention: "now", client: "codex"}];
+  cKnown.state.detail = null;
+  cKnown.state.detailRefreshing = true;
+  cKnown.renderStatus();
+  assert.equal(cKnown.$("send").disabled, false, "known browser sessions never disable Send during detail refresh");
+  cKnown.$("composer").requestSubmit = () => { knownSubmits++; };
+  cKnown.composerKeydown({key: "Enter", preventDefault() {}});
+  assert.equal(knownSubmits, 1);
+
+  // Unknown cold conversation (!state.detail && !known session): Send stays disabled until browser_session is known.
+  const cCold = setup();
+  let coldSubmits = 0;
+  cCold.state.sessions = [];
+  cCold.state.detail = null;
+  cCold.state.detailRefreshing = true;
+  cCold.renderStatus();
+  assert.equal(cCold.$("send").disabled, true);
+  cCold.$("composer").requestSubmit = () => { coldSubmits++; };
+  cCold.composerKeydown({key: "Enter", preventDefault() {}});
+  assert.equal(coldSubmits, 0);
 });
 
-test("Enter between invalidation and the next detail read uses the refreshed send controls", async () => {
-  const c = setup(), entry = {pending: null};
-  let reads = 0, sends = 0;
-  c.state.conversations = new Map([["one", entry]]);
-  c.state.detail = {work_thread: {thread_id: "one", browser_session: true}};
+test("Enter between invalidation and the next detail read submits immediately without waiting on refreshDetail", () => {
+  const c = setup();
+  let submits = 0;
+  c.state.detail = {work_thread: {thread_id: "one", browser_session: true, attention: "now", client: "codex"}};
+  c.state.sessions = [c.state.detail.work_thread];
   c.state.detailRefreshing = true;
-  c.$("send").disabled = true;
-  c.$("composer").requestSubmit = () => { sends++; };
-  c.refreshDetail = async () => {
-    reads++;
-    c.state.detailRefreshing = false;
-    c.$("send").disabled = false;
-    return true;
-  };
+  c.renderStatus();
+  assert.equal(c.$("send").disabled, false);
+  c.$("composer").requestSubmit = () => { submits++; };
   c.composerKeydown({key: "Enter", preventDefault() {}});
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(reads, 1);
-  assert.equal(sends, 1);
+  assert.equal(submits, 1);
 });
 
 test("empty Tab, idle Tab, modified keys and IME retain normal keyboard behavior", () => {

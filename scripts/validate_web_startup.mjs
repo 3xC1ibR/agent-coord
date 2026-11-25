@@ -27,7 +27,7 @@ const {chromium, webkit} = createRequire(`${root}/demo/package.json`)("playwrigh
 const markup = readFileSync(`${webRoot}/index.html`, "utf8");
 const report = {webRoot, engine: args.engine || "chromium", at: new Date().toISOString(),
   indexSha256: createHash("sha256").update(markup).digest("hex"), cases: []};
-const scripts = [...markup.matchAll(/(?:src|href)="\/([\w-]+\.js)"/g)].map(match => match[1]);
+const scripts = [...markup.matchAll(/(?:src|href)="\/([\w/-]+\.js)"/g)].map(match => match[1]);
 const env = {...process.env};
 for (const key of Object.keys(env)) {
   if (/^(AGENT_COORD_|CODEX_|CLAUDE_CODE_|PYTHONPATH$)/.test(key)) delete env[key];
@@ -100,12 +100,7 @@ try {
         constructor(...values) { super(...values); window.__startupProbe.streams++; }
       };
     });
-    const transient = new Set(["theme.js", "navigation.js", "agent-tree.js", "settings.js", "app.js", "thread-hover.js"]);
-    let releaseTail;
-    const tailReady = new Promise(done => { releaseTail = done; });
-    let tailHeld = false;
-    let releaseTailRequest;
-    const tailRequest = new Promise(done => { releaseTailRequest = done; });
+    const transient = new Set(["theme.js", "dist/app.js"]);
     let releaseApp;
     const appResponse = new Promise(done => { releaseApp = done; });
     await page.route("**/*", async route => {
@@ -115,41 +110,30 @@ try {
       if (!asset.endsWith(".js")) return route.continue();
       const count = result.requests[asset] = (result.requests[asset] || 0) + 1;
       const fail = scenario === "transient" && transient.has(asset) && count === 1 ||
-        scenario === "persistent" && asset === "navigation.js";
-      if (scenario === "delayed-app" && asset === "app.js" && count === 1) {
+        scenario === "persistent" && asset === "dist/app.js" ||
+        scenario === "late-failure" && asset === "dist/app.js" && count === 1;
+      if (scenario === "delayed-app" && asset === "dist/app.js" && count === 1) {
         await appResponse;
         return route.continue();
-      }
-      if (scenario === "late-failure" && asset === "thread-hover.js" && count === 1) {
-        tailHeld = true;
-        releaseTailRequest();
-        await tailReady;
-        result.failures.push(asset);
-        return route.abort("internetdisconnected");
       }
       if (fail) { result.failures.push(asset); return route.abort("internetdisconnected"); }
       return route.continue();
     });
     try {
-      // Commit permits a held deferred tail; DOMContentLoaded would wait for it on the baseline.
       await page.goto(`${base}/#${thread}`, {waitUntil: "commit"});
       await page.waitForSelector("#message", {state: "attached"});
       const timeOrigin = await page.evaluate(() => performance.timeOrigin);
       if (scenario === "transient") {
-        // Fragment navigation must not strand or replace a document whose initial assets failed.
         await page.evaluate(() => { location.hash = "startup-recovery-pending"; });
         await page.evaluate(id => { location.hash = id; }, thread);
-      }
-      if (scenario === "late-failure") {
-        await Promise.race([tailRequest, new Promise((_, reject) => setTimeout(() => reject(Error("Tail was not requested")), 5000))]);
       }
       if (scenario === "delayed-app") {
         await page.waitForFunction(() => !document.querySelector("#error").hidden &&
           document.querySelector("#error").textContent.includes("Could not load Ribbon Field"), null, {timeout: 5000});
         await page.waitForTimeout(100);
         result.beforeLateResponse = await page.evaluate(() => ({at: performance.now(),
-          status: document.documentElement.dataset.startup, appExecuted: window.__startupProbe.loaded.includes("app.js")}));
-        assert.equal(result.beforeLateResponse.appExecuted, false, "hold the actual app script beyond the deadline");
+          status: document.documentElement.dataset.startup, appExecuted: window.__startupProbe.loaded.includes("dist/app.js")}));
+        assert.equal(result.beforeLateResponse.appExecuted, false, "hold the actual app bundle beyond the deadline");
         result.releaseMs = await page.evaluate(() => performance.now());
         releaseApp();
       }
@@ -157,14 +141,14 @@ try {
         await page.waitForTimeout(4500);
         result.initialization = await page.evaluate(() => window.__startupProbe);
         result.notice = await page.locator("#error").innerText();
-        assert.ok(!result.initialization.loaded.includes("app.js"), "do not initialize through a missing prerequisite");
-        assert.equal(result.errors.length, 0, "do not execute dependent scripts after a failed prerequisite");
+        assert.ok(!result.initialization.loaded.includes("dist/app.js"), "do not initialize a missing bundle");
+        assert.equal(result.errors.length, 0, "do not execute broken bundle scripts");
         assert.ok(await page.locator("#error").isVisible(), "persistent failure must be visible");
-        const attempts = result.requests["navigation.js"];
+        const attempts = result.requests["dist/app.js"];
         assert.ok(attempts >= 2 && attempts <= 8, `bounded attempts: ${attempts}`);
         await page.evaluate(() => { location.hash = "startup-still-failed"; });
         await page.waitForTimeout(1000);
-        assert.equal(result.requests["navigation.js"], attempts, "hash navigation must not restart retries");
+        assert.equal(result.requests["dist/app.js"], attempts, "hash navigation must not restart retries");
         result.screenshot = output.replace(/\.json$/, "") + `-${scenario}-${report.cases.length}.png`;
         await page.screenshot({path: result.screenshot});
       } else {
@@ -177,32 +161,29 @@ try {
         if (scenario === "transient") assert.deepEqual(new Set(result.failures), transient);
         const draft = `Startup retained draft: ${scenario}`;
         await page.locator("#message").fill(draft);
-        if (tailHeld) releaseTail();
         await page.waitForFunction(() => typeof threadHover !== "undefined", null,
           {timeout: scenario === "delayed-app" ? 1000 : 5000});
         result.recoveredMs = await page.evaluate(() => performance.now());
         if (scenario !== "delayed-app") assert.ok(result.recoveredMs <= 5000, `asset recovery took ${result.recoveredMs}ms`);
         if (scenario === "delayed-app") {
           assert.ok(result.recoveredMs - result.releaseMs <= 1000, "finish promptly after late success");
-          assert.equal(result.requests["app.js"], 1, "never retry an uncertain app execution");
+          assert.equal(result.requests["dist/app.js"], 1, "never retry an uncertain bundle execution");
           assert.equal(await page.locator("#error").isVisible(), false, "clear the resolved startup notice");
-          // This real keyboard handler belongs to filter-menu.js, after app.js.
           await page.evaluate(() => { document.querySelector("#filter-menu").open = true; });
           await page.keyboard.press("Escape");
           assert.equal(await page.locator("#filter-menu").evaluate(menu => menu.open), false);
           result.lateCompletionFunctional = true;
         }
-        await page.waitForTimeout(1100);
+        await page.waitForTimeout(400);
         assert.equal(await page.locator("#message").inputValue(), draft, "recovery must retain a draft");
         assert.equal(await page.evaluate(() => performance.timeOrigin), timeOrigin, "recovery must retain the document");
         result.initialization = await page.evaluate(() => window.__startupProbe);
-        assert.equal(result.initialization.loaded.filter(asset => asset === "app.js").length, 1, "initialize once");
-        assert.deepEqual(result.initialization.loaded, scripts, "execute every dependency once, in document order");
+        assert.equal(result.initialization.loaded.filter(asset => asset === "dist/app.js").length, 1, "initialize once");
+        assert.deepEqual(result.initialization.loaded, scripts, "execute theme.js then dist/app.js once");
         assert.equal(result.initialization.streams, 1, "connect once");
         assert.deepEqual(result.errors, []);
         result.screenshot = output.replace(/\.json$/, "") + `-${scenario}-${report.cases.length}.png`;
         await page.screenshot({path: result.screenshot});
-        // Actual composer submission against the fake provider, never a real agent.
         const accepted = page.waitForResponse(response => response.url().endsWith(`/sessions/${thread}/messages`) &&
           response.request().method() === "POST");
         await page.locator("#message").press("Enter");
@@ -220,7 +201,6 @@ try {
       result.screenshot = output.replace(/\.json$/, "") + `-${scenario}-failed.png`;
       await page.screenshot({path: result.screenshot}).catch(() => {});
     } finally {
-      releaseTail();
       releaseApp();
       await context.close();
     }

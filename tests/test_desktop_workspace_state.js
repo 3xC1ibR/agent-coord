@@ -1,7 +1,7 @@
 "use strict";
 const {test} = require("node:test");
 const assert = require("node:assert/strict");
-const {create} = require("../desktop/macos/workspace-state.js");
+const {create, IDB_NAME, IDB_STORE} = require("../desktop/macos/workspace-state.js");
 const {ThreadTabs} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-tabs.js");
 const {WorkingFolders} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
 const {ThreadPanes} = require("../plugins/agent-coord/scripts/agent_coord/web/thread-panes.js");
@@ -318,4 +318,171 @@ test("native quit can wait for local sends and unfinished image reads", () => {
   s.sending = new Set(["child"]); assert.equal(f.helper.busy(), true); s.sending.clear();
   s.attachments.drafts.set("child", [{name: "pending.png", url: null}]); assert.equal(f.helper.busy(), true);
   s.attachments.drafts.get("child")[0].url = "data:image/png;base64,YQ=="; assert.equal(f.helper.busy(), false);
+});
+
+function createFakeIndexedDB() {
+  const databases = new Map();
+  return {
+    databases,
+    open(name, version = 1) {
+      const request = {};
+      queueMicrotask(() => {
+        let db = databases.get(name);
+        const created = !db;
+        if (!db) {
+          const stores = new Map();
+          db = {
+            name,
+            version,
+            stores,
+            objectStoreNames: {contains: storeName => stores.has(storeName)},
+            createObjectStore(storeName) {
+              if (!stores.has(storeName)) stores.set(storeName, new Map());
+              return {};
+            },
+            transaction(storeName) {
+              const map = stores.get(storeName);
+              const tx = {oncomplete: null, onerror: null, onabort: null};
+              let pendingOps = 0, scheduled = false;
+              const checkDone = () => {
+                if (!scheduled && pendingOps === 0) {
+                  scheduled = true;
+                  queueMicrotask(() => tx.oncomplete?.());
+                }
+              };
+              queueMicrotask(checkDone);
+              return Object.assign(tx, {
+                objectStore() {
+                  return {
+                    put(record) {
+                      pendingOps += 1;
+                      queueMicrotask(() => {
+                        map.set(record.key, JSON.parse(JSON.stringify(record)));
+                        pendingOps -= 1;
+                        checkDone();
+                      });
+                      return {};
+                    },
+                    get(key) {
+                      pendingOps += 1;
+                      const getReq = {};
+                      queueMicrotask(() => {
+                        getReq.result = map.has(key) ? JSON.parse(JSON.stringify(map.get(key))) : undefined;
+                        getReq.onsuccess?.();
+                        pendingOps -= 1;
+                        checkDone();
+                      });
+                      return getReq;
+                    },
+                  };
+                },
+              });
+            },
+          };
+          databases.set(name, db);
+        }
+        request.result = db;
+        if (created) request.onupgradeneeded?.();
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+}
+
+test("tightened 120 ms debounce and incremental IndexedDB draft, mention and image persistence merge newer records on restore", async () => {
+  const indexedDB = createFakeIndexedDB();
+  const makeWithIDB = ({snapshot = null, windowId = "win-alpha", folderSlot = "native-0"} = {}) => {
+    const document = new EventTarget(), window = new EventTarget(), nodes = new Map(), timers = new Map(), saves = [];
+    let sequence = 0, state;
+    for (const name of ["message", "timeline", "welcome", "leave-tiles", "tile-threads", "page-location"]) nodes.set(name, new Element());
+    Object.assign(document, {body: new Element(), getElementById: id => nodes.get(id), createElement: () => new Element(), hasFocus: () => false});
+    Object.assign(window, {
+      document, indexedDB,
+      agentCoordDesktop: {windowId, folderSlot},
+      sessionStorage: new Storage(), localStorage: new Storage(),
+      setTimeout: (fn, delay) => { const id = ++sequence; timers.set(id, {fn, delay}); return id; },
+      clearTimeout: id => timers.delete(id),
+    });
+    document.defaultView = window;
+    const helper = create({
+      window, document, getState: () => state,
+      onSave: value => saves.push(value),
+      select: async id => { state.selected = id; },
+      newSession: async () => { state.selected = "new-session"; },
+      goHome: () => { state.selected = null; },
+      render() {},
+    });
+    helper.preload(snapshot);
+    state = {
+      config: {token: "ephemeral", workspaceRoot: "/work"}, projectCwd: "/work", selected: "thread-one",
+      drafts: new Map(), groupExpansion: new Map(), phaseScroll: new Map(),
+      timelineScroll: {following: true, position: () => 0, restore() {}, latest() {}},
+      attachments: new ChatImageAttachments({document, getThread: () => state.selected, canAttach: () => true, onChange() {}}),
+      mentions: {
+        drafts: new Map(),
+        restore(id, text, refs) { this.drafts.set(id, new ThreadMentionDraft(text, refs)); },
+        snapshot(id, text) { const entry = this.drafts.get(id); if (!entry) return []; entry.update(text); return entry.snapshot(); },
+      },
+      folders: new WorkingFolders({storage: window.localStorage, key: folderSlot, scope: "/work"}),
+      threadTabs: new ThreadTabs({storage: window.localStorage, scope: "/work:" + folderSlot}),
+    };
+    state.threadTabs.setProject("/work");
+    state.threadTabs.open({thread_id: "thread-one", title: "Thread One"});
+    return {window, document, nodes, helper, state, timers, saves};
+  };
+
+  const first = makeWithIDB({windowId: "win-alpha", folderSlot: "native-0"});
+  first.nodes.get("message").value = "older snapshot draft";
+  first.helper.ready();
+  const olderSnapshot = first.helper.capture();
+  assert.ok(Number.isFinite(olderSnapshot.savedAt));
+
+  // Subsequent keystrokes + image + mention update IndexedDB incrementally before flush() fires.
+  first.nodes.get("message").value = "Newer @Reviewer draft typed right before quit";
+  first.nodes.get("message").setSelectionRange(6, 15);
+  first.state.mentions.restore("thread-one", first.nodes.get("message").value,
+    [{start: 6, end: 15, text: "@Reviewer", session_id: "reviewer-session"}]);
+  const imageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==";
+  first.state.attachments.drafts.set("thread-one", [{name: "fresh.png", url: imageUrl}]);
+  const inputEvent = new Event("input");
+  Object.defineProperty(inputEvent, "target", {value: {id: "message"}});
+  first.document.dispatchEvent(inputEvent);
+
+  const scheduledDelays = [...first.timers.values()].map(item => item.delay);
+  assert.equal(scheduledDelays.length, 1);
+  assert.ok(scheduledDelays[0] <= 120, `expected <= 120 ms debounce, got ${scheduledDelays[0]}`);
+
+  // Let microtasks complete so IndexedDB receives the incremental write without running setTimeout flush().
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(indexedDB.databases.has(IDB_NAME), true);
+  assert.equal(indexedDB.databases.get(IDB_NAME).stores.has(IDB_STORE), true);
+
+  // Restore in a relaunched window that only received olderSnapshot from windows/state.json.
+  const relaunched = makeWithIDB({snapshot: olderSnapshot, windowId: "win-alpha", folderSlot: "native-0"});
+  relaunched.helper.ready();
+  assert.equal(await relaunched.helper.restore(olderSnapshot), true);
+  assert.equal(relaunched.nodes.get("message").value, "Newer @Reviewer draft typed right before quit");
+  assert.equal(relaunched.nodes.get("message").selectionStart, 6);
+  assert.equal(relaunched.nodes.get("message").selectionEnd, 15);
+  assert.equal(relaunched.state.attachments.items("thread-one")[0]?.name, "fresh.png");
+  assert.equal(relaunched.state.attachments.items("thread-one")[0]?.url, imageUrl);
+  assert.equal(relaunched.state.mentions.snapshot("thread-one", relaunched.nodes.get("message").value)[0]?.session_id, "reviewer-session");
+
+  // Another window with a different folderSlot and windowId remains isolated.
+  const otherWindow = makeWithIDB({snapshot: olderSnapshot, windowId: "win-beta", folderSlot: "native-1"});
+  otherWindow.helper.ready();
+  assert.equal(await otherWindow.helper.restore(olderSnapshot), true);
+  assert.equal(otherWindow.nodes.get("message").value, "older snapshot draft");
+  assert.equal(otherWindow.state.attachments.items("thread-one").length, 0);
+
+  // A newer native quit snapshot (savedAt > IndexedDB updatedAt) is never overwritten by older IndexedDB data.
+  const newerSnapshot = relaunched.helper.capture();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  newerSnapshot.drafts = [["thread-one", "alpha final keystroke"]];
+  newerSnapshot.savedAt += 1000;
+  const afterFinalKeystroke = makeWithIDB({snapshot: newerSnapshot, windowId: "win-alpha", folderSlot: "native-0"});
+  afterFinalKeystroke.helper.ready();
+  assert.equal(await afterFinalKeystroke.helper.restore(newerSnapshot), true);
+  assert.equal(afterFinalKeystroke.nodes.get("message").value, "alpha final keystroke");
 });

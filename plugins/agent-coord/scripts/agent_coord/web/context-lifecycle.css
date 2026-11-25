@@ -1,22 +1,15 @@
-.context-lifecycle-panel { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 14px; overflow-wrap: anywhere; }
-.context-lifecycle-panel h3 { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
-.context-lifecycle-panel h4 { font-size: 12px; font-weight: 600; margin: 14px 0 5px; }
-.context-lifecycle-panel p { margin: 6px 0; }
+.context-lifecycle-panel { border-top: 1px solid var(--line); margin-top: var(--space-4); padding-top: var(--space-3); overflow-wrap: anywhere; }
+.context-lifecycle-panel h3 { font-size: var(--text-base); font-weight: 600; margin: 0 0 var(--space-2); }
+.context-lifecycle-panel h4 { font-size: var(--text-sm); font-weight: 600; margin: var(--space-3) 0 var(--space-1); }
+.context-lifecycle-panel p { margin: var(--space-1) 0; }
 .context-lifecycle-panel .context-lifecycle-recommendation { font-weight: 600; }
-.context-lifecycle-panel ul { padding-left: 18px; margin: 5px 0 10px; }
-.context-lifecycle-panel li { margin: 4px 0; }
-.context-lifecycle-panel details { margin-top: 12px; }
+.context-lifecycle-panel ul { padding-left: var(--space-4); margin: var(--space-1) 0 var(--space-2); }
+.context-lifecycle-panel li { margin: var(--space-1) 0; }
+.context-lifecycle-panel details { margin-top: var(--space-3); }
 .context-lifecycle-panel summary { cursor: pointer; font-weight: 500; }
-.context-lifecycle-panel .context-lifecycle-stale { color: var(--muted); font-size: 12px; }
+.context-lifecycle-panel .context-lifecycle-stale { color: var(--muted); font-size: var(--text-sm); }
 
-/* Conversation context uses the existing sidebar type and spacing scale. */
-#context-info {
-  --context-heading-size: 12px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
-  --context-heading-weight: 550;
-  --context-section-gap: 24px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
-  --context-text-gap: 8px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
-  --context-divider-width: 1px; /* drift-ok: module dimensions reuse the DESIGN.md sidebar scale. */
-}
+/* Conversation context uses the shared sidebar type and spacing scale. */
 .context-panel-tabs:has(#panel-agents[hidden]):has(#panel-context[hidden]) { display: none; }
 #thread-context[hidden] ~ .context-secondary { display: none; }
 #checkpoint h3 { font-size: var(--context-heading-size); font-weight: var(--context-heading-weight); margin: var(--context-section-gap) 0 var(--context-text-gap); }

@@ -203,5 +203,5 @@ test("inbox row menus offer Dismiss from Attention and Mark as read only where t
   assert.equal(calls[0][1].handled, true, "Dismiss uses the thread view's handled receipt");
   assert.equal(calls[0][1].handled_checkpoint_id, 12);
   await menu.find(entry => entry.label === "Mark as read").run();
-  assert.equal(JSON.stringify(calls.at(-1)), JSON.stringify(["threads/one", {seen: true, seen_checkpoint_id: 12, seen_completion_id: 8}]));
+  assert.equal(JSON.stringify(calls.at(-1)), JSON.stringify(["threads/one", {seen: true, auto_handle: true, seen_checkpoint_id: 12, seen_completion_id: 8}]));
 });

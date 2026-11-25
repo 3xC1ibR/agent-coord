@@ -153,7 +153,9 @@
     protectedIds() {
       return this.model.visible.filter(id => {
         const record = this.panes.records.get(id), draft = record?.api?.exportDraft();
-        return this.document.activeElement === record?.frame || draft?.text?.trim() || draft?.images?.length ||
+        const activeFocused = this.document.activeElement === record?.frame ||
+          (record?.element && record.element.contains?.(this.document.activeElement));
+        return activeFocused || draft?.text?.trim() || draft?.images?.length ||
           record?.frame?.contentDocument?.querySelector("dialog[open]");
       });
     }
@@ -201,7 +203,8 @@
         }
         for (const item of items) {
           const record = this.panes.records.get(item.thread.thread_id);
-          if (record?.frame) this.panes.changed(record.frame.contentWindow, item.thread);
+          const source = record?.source || record?.frame?.contentWindow;
+          if (source) this.panes.changed(source, item.thread);
         }
         this.document.body.classList.toggle("dispatcher-has-activity", !!items.length || !!this.model.receipts.length);
         this.render(items); this.save();

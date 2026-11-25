@@ -18,15 +18,44 @@ const threadGrouping = (() => {
     return value === "discussion" ? "investigation" : phases.some(([key]) => key === value) ? value : "new";
   }
   function phaseLabel(thread) { return phases.find(([key]) => key === phase(thread))[1]; }
+  function isRunning(thread) {
+    return thread.attention !== "archived" &&
+      (thread.response_state === "working" || thread.status === "running" && thread.response_state !== "input");
+  }
+  function classifiedChoice(thread) {
+    const cls = thread.response_classification;
+    if (!cls || cls.status && cls.status !== "classified") return null;
+    return cls.choice || null;
+  }
+  function unhandledCheckpoint(thread) {
+    const cp = thread.checkpoint;
+    return !isRunning(thread) && !acknowledgedRequest(thread) && !thread.checkpoint_stale &&
+      cp?.next_actor === "user" && Boolean(cp.next_action) &&
+      (cp.id == null || cp.id > (thread.handled_checkpoint_id || 0));
+  }
   function reason(thread) {
     if (thread.status === "stalled") return {key: "blocked", rank: 0, label: "Stalled"};
-    const key = thread.attention_reason || ({input: "blocked", action: "review", failed: "blocked", update: "update"}[thread.response_state]) || "reply";
-    if (key === "done" && thread.response_state === "update" && !thread.checkpoint_stale &&
-        thread.checkpoint?.phase === "finished" && thread.checkpoint.next_actor === "nobody" &&
-        thread.work_phase === "finished" && thread.turn_completion?.status === "completed" &&
-        !thread.open_ask && !["running", "needs input"].includes(thread.status))
-      return {key, rank: reasons.done.rank, label: "✓ Done · No action needed"};
-    return {key, ...(reasons[key] || reasons.reply)};
+    if (thread.response_state === "failed" || thread.status === "needs input" || (thread.open_ask && !thread.open_ask.snoozed))
+      return {key: "blocked", ...reasons.blocked};
+    const explicit = thread.attention_reason || classifiedChoice(thread);
+    if (explicit === "blocked") return {key: "blocked", ...reasons.blocked};
+    if (explicit === "review") return {key: "review", ...reasons.review};
+    if (thread.response_state === "input") return {key: "blocked", ...reasons.blocked};
+    if (unhandledCheckpoint(thread)) return {key: "review", ...reasons.review};
+    if (thread.snooze_due || explicit === "snooze") return {key: "snooze", ...reasons.snooze};
+    if (explicit === "update") return {key: "update", ...reasons.update};
+    if (explicit === "findings" || explicit === "reply") return {key: explicit, ...reasons[explicit]};
+    if (explicit === "done") {
+      if (thread.response_state === "update" && !thread.checkpoint_stale &&
+          thread.checkpoint?.phase === "finished" && thread.checkpoint.next_actor === "nobody" &&
+          thread.work_phase === "finished" && thread.turn_completion?.status === "completed" &&
+          !thread.open_ask && !["running", "needs input"].includes(thread.status))
+        return {key: "done", rank: reasons.done.rank, label: "✓ Done · No action needed"};
+      return {key: "done", ...reasons.done};
+    }
+    if (thread.response_state === "action") return {key: "review", ...reasons.review};
+    if (thread.response_state === "update") return {key: "update", ...reasons.update};
+    return {key: explicit && reasons[explicit] ? explicit : "reply", ...(reasons[explicit] || reasons.reply)};
   }
   function awaitsUser(thread) {
     return thread.attention !== "archived" && !thread.snoozed && (typeof thread.needs_attention === "boolean"
@@ -43,8 +72,11 @@ const threadGrouping = (() => {
   const stageOrder = (a, b) => Number(status(b).key === "running") - Number(status(a).key === "running") ||
     activityAt(b) - activityAt(a) || stable(a, b);
   const attentionOrder = (a, b) =>
-    (b.attention_since || b.created_at || 0) - (a.attention_since || a.created_at || 0) ||
-    reason(a).rank - reason(b).rank || stable(a, b);
+    reason(a).rank - reason(b).rank ||
+    Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+    (b.attention_since || b.turn_completion?.completed_at || b.updated_at || b.created_at || 0) -
+      (a.attention_since || a.turn_completion?.completed_at || a.updated_at || a.created_at || 0) ||
+    stable(a, b);
 
   function status(thread) {
     if (thread.attention === "archived") return {key: "idle", label: "Closed"};

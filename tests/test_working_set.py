@@ -31,8 +31,8 @@ class WorkingSetTests(unittest.TestCase):
                 with urllib.request.urlopen(base + "/") as response:
                     page = response.read()
                     self.assertIn(b'id="working-set-overview"', page)
-                    self.assertIn(b'href="/working-set.css?v=', page)
-                    self.assertIn(b'rel="preload" as="script" href="/working-set.js?v=', page)
+                    self.assertIn(b'href="/dist/app.css?v=', page)
+                    self.assertIn(b'rel="preload" as="script" href="/dist/app.js?v=', page)
                 for path, mime in [("working-set.js", "javascript"), ("working-set.css", "css")]:
                     with urllib.request.urlopen(base + "/" + path) as response:
                         self.assertEqual(response.status, 200)

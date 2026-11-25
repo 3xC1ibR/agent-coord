@@ -563,3 +563,34 @@ test("a parent tab dot clears when its child's request is dismissed and stays bl
   tabs.update([{...parent, response_state: "working", status: "running"}, {...child, status: "needs input"}]);
   assert.equal(tab().dataset.needsAction, "true", "a child's live approval outranks the parent's running state");
 });
+
+test("opening delegated child threads reuses the root family tab and preserves the root title", () => {
+  const {tabs, ids} = setup();
+  const root = {...thread("root"), title: "Root implementation"};
+  const lead = {...thread("lead"), title: "Lead planner", creation_mode: "orchestration", created_by_thread_id: "root"};
+  const specialist = {...thread("specialist"), title: "Database specialist", creation_mode: "orchestration", created_by_thread_id: "lead"};
+  tabs.update([root, lead, specialist]);
+
+  tabs.open(root);
+  assert.equal(tabs.items[0].root_thread_id, "root");
+  assert.equal(tabs.items[0].title, "Root implementation");
+
+  // Opening a child with explicit rootThread reuses the root tab without renaming it.
+  tabs.open(lead, {rootThread: root});
+  assert.deepEqual(ids(), ["root"]);
+  assert.equal(tabs.selected, "root");
+  assert.equal(tabs.conversationFor("root"), "lead");
+  assert.equal(tabs.items[0].title, "Root implementation");
+
+  // Opening a deeper descendant from inventory lineage also reuses the root tab.
+  tabs.open(specialist);
+  assert.deepEqual(ids(), ["root"]);
+  assert.equal(tabs.selected, "root");
+  assert.equal(tabs.conversationFor("root"), "specialist");
+  assert.equal(tabs.items[0].title, "Root implementation");
+
+  // Refreshing inventory when child titles change never mutates the root tab's title.
+  tabs.update([root, {...lead, title: "Renamed lead"}, {...specialist, title: "Renamed specialist"}]);
+  assert.equal(tabs.items[0].title, "Root implementation");
+  assert.equal(tabs.conversationFor("root"), "specialist");
+});

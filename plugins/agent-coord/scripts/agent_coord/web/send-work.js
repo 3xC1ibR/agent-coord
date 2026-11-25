@@ -76,9 +76,12 @@ class SendWorkPalette {
     this.cwd = cwd; this.input.value = saved?.message || ""; this.locked = saved?.locked || null;
     this.draft = saved?.draft || this.defaultSettings();
     this.closeProfile(); this.cancelSuggestions();
-    this.$("logo").title = "Dispatcher" + (cwd ? " in " + cwd : "");
-    this.dialog.setAttribute("aria-label", "Dispatcher" + (cwd ? " in " + cwd : ""));
-    this.input.title = cwd ? "Dispatch work in " + cwd : "Choose a project";
+    this.$("logo").title = "Send work" + (cwd ? " in " + cwd : "");
+    this.$("logo").setAttribute("aria-label", "Send work" + (cwd ? " in " + cwd : ""));
+    this.dialog.setAttribute("aria-label", "Send work" + (cwd ? " in " + cwd : ""));
+    this.dock?.setAttribute("aria-label", "Send work" + (cwd ? " in " + cwd : ""));
+    this.$("close")?.setAttribute("aria-label", "Close send work");
+    this.input.title = cwd ? "Send work in " + cwd : "Choose a project";
   }
   syncOverview() {
     const cwd = this.workspace();
@@ -86,7 +89,8 @@ class SendWorkPalette {
     this.setWorkspace(cwd);
     this.overviewBar.hidden = !this.overview || this.overview.hidden;
     this.$("pin").disabled = !cwd;
-    this.$("pin").textContent = this.pinned ? "Hide dispatcher" : "Show dispatcher";
+    this.$("pin").textContent = this.pinned ? "Hide send work" : "Send work";
+    this.$("pin").setAttribute("aria-label", this.pinned ? "Hide send work" : "Send work");
     this.$("pin").setAttribute("aria-pressed", String(this.pinned));
     const docked = this.pinned && !this.overviewBar.hidden && !!cwd;
     if (docked && this.dialog.open) { this.returnFocus = null; this.dialog.close(); }

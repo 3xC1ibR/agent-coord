@@ -53,6 +53,8 @@ jobs:
         run: brew install ripgrep
       - name: Validate plugin packaging
         run: python3 scripts/plugin_tools.py validate
+      - name: Verify web bundle freshness
+        run: python3 scripts/build_web.py --check
       - name: Install the native Codex hook regression client
         run: |
           npm install --prefix "$RUNNER_TEMP/codex-hook-client" --no-audit --no-fund @openai/codex@0.171.0

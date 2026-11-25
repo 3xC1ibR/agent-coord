@@ -493,9 +493,10 @@ class ThreadStore:
                               (self.store.clock(), notification_id, self.store.clock())).rowcount == 1
 
     def update(self, thread_id: str, *, title=None, domain=UNSET, attention=None, pinned=UNSET, quiet=UNSET, seen=False,
-               seen_checkpoint_id=None, seen_completion_id=None, handled=False,
+               seen_checkpoint_id=None, seen_completion_id=None, auto_handle=False, handled=False,
                handled_checkpoint_id=None, handled_completion_id=None, repository_id=UNSET, project_id=UNSET,
-               snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True) -> dict | None:
+               snoozed_until=UNSET, resume_snooze=UNSET, return_thread=True,
+               _live_blocked=False, out_receipt: dict | None = None) -> dict | None:
         self.get(thread_id)
         if title is not None:
             title = _text(title, "Thread title", 160)
@@ -507,6 +508,10 @@ class ThreadStore:
             raise CoordinationError("Pinned must be true or false.")
         if quiet is not UNSET and not isinstance(quiet, bool):
             raise CoordinationError("Quiet must be true or false.")
+        if not isinstance(auto_handle, bool):
+            raise CoordinationError("Auto-handle must be true or false.")
+        if auto_handle and not seen:
+            raise CoordinationError("Auto-handle requires seen: true.")
         if not seen and (seen_checkpoint_id is not None or seen_completion_id is not None):
             raise CoordinationError("Read markers require seen: true.")
         if not isinstance(handled, bool):
@@ -523,6 +528,7 @@ class ThreadStore:
                 raise CoordinationError("Snooze time must be a valid Unix timestamp.")
             if snoozed_until is not UNSET and snoozed_until <= self.store.clock():
                 raise CoordinationError("Choose a snooze time in the future.")
+        auto_handled = False
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if snoozed_until is not UNSET or resume_snooze is not UNSET:
@@ -540,6 +546,12 @@ class ThreadStore:
                 self._mark_receipts(db, thread_id, handled_checkpoint_id, handled_completion_id, kind="handled")
             if seen:
                 self._mark_seen(db, thread_id, seen_checkpoint_id, seen_completion_id)
+                if auto_handle and not _live_blocked and self._can_auto_handle(db, thread_id):
+                    db.execute("""UPDATE work_threads
+                                  SET handled_checkpoint_id = MAX(handled_checkpoint_id, seen_checkpoint_id),
+                                      handled_completion_id = MAX(handled_completion_id, seen_completion_id)
+                                  WHERE thread_id = ?""", (thread_id,))
+                    auto_handled = True
             self.organization.update(db, thread_id, repository_id=repository_id, project_id=project_id)
             if title is not None:
                 db.execute("UPDATE work_threads SET title = ?, title_source = 'user' WHERE thread_id = ?", (title, thread_id))
@@ -556,7 +568,92 @@ class ThreadStore:
                 db.execute("UPDATE work_threads SET pinned = ? WHERE thread_id = ?", (int(pinned), thread_id))
             if quiet is not UNSET:
                 db.execute("UPDATE work_threads SET quiet = ? WHERE thread_id = ?", (int(quiet), thread_id))
+        if out_receipt is not None:
+            out_receipt["auto_handled"] = auto_handled
         return self.get(thread_id, history=True) if return_thread else None
+
+    def _can_auto_handle(self, db, thread_id: str) -> bool:
+        """True only when no sticky blocker (ask, failure, stall, user action, or review/blocked classification) holds."""
+        row = db.execute("""SELECT t.turn_id, t.turn_key, t.turn_started_at, t.attention,
+                                   s.turn_active, s.ended_at
+                            FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
+                            WHERE t.thread_id = ?""", (thread_id,)).fetchone()
+        if row is None or row["attention"] == "archived" or (row["turn_active"] and row["ended_at"] is None):
+            return False
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "asks" in tables and db.execute(
+            "SELECT 1 FROM asks WHERE session_id = ? AND status = 'open' LIMIT 1", (thread_id,)
+        ).fetchone():
+            return False
+        latest_completion = db.execute(
+            "SELECT id, turn_key, status, completed_at FROM turn_completions WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if latest_completion is not None and latest_completion["status"] == "failed":
+            return False
+        current_completion = (
+            db.execute(
+                "SELECT id, status, completed_at FROM turn_completions WHERE thread_id = ? AND turn_key = ?",
+                (thread_id, row["turn_key"]),
+            ).fetchone()
+            if row["turn_key"]
+            else None
+        )
+        if current_completion is not None and current_completion["status"] == "failed":
+            return False
+        if "app_agent_stall_incidents" in tables:
+            from .stall_notifications import _LIVE as STALL_LIVE_SQL
+            if db.execute(
+                "SELECT 1 FROM app_agent_stall_incidents i JOIN work_threads t ON t.thread_id = i.thread_id "
+                "WHERE i.thread_id = ? AND " + STALL_LIVE_SQL + " LIMIT 1",
+                (thread_id,),
+            ).fetchone():
+                return False
+        if "browser_inbox_wake" in tables and db.execute(
+            """SELECT 1 FROM browser_inbox_wake
+               WHERE thread_id = ? AND paused = 1
+                 AND (pause_kind IS NULL OR pause_kind NOT IN ('stop', 'released')) LIMIT 1""",
+            (thread_id,),
+        ).fetchone():
+            return False
+        latest_cp = db.execute(
+            "SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        cp_stale = bool(latest_cp and row["turn_started_at"] and latest_cp["refreshed_at"] < row["turn_started_at"])
+        active_cp = latest_cp if (latest_cp and not cp_stale) else None
+        if active_cp is not None and active_cp["next_actor"] == "user" and bool(active_cp["next_action"].strip()):
+            return False
+        comp_for_class = current_completion or latest_completion
+        if comp_for_class is not None:
+            cp_id = active_cp["id"] if active_cp else 0
+            cls = self.attention.read(
+                db,
+                {
+                    "turn_completion": dict(comp_for_class),
+                    "checkpoint": dict(active_cp) if active_cp else None,
+                    "checkpoint_stale": False,
+                },
+            )
+            if cls is None and "response_classification_cache" in tables:
+                cls_row = db.execute(
+                    """SELECT status, choice FROM response_classification_cache
+                       WHERE completion_id = ? AND checkpoint_id = ?
+                       ORDER BY policy_version DESC, updated_at DESC LIMIT 1""",
+                    (comp_for_class["id"], cp_id),
+                ).fetchone()
+                cls = dict(cls_row) if cls_row else None
+            if cls is None and "response_classifications" in tables:
+                cls_row = db.execute(
+                    """SELECT status, choice FROM response_classifications
+                       WHERE completion_id = ? AND checkpoint_id = ?
+                       ORDER BY policy_version DESC, updated_at DESC LIMIT 1""",
+                    (comp_for_class["id"], cp_id),
+                ).fetchone()
+                cls = dict(cls_row) if cls_row else None
+            if cls and cls["status"] == "classified" and cls["choice"] in {"blocked", "review"}:
+                return False
+        return True
 
     @staticmethod
     def _mark_seen(db, thread_id, checkpoint_id=None, completion_id=None):

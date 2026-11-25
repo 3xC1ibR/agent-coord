@@ -96,11 +96,12 @@ const paneLayout = (() => {
 })();
 
 class ThreadPanes {
-  constructor({document, container, onFocus, onExit, onTile, onError, getDraft, onDraft, search = ""}) {
-    Object.assign(this, {document, container, onFocus, onExit, onTile, onError, getDraft, onDraft, search});
+  constructor({document, container, onFocus, onExit, onTile, onError, getDraft, onDraft, createPane = null, search = ""}) {
+    Object.assign(this, {document, container, onFocus, onExit, onTile, onError, getDraft, onDraft, createPane, search});
     this.layouts = new Map(); this.records = new Map(); this.active = false; this.viewId = null;
     this.chrome = this.el("div", "pane-layout");
     this.deck = this.el("div", "pane-deck");
+    if (this.createPane) this.deck.hidden = true;
     container.append(this.chrome, this.deck);
     const Resize = document.defaultView?.ResizeObserver;
     if (Resize) { this.observer = new Resize(() => { this.position(); this.onResize?.(); }); this.observer.observe(container); }
@@ -157,11 +158,34 @@ class ThreadPanes {
   record(thread) {
     let record = this.records.get(thread.thread_id);
     if (record) { record.thread = thread; return record; }
-    record = {thread, frame: null, api: null, initialDraft: this.getDraft?.(thread.thread_id)};
+    record = {thread, element: null, frame: null, source: null, input: null, api: null, initialDraft: this.getDraft?.(thread.thread_id)};
     this.records.set(thread.thread_id, record); return record;
   }
+  ensurePane(record, body) {
+    if (!this.createPane) {
+      this.ensureFrame(record);
+      return;
+    }
+    if (record.element) return;
+    const source = {};
+    record.source = source;
+    const created = this.createPane({
+      id: record.thread.thread_id,
+      thread: record.thread,
+      document: this.document,
+      container: body,
+      source,
+      onFocus: () => this.focused(source),
+      onDraft: draft => this.draft(source, draft),
+      onThreadChange: updated => this.changed(source, updated),
+      onError: this.onError,
+    });
+    record.element = created?.element || created;
+    record.input = created?.input || null;
+    if (created?.api) this.attach(source, created.api);
+  }
   ensureFrame(record) {
-    if (record.frame) return;
+    if (record.frame || this.createPane) return;
     const frame = record.frame = this.el("iframe", "conversation-pane-frame");
     frame.title = "Conversation · " + record.thread.title;
     const query = new URLSearchParams(this.search); query.set("pane", "1");
@@ -172,20 +196,30 @@ class ThreadPanes {
     this.deck.append(frame);
   }
   attach(source, api) {
-    const record = [...this.records.values()].find(r => r.frame?.contentWindow === source);
+    const record = this.from(source);
     if (!record) return false;
     record.api = api;
     if (record.initialDraft) { api.restoreDraft(record.initialDraft); record.initialDraft = null; }
-    api.setActive(this.active && this.selected === record.thread.thread_id && this.document.hasFocus());
+    const isVisible = record.element ? !record.element.hidden : !record.frame?.hidden;
+    api.setActive(this.active && this.selected === record.thread.thread_id && Boolean(this.document.hasFocus?.() ?? true));
     this.position();
-    if (record.focusOnAttach && this.active && this.selected === record.thread.thread_id && !record.frame.hidden) api.focus();
+    if (record.focusOnAttach && this.active && this.selected === record.thread.thread_id && isVisible) api.focus();
     delete record.focusOnAttach;
+    if (record.messageTarget != null) {
+      api.focusMessage?.(record.messageTarget);
+      delete record.messageTarget;
+    }
     return true;
   }
-  from(source) { return [...this.records.values()].find(r => r.frame?.contentWindow === source); }
+  from(source) {
+    if (source == null) return undefined;
+    if (typeof source === "string") return this.records.get(source);
+    return [...this.records.values()].find(r => r.source === source || r.frame?.contentWindow === source);
+  }
   focused(source) {
     const record = this.from(source);
-    if (record && this.active && !record.frame.hidden) this.focus(record.thread.thread_id, false);
+    const isVisible = record?.element ? !record.element.hidden : !record?.frame?.hidden;
+    if (record && this.active && isVisible) this.focus(record.thread.thread_id, false);
   }
   changed(source, thread) {
     const record = this.from(source);
@@ -444,14 +478,33 @@ class ThreadPanes {
     const origin = this.container.getBoundingClientRect(), visible = new Set();
     for (const {pane, body, id} of this.slots) {
       if (pane.hidden) continue;
-      const record = this.records.get(id); this.ensureFrame(record);
-      const rect = body.getBoundingClientRect(); visible.add(id);
-      Object.assign(record.frame.style, {left: rect.left - origin.left + "px", top: rect.top - origin.top + "px", width: rect.width + "px", height: rect.height + "px"});
+      const record = this.records.get(id);
+      if (!record) continue;
+      visible.add(id);
+      if (this.createPane) {
+        const savedScroll = record.element ? record.api?.exportDraft?.()?.scroll : null;
+        this.ensurePane(record, body);
+        if (record.element) {
+          record.element.hidden = false;
+          if (record.element.parentNode !== body && (!Array.isArray(body.children) || !body.children.includes(record.element))) {
+            body.replaceChildren(record.element);
+          }
+          if (Number.isFinite(savedScroll)) record.api?.restoreScroll?.(savedScroll);
+        }
+      } else {
+        this.ensureFrame(record);
+        const rect = body.getBoundingClientRect();
+        record.frame.style.left = (rect.left - origin.left) + "px";
+        record.frame.style.top = (rect.top - origin.top) + "px";
+        record.frame.style.width = rect.width + "px";
+        record.frame.style.height = rect.height + "px";
+      }
       pane.classList.toggle("pane-focused", id === this.selected);
     }
     for (const [id, record] of this.records) {
+      if (record.element) record.element.hidden = !visible.has(id);
       if (record.frame) record.frame.hidden = !visible.has(id);
-      record.api?.setActive(visible.has(id) && id === this.selected && this.document.hasFocus());
+      record.api?.setActive(visible.has(id) && id === this.selected && Boolean(this.document.hasFocus?.() ?? true));
     }
   }
   splitter(parent, index, direction, column, node) {
@@ -492,9 +545,504 @@ class ThreadPanes {
   }
 }
 
-function setupPaneShell({state, document, api, select, goHome, refreshList, getView, getThreads, showError, notifications}) {
+function createPaneConversation({id, thread, document, state, api, onFocus, onDraft, onThreadChange, onError}) {
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  };
+  const root = el("div", "pane-conversation");
+  root.dataset.threadId = id;
+
+  const header = el("header", "pane-conversation-head conversation-head");
+  const heading = el("div", "conversation-heading");
+  const titleEl = el("h2", "pane-thread-title thread-title", thread?.title || "Conversation");
+  titleEl.tabIndex = 0;
+  heading.append(titleEl);
+  const actionsEl = el("div", "session-actions");
+  const statusEl = el("span", "pane-status status");
+  statusEl.setAttribute("role", "status");
+  actionsEl.append(statusEl);
+  header.append(heading, actionsEl);
+
+  const timelineEl = el("div", "pane-timeline timeline");
+  timelineEl.tabIndex = -1;
+  timelineEl.setAttribute("role", "log");
+  timelineEl.setAttribute("aria-label", "Conversation");
+
+  const requestsEl = el("div", "pane-requests requests");
+  requestsEl.setAttribute("aria-live", "polite");
+  requestsEl.hidden = true;
+
+  const composerEl = el("form", "pane-composer composer");
+  const inputEl = el("textarea", "pane-message");
+  inputEl.rows = 1;
+  inputEl.maxLength = 100000;
+  inputEl.placeholder = "Message agent…";
+  inputEl.setAttribute("aria-label", "Message");
+  const footerEl = el("div", "composer-footer");
+  const stopBtn = el("button", "quiet pane-stop", "Stop");
+  stopBtn.type = "button";
+  stopBtn.hidden = true;
+  const sendBtn = el("button", "primary composer-icon pane-send", "↑");
+  sendBtn.type = "submit";
+  sendBtn.setAttribute("aria-label", "Send message");
+  sendBtn.title = "Send message";
+  footerEl.append(stopBtn, sendBtn);
+  composerEl.append(inputEl, footerEl);
+
+  root.append(header, timelineEl, requestsEl, composerEl);
+
+  let active = false, transferLocked = false, sending = false, following = true, restoredScroll = null, seenSignature = "";
+  let currentThread = {...thread, thread_id: id};
+  let detail = state?.conversations?.get(id)?.detail || null;
+  let refreshPending = null, refreshTimer = null, msgCounter = 0;
+  const optimistic = [];
+  const openDisclosures = new Set();
+  const draftState = {
+    mentions: state?.mentions?.snapshot?.(id, state?.drafts?.get(id) || "") || [],
+    images: state?.attachments?.items?.(id) || [],
+  };
+  inputEl.value = state?.drafts?.get(id) || "";
+
+  const extractText = item => {
+    if (!item) return "";
+    if (typeof item.text === "string") return item.text;
+    if (Array.isArray(item.content)) {
+      return item.content.map(part => typeof part === "string" ? part : part?.text || "").filter(Boolean).join("\n");
+    }
+    return "";
+  };
+
+  const isRunning = () => Boolean(
+    detail?.running ||
+    currentThread?.status === "running" ||
+    currentThread?.response_state === "working"
+  );
+
+  const canWrite = () => Boolean(
+    currentThread?.browser_session !== false &&
+    currentThread?.attention !== "archived" &&
+    !transferLocked
+  );
+
+  function renderChrome() {
+    const work = detail?.work_thread || currentThread;
+    titleEl.textContent = work?.title || "Conversation";
+    const runningNow = isRunning();
+    const statusLabel = work?.attention === "archived" ? "Closed"
+      : work?.status === "stalled" ? "Stalled"
+      : work?.status === "needs input" || detail?.requests?.length ? "Needs input"
+      : runningNow ? "Working"
+      : work?.response_state === "failed" ? "Failed"
+      : work?.browser_session === false ? "Read only"
+      : work?.work_phase || "";
+    statusEl.textContent = statusLabel;
+    statusEl.hidden = !statusLabel;
+    const writable = canWrite();
+    composerEl.hidden = work?.browser_session === false || work?.attention === "archived";
+    inputEl.disabled = !writable;
+    sendBtn.disabled = !writable || sending || (!inputEl.value.trim() && !draftState.images.length);
+    stopBtn.hidden = !runningNow || !writable;
+  }
+
+  function renderRequests() {
+    const reqs = detail?.requests || [];
+    requestsEl.replaceChildren();
+    requestsEl.hidden = !reqs.length;
+    for (const req of reqs) {
+      const card = el("div", "request-card");
+      card.dataset.requestId = String(req.id ?? req.request_key ?? "");
+      const summary = el("p", "request-summary", req.description || req.command || req.title || "Approval needed");
+      const controls = el("div", "request-actions");
+      for (const [label, decision, cls] of [["Approve", "accept", "primary"], ["Decline", "decline", "quiet"]]) {
+        const btn = el("button", cls, label);
+        btn.type = "button";
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            const reqId = req.id ?? req.request_key;
+            await api("sessions/" + encodeURIComponent(id) + "/requests/" + encodeURIComponent(reqId), {decision});
+            await loadDetail();
+            state?.refreshList?.();
+          } catch (error) {
+            btn.disabled = false;
+            onError?.(error);
+          }
+        };
+        controls.append(btn);
+      }
+      card.append(summary, controls);
+      requestsEl.append(card);
+    }
+  }
+
+  function renderTimeline() {
+    const previousBottom = timelineEl.scrollHeight
+      ? (timelineEl.scrollHeight - timelineEl.scrollTop - (timelineEl.clientHeight || 0) < 80)
+      : following;
+    for (const disc of timelineEl.querySelectorAll?.("details") || []) {
+      if (disc.dataset?.id) {
+        if (disc.open) openDisclosures.add(disc.dataset.id);
+        else openDisclosures.delete(disc.dataset.id);
+      }
+    }
+    const nodes = [];
+    const turns = detail?.thread?.turns || [];
+    const coordMessages = detail?.coordinationMessages || [];
+    for (const msg of coordMessages) {
+      const row = el("article", "message system");
+      if (msg.id != null) row.dataset.agentMessageId = String(msg.id);
+      row.tabIndex = -1;
+      row.append(el("div", "text", msg.body || msg.summary || msg.subject || "Coordination message"));
+      nodes.push(row);
+    }
+    turns.forEach((turn, turnIndex) => {
+      for (const item of turn.items || []) {
+        if (item.type === "userMessage" || item.type === "agentMessage") {
+          const article = el("article", "message " + (item.type === "userMessage" ? "user" : "agent"));
+          article.tabIndex = -1;
+          article.dataset.turnId = String(turn.id ?? turnIndex);
+          if (item.id != null) {
+            article.dataset.itemId = String(item.id);
+            article.dataset.messageId = String(item.id);
+          }
+          const text = extractText(item);
+          const body = el("div", item.type === "agentMessage" ? "text markdown" : "text");
+          if (item.type === "agentMessage" && globalThis.messageMarkdown?.render) {
+            body.innerHTML = globalThis.messageMarkdown.render(text);
+          } else {
+            body.textContent = text;
+          }
+          article.append(body);
+          nodes.push(article);
+        } else {
+          const toolKey = String(item.id || (turn.id ?? turnIndex) + ":" + item.type);
+          const disc = el("details", "tool");
+          disc.dataset.id = toolKey;
+          if (openDisclosures.has(toolKey)) disc.open = true;
+          const summary = el("summary", "tool-summary", item.tool || item.command || item.type || "Tool");
+          disc.append(summary);
+          const output = extractText(item) || item.output || "";
+          if (output) disc.append(el("pre", "tool-output", String(output)));
+          nodes.push(disc);
+        }
+      }
+    });
+    for (const pendingItem of optimistic) {
+      const article = el("article", "message user message-optimistic");
+      article.dataset.clientMessageId = pendingItem.id;
+      article.append(el("div", "text", pendingItem.text));
+      nodes.push(article);
+    }
+    if (!nodes.length) {
+      nodes.push(el("p", "muted pane-empty", isRunning() ? "Working…" : "No messages yet."));
+    }
+    timelineEl.replaceChildren(...nodes);
+    if (restoredScroll !== null) {
+      timelineEl.scrollTop = restoredScroll;
+      restoredScroll = null;
+    } else if (previousBottom || following) {
+      timelineEl.scrollTop = timelineEl.scrollHeight || 0;
+    }
+  }
+
+  function renderAll() {
+    renderChrome();
+    renderRequests();
+    renderTimeline();
+  }
+
+  function exportDraft() {
+    return {
+      text: inputEl.value,
+      mentions: draftState.mentions.slice(),
+      images: draftState.images.slice(),
+      scroll: timelineEl.scrollTop,
+      following,
+    };
+  }
+
+  function syncDraftOut() {
+    if (state?.drafts) state.drafts.set(id, inputEl.value);
+    renderChrome();
+    onDraft?.(exportDraft());
+  }
+
+  async function markSeen() {
+    const work = detail?.work_thread || currentThread;
+    if (!active || !(document.hasFocus?.() ?? true) || !work) return;
+    const cpId = work.checkpoint?.id || 0, compId = work.turn_completion?.id || 0;
+    if (cpId <= (work.seen_checkpoint_id || 0) && compId <= (work.seen_completion_id || 0) && !work.unread_result && !work.unread) return;
+    const sig = JSON.stringify([id, cpId, compId]);
+    if (sig === seenSignature) return;
+    seenSignature = sig;
+    try {
+      await api("threads/" + encodeURIComponent(id), {
+        seen: true,
+        seen_checkpoint_id: cpId,
+        seen_completion_id: compId,
+      });
+      work.seen_checkpoint_id = Math.max(work.seen_checkpoint_id || 0, cpId);
+      work.seen_completion_id = Math.max(work.seen_completion_id || 0, compId);
+      work.unread_result = false;
+      work.unread = false;
+      onThreadChange?.(work);
+    } catch (error) {
+      seenSignature = "";
+      onError?.(error);
+    }
+  }
+
+  function normalizeOpened(payload) {
+    if (!payload) return null;
+    if (payload.thread?.turns || payload.work_thread) {
+      return {
+        thread: payload.thread || {turns: payload.recent_turns || payload.turns || payload.session?.turns || []},
+        session: payload.session || null,
+        work_thread: payload.work_thread || currentThread,
+        requests: payload.requests || payload.session?.requests || [],
+        coordinationMessages: payload.coordination_messages || payload.coordinationMessages || [],
+        running: Boolean(payload.running ?? payload.session?.running ?? (payload.work_thread?.status === "running")),
+      };
+    }
+    if (payload.recent_turns || payload.session) {
+      return {
+        thread: {turns: payload.recent_turns || payload.turns || payload.session?.turns || []},
+        session: payload.session || null,
+        work_thread: payload.work_thread || currentThread,
+        requests: payload.requests || payload.session?.requests || [],
+        coordinationMessages: payload.coordination_messages || [],
+        running: Boolean(payload.running ?? payload.session?.running),
+      };
+    }
+    return {
+      thread: {turns: payload.turns || []},
+      session: null,
+      work_thread: payload.thread_id ? payload : currentThread,
+      requests: payload.requests || [],
+      coordinationMessages: [],
+      running: Boolean(payload.running || payload.status === "running" || payload.response_state === "working"),
+    };
+  }
+
+  async function loadDetail() {
+    if (refreshPending) return refreshPending;
+    refreshPending = (async () => {
+      try {
+        let normalized;
+        try {
+          const opened = await api("conversations/" + encodeURIComponent(id) + "/open");
+          normalized = normalizeOpened(opened);
+        } catch (openError) {
+          if (openError?.status && openError.status !== 404) throw openError;
+          const [sessionRes, threadRes] = await Promise.all([
+            api("sessions/" + encodeURIComponent(id)),
+            api("threads/" + encodeURIComponent(id)),
+          ]);
+          normalized = {
+            thread: {turns: sessionRes?.turns || sessionRes?.thread?.turns || []},
+            session: sessionRes?.session || sessionRes || null,
+            work_thread: threadRes || currentThread,
+            requests: sessionRes?.requests || [],
+            coordinationMessages: sessionRes?.coordinationMessages || [],
+            running: Boolean(sessionRes?.running ?? (threadRes?.status === "running")),
+          };
+        }
+        if (normalized) {
+          detail = normalized;
+          currentThread = {...currentThread, ...normalized.work_thread, thread_id: id};
+          if (state?.conversations?.has(id)) state.conversations.get(id).detail = detail;
+          const confirmedTexts = new Set(
+            (detail.thread?.turns || [])
+              .flatMap(t => t.items || [])
+              .filter(it => it.type === "userMessage")
+              .map(extractText)
+          );
+          for (let i = optimistic.length - 1; i >= 0; i--) {
+            if (confirmedTexts.has(optimistic[i].text)) optimistic.splice(i, 1);
+          }
+          renderAll();
+          onThreadChange?.(currentThread);
+        }
+      } catch (error) {
+        onError?.(error);
+      } finally {
+        refreshPending = null;
+      }
+    })();
+    return refreshPending;
+  }
+
+  function scheduleRefresh() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null;
+      loadDetail().then(markSeen);
+    }, 40);
+  }
+
+  async function submitMessage() {
+    const text = inputEl.value;
+    if (!canWrite() || sending || (!text.trim() && !draftState.images.length)) return;
+    const clientMessageId = (globalThis.crypto?.randomUUID?.() || ("pane-msg-" + (++msgCounter)));
+    const entry = {id: clientMessageId, text};
+    optimistic.push(entry);
+    inputEl.value = "";
+    const sentImages = draftState.images.splice(0);
+    const sentMentions = draftState.mentions.splice(0);
+    following = true;
+    syncDraftOut();
+    renderAll();
+    const runningNow = isRunning() && !currentThread.dispatcher;
+    const route = "sessions/" + encodeURIComponent(id) + (runningNow ? "/queue" : "/messages");
+    const body = {message: text, requestId: clientMessageId};
+    if (sentMentions.length) body.mentions = sentMentions;
+    if (sentImages.length) body.images = sentImages.map(({name, url}) => ({name, url}));
+    sending = true;
+    renderChrome();
+    try {
+      await api(route, body);
+      const idx = optimistic.indexOf(entry);
+      if (idx >= 0) optimistic.splice(idx, 1);
+      await loadDetail();
+    } catch (error) {
+      const idx = optimistic.indexOf(entry);
+      if (idx >= 0) optimistic.splice(idx, 1);
+      if (!inputEl.value.trim()) inputEl.value = text;
+      draftState.images.push(...sentImages);
+      draftState.mentions.push(...sentMentions);
+      syncDraftOut();
+      renderAll();
+      onError?.(error);
+    } finally {
+      sending = false;
+      renderChrome();
+    }
+  }
+
+  stopBtn.onclick = async () => {
+    stopBtn.disabled = true;
+    try {
+      await api("sessions/" + encodeURIComponent(id) + "/interrupt", {});
+      await loadDetail();
+    } catch (error) {
+      onError?.(error);
+    } finally {
+      stopBtn.disabled = false;
+    }
+  };
+
+  timelineEl.onscroll = () => {
+    following = (timelineEl.scrollHeight - timelineEl.scrollTop - (timelineEl.clientHeight || 0)) < 80;
+  };
+  inputEl.addEventListener?.("input", syncDraftOut);
+  inputEl.onkeydown = event => {
+    if (event?.isComposing || event?.keyCode === 229) return;
+    if (event?.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (globalThis.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
+      event.preventDefault?.();
+      submitMessage();
+    }
+  };
+  composerEl.onsubmit = event => {
+    event?.preventDefault?.();
+    submitMessage();
+  };
+  root.addEventListener?.("focusin", () => onFocus?.());
+  root.addEventListener?.("pointerdown", () => onFocus?.());
+
+  const paneApi = {
+    exportDraft,
+    restoreDraft(draft) {
+      inputEl.value = draft?.text || "";
+      draftState.mentions = Array.isArray(draft?.mentions) ? draft.mentions.slice() : [];
+      draftState.images = Array.isArray(draft?.images) ? draft.images.slice() : [];
+      if (state?.drafts) state.drafts.set(id, inputEl.value);
+      if (state?.attachments?.drafts) state.attachments.drafts.set(id, draftState.images);
+      if (state?.mentions?.restore) state.mentions.restore(id, inputEl.value, draftState.mentions);
+      if (Number.isFinite(draft?.scroll)) {
+        restoredScroll = draft.scroll;
+        timelineEl.scrollTop = draft.scroll;
+        following = draft.following ?? false;
+      }
+      renderChrome();
+      onDraft?.(exportDraft());
+    },
+    restoreScroll(scroll) {
+      if (Number.isFinite(scroll)) timelineEl.scrollTop = scroll;
+    },
+    setActive(value) {
+      active = Boolean(value);
+      if (active) markSeen();
+    },
+    focus() {
+      if (document.querySelector?.("dialog[open]")) return;
+      (inputEl.disabled || composerEl.hidden ? titleEl : inputEl).focus?.({preventScroll: true});
+    },
+    receive(batch = {}) {
+      const hasApproval = batch.approvals?.some(ev => ev.thread_id === id);
+      const hasCompletion = batch.completions?.some(ev => ev.thread_id === id);
+      let mutated = false;
+      for (const event of batch.events || []) {
+        const eventThread = event.params?.threadId || event.params?.session_id || event.thread_id;
+        if (eventThread !== id) continue;
+        if (event.method === "item/agentMessage/delta" && detail?.thread?.turns) {
+          const delta = event.params?.delta || "";
+          if (delta) {
+            let lastTurn = detail.thread.turns.at(-1);
+            if (!lastTurn) {
+              lastTurn = {id: event.params?.turnId || "live", status: "inProgress", items: []};
+              detail.thread.turns.push(lastTurn);
+            }
+            let msgItem = (lastTurn.items || []).findLast?.(it => it.type === "agentMessage") ||
+              [...(lastTurn.items || [])].reverse().find(it => it.type === "agentMessage");
+            if (!msgItem) {
+              msgItem = {id: event.params?.itemId || "stream", type: "agentMessage", text: ""};
+              (lastTurn.items ||= []).push(msgItem);
+            }
+            msgItem.text = extractText(msgItem) + delta;
+            detail.running = true;
+            mutated = true;
+          }
+        } else if (event.method === "turn/started") {
+          if (detail) detail.running = true;
+          currentThread.status = "running";
+          currentThread.response_state = "working";
+          mutated = true;
+        } else if (event.method === "turn/completed") {
+          if (detail) detail.running = false;
+          scheduleRefresh();
+        }
+      }
+      if (mutated) renderAll();
+      if (batch.reset || hasApproval || hasCompletion) scheduleRefresh();
+    },
+    refresh: () => loadDetail().then(markSeen),
+    canTransfer: () => !transferLocked && !sending && !state?.attachments?.pending?.(id) && !document.querySelector?.("dialog[open]"),
+    setTransferLock(locked) {
+      transferLocked = Boolean(locked);
+      renderChrome();
+    },
+    focusMessage(messageId) {
+      const targetKey = String(messageId);
+      const target = (timelineEl.querySelectorAll?.("[data-agent-message-id], [data-message-id], [data-item-id]") || [])
+        .find(node => node.dataset?.agentMessageId === targetKey || node.dataset?.messageId === targetKey || node.dataset?.itemId === targetKey);
+      target?.scrollIntoView?.({block: "center"});
+      target?.focus?.({preventScroll: true});
+    },
+  };
+
+  renderAll();
+  loadDetail().then(() => { if (active) markSeen(); });
+  return {element: root, input: inputEl, api: paneApi};
+}
+
+function setupPaneShell({state, document, api, select, goHome, refreshList, getView, getThreads, showError, notifications, createPane}) {
   const $ = id => document.getElementById(id), container = $("thread-panes");
-  const shell = new ThreadPanes({document, container, search: location.search,
+  const paneFactory = createPane !== undefined ? createPane : options => createPaneConversation({...options, state, api});
+  const shell = new ThreadPanes({document, container, search: location.search, createPane: paneFactory,
     getDraft: id => ({text: state.selected === id ? $("message").value : state.drafts.get(id) || "",
       mentions: state.mentions?.snapshot(id, state.selected === id ? $("message").value : state.drafts.get(id) || "") || [],
       images: state.attachments.items(id), scroll: state.selected === id ? (state.timelineScroll?.position() ?? $("timeline").scrollTop) : null}),
@@ -549,17 +1097,12 @@ function setupPaneShell({state, document, api, select, goHome, refreshList, getV
     $("page-location").textContent = tabLayout ? "Conversation" : "Tiled threads";
   };
   const returnTarget = () => ({thread: state.selected, scroll: state.timelineScroll?.position() ?? $("timeline").scrollTop});
-  // Entering a layout copies each listed conversation's composer draft (text,
-  // mentions, and image items) into its pane. An unaccepted send still holds
-  // its text here, and an image being read has no URL yet: copying either
-  // could send the message twice or lose the image. Other conversations keep
-  // their drafts in this window, so their sends and attachments can continue.
+  // In-process panes share drafts directly; only guard when an image attachment's
+  // FileReader is still unread on a thread being moved into panes.
   function canChangeLayout(ids = []) {
     if (document.querySelector("dialog[open]") || shell.focusedRecord?.frame?.contentDocument?.querySelector("dialog[open]")) return false;
-    // A new conversation is identified by its draft until creation finishes.
-    const moving = [...(state.sending || [])].some(key => typeof key !== "string" || ids.includes(key));
-    if (state.busy || moving || ids.some(id => state.attachments.pending(id))) {
-      showError(new Error("Wait for this conversation's send or image attachment to finish before tiling it."));
+    if (ids.some(id => state.attachments?.pending?.(id))) {
+      showError(new Error("Wait for this conversation's image attachment to finish before tiling it."));
       return false;
     }
     return true;
@@ -834,4 +1377,4 @@ async function setupPaneConversation({state, document, api, select, refreshDetai
   }
 }
 
-if (typeof module !== "undefined" && module.exports) module.exports = {paneLayout, ThreadPanes, setupPaneShell, setupPaneConversation};
+if (typeof module !== "undefined" && module.exports) module.exports = {paneLayout, ThreadPanes, createPaneConversation, setupPaneShell, setupPaneConversation};

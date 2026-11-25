@@ -19,6 +19,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     private let clearingKey = "agentcoord.disconnectPending"
     private var hasPage = false
     private var terminated = false
+    private var recoveringProcessTermination = false
     private var checking = false
     private var started = false
 
@@ -32,6 +33,89 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         }
     }
 
+    static let userScriptSource = """
+    (() => {
+      const OriginalEventSource = window.EventSource;
+      if (OriginalEventSource) window.EventSource = class extends OriginalEventSource {
+        constructor(url, options) {
+          super(url, options);
+          const address = new URL(url, location.href);
+          if (address.origin === location.origin && address.pathname === '/api/browser/events')
+            window.agentCoordNativeEvents = this;
+        }
+      };
+      const draftPrefix = 'agent-coord.draft:';
+      const editedThreads = new Set();
+      const draftThreadId = () => {
+        const raw = location.hash.replace(/^#/, '');
+        if (raw) {
+          try { return decodeURIComponent(raw); } catch { return raw; }
+        }
+        return (typeof state !== 'undefined' && typeof state?.selected === 'string' && state.selected) ? state.selected : '';
+      };
+      const restoreDraftBackup = () => {
+        const id = draftThreadId();
+        if (!id || editedThreads.has(id)) return false;
+        let saved = null;
+        try { saved = localStorage.getItem(draftPrefix + id); } catch { return false; }
+        if (!saved) return false;
+        if (typeof state !== 'undefined' && typeof state?.drafts?.get === 'function' && typeof state?.drafts?.set === 'function' && !state.drafts.get(id)) {
+          state.drafts.set(id, saved);
+        }
+        const field = document.getElementById('message');
+        if (field && !field.value) {
+          field.value = saved;
+          field.dispatchEvent(new Event('input', {bubbles: true}));
+          return true;
+        }
+        return false;
+      };
+      window.agentCoordRestoreDraftBackup = restoreDraftBackup;
+      document.addEventListener('input', event => {
+        if (event.target?.id !== 'message') return;
+        const id = draftThreadId();
+        if (!id) return;
+        if (event.isTrusted) editedThreads.add(id);
+        try {
+          const value = event.target.value || '';
+          if (value) localStorage.setItem(draftPrefix + id, value);
+          else localStorage.removeItem(draftPrefix + id);
+        } catch {}
+      }, true);
+      document.addEventListener('submit', event => {
+        if (event.target?.id !== 'composer') return;
+        const id = draftThreadId();
+        if (!id) return;
+        setTimeout(() => {
+          const field = document.getElementById('message');
+          if (field && !field.value) {
+            try { localStorage.removeItem(draftPrefix + id); } catch {}
+          }
+        }, 0);
+      }, true);
+      const scheduleRestoreCheck = () => {
+        restoreDraftBackup();
+        let attempts = 0;
+        const timer = setInterval(() => {
+          attempts += 1;
+          if (restoreDraftBackup() || attempts >= 20) clearInterval(timer);
+        }, 100);
+      };
+      window.addEventListener('hashchange', () => { restoreDraftBackup(); });
+      const install = () => {
+        if (!document.head || document.getElementById('native-notification-style')) return;
+        const style = document.createElement('style'); style.id = 'native-notification-style';
+        style.textContent = '#notifications, #notifications + button, #notifications ~ small { display:none !important; }';
+        document.head.appendChild(style);
+      };
+      install();
+      document.addEventListener('DOMContentLoaded', () => {
+        install();
+        scheduleRestoreCheck();
+      }, {once:true});
+    })();
+    """
+
     func start() async {
         guard !started else { return }
         started = true
@@ -43,6 +127,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         if let saved = defaults.string(forKey: addressKey), let address = try? ServerAddress(saved) {
             server = address
             createWebView()
+            await restorePairingCookieIfNeeded(for: address)
             loadHome()
             await notifications.connect(server: address, store: store)
         } else {
@@ -70,6 +155,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
             }
             if restoreNotifications { await notifications.disable() }
             let cookie = try await PairingClient().redeem(invitation, name: deviceName)
+            PairingCookieKeychain.save(cookie, for: invitation.server)
             // Start WebKit before installing its cookie; an unused store can defer this callback.
             if webView == nil { createWebView() }
             await store.httpCookieStore.setCookie(cookie)
@@ -78,7 +164,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
             showingConnection = false
             // Re-pairing the same origin preserves a loaded conversation and its draft.
             if webView == nil { createWebView() }
-            if !hasPage || terminated { loadHome() } else { requireReload() }
+            if !hasPage || terminated { loadHome() } else { await checkConnection() }
             await notifications.connect(server: invitation.server, store: store)
         } catch let error as ConnectionError {
             message = error.localizedDescription
@@ -95,6 +181,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         // Durable marker makes an interrupted deletion resume at next launch.
         defaults.set(true, forKey: clearingKey)
         defaults.removeObject(forKey: addressKey)
+        PairingCookieKeychain.clear()
         let removedNotifications = await notifications.disconnect()
         notificationDestination = nil
         webView?.stopLoading()
@@ -106,6 +193,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         externalURL = nil
         hasPage = false
         terminated = false
+        recoveringProcessTermination = false
         needsReload = false
         await clearWebsiteData()
         defaults.removeObject(forKey: clearingKey)
@@ -114,8 +202,27 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         busy = false
     }
 
+    private func restorePairingCookieIfNeeded(for address: ServerAddress) async {
+        let now = Date()
+        let cookies = await store.httpCookieStore.allCookies()
+        if let active = cookies.first(where: {
+            $0.name == "__Host-agent-coord-device" && $0.isSecure && $0.isHTTPOnly &&
+            $0.path == "/" && $0.domain == address.url.host &&
+            ($0.expiresDate ?? .distantPast) > now
+        }) {
+            if PairingCookieKeychain.load(for: address, now: now) == nil {
+                PairingCookieKeychain.save(active, for: address)
+            }
+            return
+        }
+        if let rehydrated = PairingCookieKeychain.load(for: address, now: now) {
+            await store.httpCookieStore.setCookie(rehydrated)
+        }
+    }
+
     private func clearWebsiteData() async {
-        // This app has one connection; erase cookies, caches, local storage and service workers.
+        // This app has one connection; erase Keychain cookie, WebKit cookies, caches, local storage and service workers.
+        PairingCookieKeychain.clear()
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
         for cookie in await store.httpCookieStore.allCookies() {
             await store.httpCookieStore.deleteCookie(cookie)
@@ -127,31 +234,13 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         configuration.websiteDataStore = store
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         // No script message bridge exposes native privileges to server content.
-        let script = """
-        (() => {
-          const OriginalEventSource = window.EventSource;
-          if (OriginalEventSource) window.EventSource = class extends OriginalEventSource {
-            constructor(url, options) {
-              super(url, options);
-              const address = new URL(url, location.href);
-              if (address.origin === location.origin && address.pathname === '/api/browser/events')
-                window.agentCoordNativeEvents = this;
-            }
-          };
-          const install = () => {
-            if (!document.head || document.getElementById('native-notification-style')) return;
-            const style = document.createElement('style'); style.id = 'native-notification-style';
-            style.textContent = '#notifications, #notifications + button, #notifications ~ small { display:none !important; }';
-            document.head.appendChild(style);
-          };
-          install(); document.addEventListener('DOMContentLoaded', install, {once:true});
-        })();
-        """
-        configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        configuration.userContentController.addUserScript(
+            WKUserScript(source: Self.userScriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        )
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
-        view.allowsBackForwardNavigationGestures = false
+        view.allowsBackForwardNavigationGestures = true
         view.isOpaque = false
         view.backgroundColor = .systemBackground
         webView = view
@@ -161,6 +250,7 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         guard let server else { return }
         message = nil
         terminated = false
+        recoveringProcessTermination = false
         needsReload = false
         hasPage = false
         webView?.load(URLRequest(url: server.url))
@@ -176,18 +266,33 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         message = nil
         hasPage = false
         terminated = false
+        recoveringProcessTermination = false
         webView?.reload() // Keeps the current thread URL; explicitly confirmed by the user.
     }
 
     func retry() async {
-        if terminated || !hasPage { loadHome() } else { await checkConnection() }
+        if let server { await restorePairingCookieIfNeeded(for: server) }
+        if terminated {
+            terminated = false
+            recoveringProcessTermination = true
+            if webView?.url != nil { webView?.reload() } else { loadHome() }
+        } else if !hasPage {
+            loadHome()
+        } else {
+            await checkConnection()
+        }
     }
 
     func foreground() async {
-        guard !busy, server != nil else { return }
+        guard !busy, let server else { return }
+        await restorePairingCookieIfNeeded(for: server)
         await notifications.refresh()
-        // A terminated process cannot retain DOM drafts; require explicit recovery in that case.
-        if terminated { return }
+        if terminated {
+            terminated = false
+            recoveringProcessTermination = true
+            if webView?.url != nil { webView?.reload() } else { loadHome() }
+            return
+        }
         if !hasPage, webView?.isLoading == false { loadHome() }
         else if hasPage { await checkConnection() }
     }
@@ -196,17 +301,43 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         guard !checking, let webView, hasPage, !terminated else { return }
         checking = true
         defer { checking = false }
+        if let server { await restorePairingCookieIfNeeded(for: server) }
         do {
             let value = try await webView.callAsyncJavaScript("""
                 const controller = new AbortController();
                 const timer = setTimeout(() => controller.abort(), 10000);
                 try {
                   const r = await fetch('/api/browser/config', {cache:'no-store', signal:controller.signal});
-                  if (!r.ok) return {status:r.status, reload:false};
+                  if (!r.ok) return {status:r.status, reconnected:false};
                   const config = await r.json();
-                  const changed = typeof state !== 'undefined' && state.config && state.config.token !== config.token;
+                  if (typeof state !== 'undefined' && state?.config && typeof config?.token === 'string') {
+                    state.config.token = config.token;
+                  }
                   const closed = window.agentCoordNativeEvents?.readyState === 2;
-                  return {status:r.status, reload:!!(changed || closed)};
+                  let reconnected = false;
+                  if (typeof window.agentCoordReconnectEvents === 'function') {
+                    window.agentCoordReconnectEvents(config, {closed});
+                    reconnected = closed;
+                  } else {
+                    const event = new CustomEvent('agent-coord-native-reconnect', {cancelable: true, detail: config});
+                    const handled = !window.dispatchEvent(event);
+                    if (closed && !handled && typeof connect === 'function') {
+                      try { window.agentCoordNativeEvents?.close(); } catch {}
+                      if (typeof state !== 'undefined' && state?.config) {
+                        if (typeof config?.eventCursor === 'number' && (state.config.eventCursor == null || config.eventCursor < state.config.eventCursor)) {
+                          state.config.eventCursor = config.eventCursor;
+                        }
+                        if (typeof config?.completionCursor === 'number' && (state.config.completionCursor == null || config.completionCursor < state.config.completionCursor)) {
+                          state.config.completionCursor = config.completionCursor;
+                        }
+                      }
+                      connect();
+                      reconnected = true;
+                    } else if (closed && handled) {
+                      reconnected = true;
+                    }
+                  }
+                  return {status:r.status, reconnected};
                 }
                 finally { clearTimeout(timer); }
                 """, arguments: [:], in: nil, contentWorld: .page)
@@ -217,8 +348,9 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
                 message = "This device needs a fresh pairing link from your Mac. Your open page is kept while you reconnect."
                 showingConnection = true
             } else if (200...299).contains(status) {
-                if result?["reload"] as? Bool == true || needsReload { requireReload() }
-                else { message = nil; await openPendingNotification() }
+                needsReload = false
+                message = nil
+                await openPendingNotification()
             } else {
                 message = "Your Mac is unavailable. Check Tailscale and remote access, then try again."
             }
@@ -259,11 +391,13 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let server, let url = action.request.url else { decisionHandler(.cancel); return }
-        // The shared web UI reloads on 401; retain its draft until native re-pair/reload confirmation.
+        // Intercept automatic web UI 401 reloads so unsent drafts stay intact while re-checking or re-pairing.
         if action.navigationType == .reload && hasPage {
-            requireReload()
             decisionHandler(.cancel)
-            Task { await checkConnection() }
+            Task {
+                await restorePairingCookieIfNeeded(for: server)
+                await checkConnection()
+            }
             return
         }
         let decision = NavigationPolicy(server: server).decide(url,
@@ -299,6 +433,8 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard self.webView === webView else { return }
         hasPage = true
+        let restoreDrafts = recoveringProcessTermination
+        recoveringProcessTermination = false
         Task {
             // The server returns its pairing HTML with 200 when a cookie expires at launch.
             let isPairPage = try? await webView.evaluateJavaScript("!!document.getElementById('pair-link-field')") as? Bool
@@ -307,7 +443,12 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
                 hasPage = false
                 showingConnection = true
                 message = "Pair this device using a fresh link from your Mac."
-            } else { await checkConnection() }
+            } else {
+                if restoreDrafts {
+                    _ = try? await webView.evaluateJavaScript("window.agentCoordRestoreDraftBackup?.() ?? false")
+                }
+                await checkConnection()
+            }
         }
     }
 
@@ -318,7 +459,12 @@ final class ConnectionModel: NSObject, ObservableObject, WKNavigationDelegate, W
         message = "Could not load your Mac. Check that Tailscale is connected and Ribbon Field is running, then try again."
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        terminated = true
-        message = "iOS closed this page to free memory. Reopen it to continue. Unsaved text may need to be entered again."
+        guard self.webView === webView else { return }
+        hasPage = false
+        terminated = false
+        recoveringProcessTermination = true
+        message = nil
+        if webView.url != nil { webView.reload() }
+        else { loadHome() }
     }
 }

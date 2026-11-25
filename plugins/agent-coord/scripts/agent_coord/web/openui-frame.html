@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/tokens.css">
   <link rel="stylesheet" href="/vendor/openui/openui-styles.css">
   <style>
     html { color-scheme: light; background: transparent; }
     html[data-theme="dark"] { color-scheme: dark; }
-    body { margin: 0; padding: 8px; overflow-wrap: anywhere; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: var(--space-2); overflow-wrap: anywhere; font-family: var(--font-sans); }
     #root { min-width: 0; }
     body[aria-disabled="true"] #root { pointer-events: none; }
   </style>

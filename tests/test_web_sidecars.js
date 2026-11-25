@@ -123,3 +123,49 @@ test("completed and detached watches retain open links without action buttons", 
   assert.equal(container.children.length, 2);
   for (const row of container.children) assert.equal(row.children[1].children.length, 1);
 });
+
+test("preloaded sidecars and zero-sidecar threads avoid extra HTTP fetches and SSE suppresses interval polling", async () => {
+  const calls = [];
+  let intervalTick = null;
+  const origSetInterval = globalThis.setInterval;
+  globalThis.setInterval = fn => { intervalTick = fn; return 1; };
+  try {
+    const document = {body: new Element("body"), hidden: false, createElement: tag => new Element(tag)};
+    const ui = new SidecarsUI({
+      document,
+      api: async path => { calls.push(path); return {watches: [watch], requests: []}; },
+      getThreads: () => [],
+      openThread: () => {},
+      onError: error => { throw error; },
+    });
+    const container = new Element("section");
+
+    // Preloaded composite /open sidecars render immediately without fetching /sidecars.
+    ui.showThread(target, container, {watches: [watch], requests: []});
+    assert.equal(container.hidden, false);
+    assert.equal(container.children.length, 1);
+    assert.deepEqual(calls, []);
+
+    // While SSE is connected, the 5s timer does not poll HTTP.
+    globalThis.agentCoordEventsConnected = true;
+    intervalTick();
+    await Promise.resolve();
+    assert.deepEqual(calls, []);
+
+    // When SSE disconnects, active watches resume fallback polling.
+    globalThis.agentCoordEventsConnected = false;
+    intervalTick();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["threads/target/sidecars"]);
+
+    // Threads with sidecar_count === 0 skip both initial fetch and fallback polling.
+    ui.showThread({...target, thread_id: "zero", sidecar_count: 0}, container);
+    assert.equal(container.hidden, true);
+    intervalTick();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["threads/target/sidecars"]);
+  } finally {
+    globalThis.setInterval = origSetInterval;
+    delete globalThis.agentCoordEventsConnected;
+  }
+});

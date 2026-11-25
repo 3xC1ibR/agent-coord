@@ -1,6 +1,15 @@
 /* Local window recovery. Loaded in the page realm before bridge.js and app.js. */
 (function (root) {
   "use strict";
+  const IDB_NAME = "agent-coord-workspace-state";
+  const IDB_VERSION = 1;
+  const IDB_STORE = "windows";
+  let lastStamp = 0;
+  const nextStamp = () => {
+    const now = Date.now();
+    lastStamp = now > lastStamp ? now : lastStamp + 1;
+    return lastStamp;
+  };
   // Clone JSON-shaped state without encoding image strings into another giant
   // JSON buffer. Strings are immutable and can be shared until native transport.
   const copy = value => {
@@ -74,22 +83,182 @@
     return result;
   }
 
+  function openDatabase(factory) {
+    if (!factory || typeof factory.open !== "function") return null;
+    let promise = null;
+    return () => {
+      if (promise) return promise;
+      promise = new Promise(resolve => {
+        try {
+          const request = factory.open(IDB_NAME, IDB_VERSION);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (db && !db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE, {keyPath: "key"});
+          };
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => { promise = null; resolve(null); };
+          request.onblocked = () => { promise = null; resolve(null); };
+        } catch {
+          promise = null;
+          resolve(null);
+        }
+      });
+      return promise;
+    };
+  }
+
   function create({window: view, document: doc, getState, getViews = () => null, getNavigation = () => null,
-    select, newSession, goHome, setChatExpanded, render, onSave, onError = () => {}, delay = 600}) {
+    select, newSession, goHome, setChatExpanded, render, onSave, onError = () => {}, delay = 120, maxDelay = 250}) {
     const $ = id => doc.getElementById(id);
     const storage = name => { try { return view[name]; } catch { return null; } };
+    const idbFactory = (() => { try { return view?.indexedDB || null; } catch { return null; } })();
+    const getDB = openDatabase(idbFactory);
     let pending = null, ready = false, restoring = false, restored = false, timer = null, last = "", interacted = false, dirtyAt = null, nextImage = 0;
+    let idbQueued = false, lastDraftSignature = "";
     const imageIds = new Map();
     const touched = new Set(), bound = new WeakSet(), hooked = new WeakSet(), paneWaiters = new Map();
     const currentState = () => { try { return getState(); } catch { return null; } };
     const currentViews = () => { try { return getViews(); } catch { return null; } };
     const currentNavigation = () => { try { return getNavigation(); } catch { return null; } };
     const currentDraftId = s => s?.selected === "new-session" ? s.newSessionDraft?.draftId || "new-session" : s?.selected;
+    function windowScope(s) {
+      const desktop = view?.agentCoordDesktop;
+      const windowId = typeof desktop?.windowId === "string" && desktop.windowId && !desktop.windowId.includes("__AGENT_COORD_")
+        ? desktop.windowId : "";
+      const rawSlot = typeof desktop?.folderSlot === "string" && desktop.folderSlot && !desktop.folderSlot.includes("__AGENT_COORD_")
+        ? desktop.folderSlot : (typeof s?.folders?.key === "string" ? s.folders.key.replace(/^agent-coord\.folder\./, "") : "");
+      const keys = [];
+      if (windowId) keys.push("window:" + windowId);
+      if (rawSlot) keys.push("slot:" + rawSlot);
+      if (!keys.length) keys.push("slot:default");
+      return {windowId: windowId || null, folderSlot: rawSlot || null, keys};
+    }
+    function collectDraftPayload(s) {
+      const panes = view.agentCoordPanes;
+      const texts = new Map(s.drafts), imageDrafts = new Map(pairs(s.attachments?.drafts).map(([id, value]) => [id, images(value)]));
+      const mentions = new Map(pairs(s.mentions?.drafts).map(([id, value]) => [id, {text: value.text, refs: copy(value.refs || [])}]));
+      let composer = null;
+      if (s.selected && !panes?.active) {
+        const field = $("message"), id = currentDraftId(s);
+        if (field) {
+          texts.set(s.selected, field.value);
+          mentions.set(id, {text: field.value, refs: s.mentions?.snapshot(id, field.value) || []});
+          composer = {id: s.selected, selectionStart: field.selectionStart, selectionEnd: field.selectionEnd};
+        }
+      }
+      const records = pairs(panes?.records).map(([id, record]) => {
+        const value = panes.active ? record.api?.exportDraft() || record.initialDraft || panes.getDraft?.(id) || {}
+          : panes.getDraft?.(id) || record.initialDraft || record.api?.exportDraft() || {};
+        const saved = draft(value);
+        if (typeof saved.text === "string") {
+          texts.set(id, saved.text); imageDrafts.set(id, saved.images);
+          mentions.set(id, {text: saved.text, refs: saved.mentions || []});
+        }
+        const input = record.frame?.contentDocument?.getElementById("message");
+        if (input) Object.assign(saved, {selectionStart: input.selectionStart, selectionEnd: input.selectionEnd});
+        return [id, {thread: tab(record.thread), draft: saved}];
+      });
+      const sendWork = view.agentCoordSendWork;
+      const workDrafts = new Map(pairs(sendWork?.drafts).map(([cwd, value]) => [cwd, workDraft(value)]));
+      if (sendWork?.cwd) workDrafts.set(sendWork.cwd, workDraft({message: sendWork.input.value, locked: sendWork.locked, draft: sendWork.draft}));
+      return {
+        composer,
+        records,
+        drafts: [...texts].filter(([, text]) => text !== ""),
+        images: [...imageDrafts].filter(([, list]) => list.length),
+        mentions: [...mentions].filter(([, value]) => value.text || value.refs?.length),
+        newSessionDraft: sessionDraft(s.newSessionDraft),
+        draftSequence: s.draftSequence || 0,
+        sendWorkDrafts: [...workDrafts],
+      };
+    }
+    function draftSignature(payload) {
+      return JSON.stringify({
+        drafts: payload.drafts,
+        mentions: payload.mentions,
+        composer: payload.composer,
+        newSessionDraft: payload.newSessionDraft,
+        draftSequence: payload.draftSequence,
+        sendWorkDrafts: payload.sendWorkDrafts,
+        images: payload.images.map(([id, list]) => [id, list.map(item => [item.name || "", item.url?.length || 0, item.url?.slice(0, 64) || ""])]),
+      });
+    }
+    async function writeIndexedDBDrafts(s, payload, stamp) {
+      if (!getDB || !s?.config) return false;
+      const db = await getDB();
+      if (!db) return false;
+      const scope = windowScope(s);
+      const recordBase = {
+        version: 1,
+        windowId: scope.windowId,
+        folderSlot: scope.folderSlot,
+        updatedAt: stamp,
+        composer: copy(payload.composer),
+        drafts: copy(payload.drafts),
+        images: copy(payload.images),
+        mentions: copy(payload.mentions),
+        newSessionDraft: copy(payload.newSessionDraft),
+        draftSequence: payload.draftSequence,
+        sendWorkDrafts: copy(payload.sendWorkDrafts),
+      };
+      return new Promise(resolve => {
+        try {
+          const tx = db.transaction(IDB_STORE, "readwrite");
+          const store = tx.objectStore(IDB_STORE);
+          for (const key of scope.keys) store.put({...recordBase, key});
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        } catch { resolve(false); }
+      });
+    }
+    async function readIndexedDBDrafts(s) {
+      if (!getDB) return null;
+      const db = await getDB();
+      if (!db) return null;
+      const scope = windowScope(s);
+      const readOne = key => new Promise(resolve => {
+        try {
+          const tx = db.transaction(IDB_STORE, "readonly");
+          const request = tx.objectStore(IDB_STORE).get(key);
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => resolve(null);
+        } catch { resolve(null); }
+      });
+      let newest = null;
+      for (const key of scope.keys) {
+        const candidate = await readOne(key);
+        if (candidate && typeof candidate === "object" && Number.isFinite(candidate.updatedAt)) {
+          if (!newest || candidate.updatedAt > newest.updatedAt) newest = candidate;
+        }
+      }
+      return newest;
+    }
+    function persistDraftsNow(stamp = null) {
+      idbQueued = false;
+      if (!getDB || !ready || restoring || pending && !restored) return Promise.resolve(false);
+      const s = currentState();
+      if (!s?.config || !s?.threadTabs) return Promise.resolve(false);
+      try {
+        const payload = collectDraftPayload(s);
+        const signature = draftSignature(payload);
+        if (signature === lastDraftSignature && stamp === null) return Promise.resolve(false);
+        lastDraftSignature = signature;
+        return writeIndexedDBDrafts(s, payload, stamp ?? nextStamp());
+      } catch { return Promise.resolve(false); }
+    }
+    function scheduleDraftPersist() {
+      if (!getDB || idbQueued) return;
+      idbQueued = true;
+      const schedule = typeof queueMicrotask === "function" ? queueMicrotask : fn => Promise.resolve().then(fn);
+      schedule(() => { persistDraftsNow(); });
+    }
     function changed() {
       if (!ready || restoring || pending && !restored) return;
+      scheduleDraftPersist();
       view.clearTimeout(timer);
       dirtyAt ??= Date.now();
-      timer = view.setTimeout(flush, Math.min(delay, Math.max(0, 3000 - (Date.now() - dirtyAt))));
+      timer = view.setTimeout(flush, Math.min(delay, Math.max(0, maxDelay - (Date.now() - dirtyAt))));
     }
     function storageChanged(key) { if (usefulStorageKey(key)) changed(); }
     function watch(object, name, after = changed) {
@@ -183,6 +352,7 @@
             drafts.set(work.cwd, workDraft({message: work.input.value, locked: work.locked, draft: work.draft}));
             result.sendWorkDrafts = [...drafts];
           }
+          result.savedAt = nextStamp();
         }
         return result;
       }
@@ -192,51 +362,34 @@
       const localKey = key => usefulStorageKey(key) && (key === s.folders?.key ||
         key.startsWith(tabs.baseKey + ":") || views?.baseKey && (key === views.baseKey || key.startsWith(views.baseKey + ":") || key.startsWith(views.baseKey + ".")));
       result.localStorage = readStorage(storage("localStorage"), localKey);
-      const texts = new Map(s.drafts), imageDrafts = new Map(pairs(s.attachments?.drafts).map(([id, value]) => [id, images(value)]));
-      const mentions = new Map(pairs(s.mentions?.drafts).map(([id, value]) => [id, {text: value.text, refs: copy(value.refs || [])}]));
+      const draftPayload = collectDraftPayload(s);
       const positions = new Map(pairs(s.conversationPositions));
       for (const [id, entry] of pairs(s.conversations)) positions.set(id, pick(entry, ["scroll", "following"]));
-      let composer = null;
       if (s.selected && !panes?.active) {
-        const field = $("message"), id = currentDraftId(s);
-        if (field) {
-          texts.set(s.selected, field.value);
-          mentions.set(id, {text: field.value, refs: s.mentions?.snapshot(id, field.value) || []});
-          composer = {id: s.selected, selectionStart: field.selectionStart, selectionEnd: field.selectionEnd};
-        }
         positions.set(s.selected, {scroll: s.timelineScroll?.position() ?? $("timeline")?.scrollTop ?? 0,
           following: s.timelineScroll?.following ?? true});
       }
-      const records = pairs(panes?.records).map(([id, record]) => {
-        const value = panes.active ? record.api?.exportDraft() || record.initialDraft || panes.getDraft?.(id) || {}
-          : panes.getDraft?.(id) || record.initialDraft || record.api?.exportDraft() || {};
-        const saved = draft(value);
-        if (typeof saved.text === "string") {
-          texts.set(id, saved.text); imageDrafts.set(id, saved.images);
-          mentions.set(id, {text: saved.text, refs: saved.mentions || []});
-        }
-        const input = record.frame?.contentDocument?.getElementById("message");
-        if (input) Object.assign(saved, {selectionStart: input.selectionStart, selectionEnd: input.selectionEnd});
-        return [id, {thread: tab(record.thread), draft: saved}];
-      });
-      const sendWork = view.agentCoordSendWork;
-      const workDrafts = new Map(pairs(sendWork?.drafts).map(([cwd, value]) => [cwd, workDraft(value)]));
-      if (sendWork?.cwd) workDrafts.set(sendWork.cwd, workDraft({message: sendWork.input.value, locked: sendWork.locked, draft: sendWork.draft}));
-      Object.assign(result, {projectCwd: s.projectCwd, selected: s.selected, composer,
+      const stamp = nextStamp();
+      if (getDB && ready && !restoring) {
+        const signature = draftSignature(draftPayload);
+        lastDraftSignature = signature;
+        writeIndexedDBDrafts(s, draftPayload, stamp);
+      }
+      Object.assign(result, {savedAt: stamp, projectCwd: s.projectCwd, selected: s.selected, composer: draftPayload.composer,
         folders: s.folders ? {projects: copy(s.folders.projects), active: s.folders.selected?.cwd || ""} : null,
         tabs: {projects: pairs(tabs.projects).map(([cwd, items]) => [cwd, items.map(tab)]),
           selections: pairs(tabs.selections), scratchpads: pairs(tabs.scratchpads), selected: tabs.selected ?? null},
         // Empty drafts restore identically when omitted; keeping them would retain
         // an entry for every conversation ever viewed.
-        drafts: [...texts].filter(([, text]) => text !== ""), images: [...imageDrafts].filter(([, list]) => list.length),
-        mentions: [...mentions].filter(([, value]) => value.text || value.refs?.length),
-        newSessionDraft: sessionDraft(s.newSessionDraft), draftSequence: s.draftSequence || 0,
+        drafts: draftPayload.drafts, images: draftPayload.images,
+        mentions: draftPayload.mentions,
+        newSessionDraft: draftPayload.newSessionDraft, draftSequence: draftPayload.draftSequence,
         projectDrafts: pairs(s.projectDrafts).map(([cwd, value]) => [cwd, {text: value.text || "", detail: sessionDraft(value.detail)}]),
         projectDestinations: pairs(s.projectDestinations), positions: [...positions],
-        sendWorkDrafts: [...workDrafts],
+        sendWorkDrafts: draftPayload.sendWorkDrafts,
         groupExpansion: pairs(s.groupExpansion), phaseScroll: pairs(s.phaseScroll),
         panes: panes ? {active: panes.active, viewId: panes.viewId,
-          layouts: pairs(panes.layouts).map(([id, value]) => [id, layout(value)]).filter(([, value]) => value), records} : null,
+          layouts: pairs(panes.layouts).map(([id, value]) => [id, layout(value)]).filter(([, value]) => value), records: draftPayload.records} : null,
         views: views ? {cwd: views.cwd, activeId: views.activeId, navigation: copy(views.navigation), current: views.read()} : null,
         navigation: copy(currentNavigation()?.capture?.()), chatExpanded: doc.body?.classList.contains("chat-expanded") || false});
       return copy(result);
@@ -247,6 +400,7 @@
       try {
         const snapshot = capture(), usedImages = new Set();
         const encoded = JSON.stringify(snapshot, (key, value) => {
+          if (key === "savedAt") return undefined;
           if (key !== "url" || typeof value !== "string" || !value.startsWith("data:image/")) return value;
           if (!imageIds.has(value)) imageIds.set(value, ++nextImage);
           usedImages.add(value); return {image: imageIds.get(value)};
@@ -257,16 +411,41 @@
         Promise.resolve(onSave?.(snapshot)).catch(error => { last = ""; onError(error); });
       } catch (error) { onError(error); }
     }
+    function mergeNewerIndexedDBRecord(baseSnapshot, record) {
+      if (!record || typeof record !== "object") return baseSnapshot;
+      const savedAt = Number.isFinite(baseSnapshot?.savedAt) ? baseSnapshot.savedAt : 0;
+      if (!Number.isFinite(record.updatedAt) || record.updatedAt <= savedAt) return baseSnapshot;
+      const merged = copy(baseSnapshot);
+      if (Array.isArray(record.drafts)) merged.drafts = copy(record.drafts);
+      if (Array.isArray(record.images)) merged.images = copy(record.images);
+      if (Array.isArray(record.mentions)) merged.mentions = copy(record.mentions);
+      if (record.composer !== undefined) merged.composer = copy(record.composer);
+      if (record.newSessionDraft !== undefined) merged.newSessionDraft = copy(record.newSessionDraft);
+      if (Number.isFinite(record.draftSequence)) merged.draftSequence = Math.max(Number(merged.draftSequence) || 0, record.draftSequence);
+      if (Array.isArray(record.sendWorkDrafts)) merged.sendWorkDrafts = copy(record.sendWorkDrafts);
+      merged.savedAt = record.updatedAt;
+      return merged;
+    }
     function restoreMap(target, values, accept = () => true, preserve = false) {
       for (const [id, value] of entries(values)) if (!touched.has(id) && accept(value) && (!preserve || !target.has(id))) target.set(id, copy(value));
     }
     const attempt = fn => { try { return fn(); } catch (error) { onError(error); return undefined; } };
-    async function restore(snapshot = pending) {
+    async function restore(inputSnapshot = pending) {
       if (restored) return true;
       const s = currentState();
-      if (!ready || !s?.threadTabs || !snapshot || typeof snapshot !== "object") return false;
+      if (!ready || !s?.threadTabs) return false;
+      let snapshot = inputSnapshot;
+      if ((!snapshot || typeof snapshot !== "object") && getDB) {
+        const recovered = await readIndexedDBDrafts(s);
+        if (recovered) snapshot = {version: 1, savedAt: 0};
+      }
+      if (!snapshot || typeof snapshot !== "object") return false;
       restoring = true;
       try {
+        if (getDB) {
+          const recovered = await readIndexedDBDrafts(s);
+          snapshot = mergeNewerIndexedDBRecord(snapshot, recovered);
+        }
         const tabs = s.threadTabs, views = currentViews(), panes = view.agentCoordPanes;
         const currentInput = $("message");
         // Retain actual edits even if they arrived before native's ready reply.
@@ -380,8 +559,8 @@
       } finally { restoring = false; installHooks(); changed(); }
     }
     bindDocument(doc);
-    view.addEventListener("pagehide", flush);
-    return {preload, capture, restore, changed, storageChanged, bindDocument, flush,
+    view.addEventListener("pagehide", () => { persistDraftsNow(); flush(); });
+    return {preload, capture, restore, changed, storageChanged, bindDocument, flush, persistDrafts: () => persistDraftsNow(),
       busy() {
         const s = currentState();
         return Boolean(s?.sending?.size || view.agentCoordSendWork?.sending ||
@@ -389,9 +568,20 @@
           pairs(view.agentCoordPanes?.records).some(([, record]) => record.api?.canTransfer?.() === false &&
             !record.frame?.contentDocument?.querySelector("dialog[open]")));
       },
-      ready() { ready = true; installHooks(); if (!pending) { restored = true; changed(); } }};
+      ready() {
+        ready = true;
+        installHooks();
+        if (!pending) {
+          if (getDB) {
+            restore(null);
+          } else {
+            restored = true;
+            changed();
+          }
+        }
+      }};
   }
-  const api = {create, usefulStorageKey};
+  const api = {create, usefulStorageKey, IDB_NAME, IDB_STORE};
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.agentCoordWorkspaceState = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

@@ -34,49 +34,47 @@ function shellFixture() {
   return {shell, state, pending, errors, drafts, setThreads: value => { threads = value; }};
 }
 
-test("a send or image for another conversation does not block tiling", async () => {
+test("active sends, new conversation drafts, and unrelated images do not block tiling", async () => {
   const {shell, state, pending, errors} = shellFixture();
-  state.sending.add("elsewhere"); pending.add("elsewhere");
+  state.sending.add("a");
+  state.sending.add("b");
+  state.sending.add("elsewhere");
+  state.sending.add({draftId: "draft"});
+  state.busy = true;
+  pending.add("elsewhere");
   assert.equal(shell.tileCurrent(), true);
   assert.equal(shell.active, true);
   assert.deepEqual(errors, []);
 });
 
-test("a tiled conversation's unaccepted send or unread image blocks copying its draft", async () => {
-  for (const block of ["send", "image"]) {
-    const {shell, state, pending, errors, drafts} = shellFixture();
-    if (block === "send") state.sending.add("b"); else pending.add("b");
-    assert.equal(shell.tileCurrent(), false);
-    assert.equal(shell.active, false);
-    assert.deepEqual(drafts, []);
-    assert.match(errors[0], /this conversation's send or image attachment/);
-    // Once the send is accepted or the image is read, the same layout proceeds.
-    state.sending.clear(); pending.clear();
-    assert.equal(shell.tileCurrent(), true);
-    assert.deepEqual([...new Set(drafts)].sort(), ["a", "b"]);
-  }
-});
-
-test("a new conversation still being created blocks tiling", () => {
-  const {shell, state, errors} = shellFixture();
-  state.sending.add({draftId: "draft"});
+test("a tiled conversation's unread image attachment blocks tiling until read finishes", async () => {
+  const {shell, pending, errors, drafts} = shellFixture();
+  pending.add("b");
   assert.equal(shell.tileCurrent(), false);
-  assert.equal(errors.length, 1);
+  assert.equal(shell.active, false);
+  assert.deepEqual(drafts, []);
+  assert.match(errors[0], /this conversation's image attachment/);
+  pending.clear();
+  assert.equal(shell.tileCurrent(), true);
+  assert.deepEqual([...new Set(drafts)].sort(), ["a", "b"]);
 });
 
-test("leaving tiles is not blocked by a send in this window", async () => {
+test("leaving tiles is not blocked by a send or busy state in this window", async () => {
   const {shell, state, errors} = shellFixture();
   assert.equal(shell.tileCurrent(), true);
   state.sending.add("a");
+  state.busy = true;
   assert.equal(await shell.toggleCurrent(), true);
   assert.equal(shell.active, false);
   assert.deepEqual(errors, []);
 });
 
-test("retiling and dragging check only the conversations they bring into panes", () => {
-  const {shell, state, errors, setThreads} = shellFixture();
+test("retiling and dragging check unread attachments only on the conversations they bring into panes", () => {
+  const {shell, state, pending, errors, setThreads} = shellFixture();
   assert.equal(shell.tileCurrent(), true);
   state.sending.add("c");
+  assert.equal(shell.canDrag(thread("c")), true, "optimistic sends never block dragging into panes");
+  pending.add("c");
   assert.equal(shell.canDrag(thread("b")), true);
   assert.equal(shell.canDrag(thread("c")), false);
   setThreads([thread("a"), thread("b"), thread("c")]);

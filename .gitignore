@@ -13,7 +13,8 @@ __pycache__/
 .coverage
 .pytest_cache/
 build/
-dist/
+/dist/
+plugins/agent-coord/scripts/agent_coord/web/dist/*.map
 
 # Demo video build artifacts
 demo/node_modules/

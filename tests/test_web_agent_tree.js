@@ -76,8 +76,10 @@ test("current running state supersedes a historical failure; stale asks do not r
 function setup() {
   const doc = {activeElement: null};
   class Element {
-    constructor(tag) { Object.assign(this, {tagName: tag, children: [], dataset: {}, attrs: {}, events: {}, style: {}, className: "",
-      clientWidth: 900, clientHeight: 650}); }
+    constructor(tag) {
+      Object.assign(this, {tagName: tag, children: [], dataset: {}, attrs: {}, events: {}, className: "",
+        style: {setProperty(k, v) { this[k] = v; }}, clientWidth: 900, clientHeight: 650});
+    }
     get classList() { const read = () => new Set(this.className.split(/\s+/).filter(Boolean)); return {
       contains: n => read().has(n),
       add: n => { const s = read(); s.add(n); this.className = [...s].join(" "); },
@@ -275,13 +277,15 @@ test("only a visible Agents panel handles live send events", async () => {
   const send = {messageId: 1, threadId: "root", recipientId: "child"};
   c.controller.message(send); assert.equal(c.messages.length, 0);
   c.controller.bind(); await c.controller.load();
+  c.controller.message(send); assert.equal(c.messages.length, 0, "collapsed side panel skips live send animations");
+  await c.controller.open("root");
   c.controller.message(send); assert.equal(c.messages.length, 1);
   c.document.hidden = true; c.controller.message(send); assert.equal(c.messages.length, 1);
   c.document.hidden = false; c.controller.setMode("context");
   c.controller.message(send); assert.equal(c.messages.length, 1);
 });
 
-test("opening either a parent or leaf conversation defaults to its full tree and opens the panel", async () => {
+test("opening either a parent or leaf conversation defaults to Agents mode without auto-expanding the side panel", async () => {
   const records = [thread("root"), thread("child", "root")];
   for (const selected of ["root", "child"]) {
     const c = setupController(records, selected);
@@ -290,8 +294,8 @@ test("opening either a parent or leaf conversation defaults to its full tree and
     assert.equal(c.$("panel-context").hidden, false);
     assert.equal(c.controller.mode, "agents");
     assert.equal(c.controller.root, "root");
-    assert.equal(c.collapsed, false);
-    assert.equal(c.state.threadTabs.items[0].tree_open, true);
+    assert.equal(c.collapsed, true);
+    assert.equal(c.state.threadTabs.items[0].tree_open, false);
   }
 });
 
@@ -304,17 +308,17 @@ test("family discovery includes an archived ancestor missing from overview inven
   assert.equal(c.$("panel-context").hidden, false);
   assert.equal(c.controller.mode, "agents");
   assert.equal(c.controller.root, "root");
-  assert.equal(c.collapsed, false);
+  assert.equal(c.collapsed, true);
 });
 
-test("fork-only families open the Agents panel, including an archived source absent from inventory", async () => {
+test("fork-only families prepare the Agents mode without auto-opening the panel, including an archived source absent from inventory", async () => {
   const source = thread("source"), fork = thread("fork", null, {forked_from: {thread_id: "source"}});
   for (const selected of ["source", "fork"]) {
     const c = setupController([source, fork], selected);
     c.controller.bind(); await c.controller.load();
     assert.equal(c.controller.mode, "agents");
     assert.equal(c.controller.root, "source");
-    assert.equal(c.collapsed, false);
+    assert.equal(c.collapsed, true);
   }
   const c = setupController([fork], "fork", () => Promise.resolve({root_thread_id: "source",
     data: [{...source, attention: "archived"}, fork]}));
@@ -501,6 +505,8 @@ test("new draft sessions hide and collapse the Context panel across desktop and 
   desktop.controller.bind(); await desktop.controller.load();
   assert.equal(desktop.$("context-panel").hidden, false);
   assert.equal(desktop.$("conversation").classList.contains("context-collapsed"), false);
+  assert.equal(desktop.controller.mode, "context");
+  assert.equal(desktop.$("conversation").classList.contains("agents-visible"), false);
 
   // Enter new session draft.
   desktop.state.selected = "new-session";
@@ -522,7 +528,7 @@ test("new draft sessions hide and collapse the Context panel across desktop and 
     path.includes("solo") ? {root_thread_id: "solo", data: [thread("solo")]} : {root_thread_id: "root", data: [thread("root"), thread("child", "root")]}), {compact: true});
   compact.controller.bind(); await compact.controller.load();
   assert.equal(compact.controller.mode, "agents");
-  assert.equal(compact.$("context-panel").hidden, false);
+  assert.equal(compact.$("context-panel").hidden, true);
   assert.equal(compact.storage.get("agent-coord.context-collapsed"), undefined);
 
   // Opening a new draft from the Agents view hides the panel in compact layout too.
@@ -634,4 +640,78 @@ test("closed children fold to an icon that opens in place, with connected connec
   panel.update(records, "root", "closed-child");
   assert.equal(panel.cardEls.get("closed-child").classList.contains("compact"), false, "a selected closed agent shows its card");
   assert.equal(panel.cardEls.get("open").classList.contains("compact"), false);
+});
+
+test("inline breadcrumb hides for standalone threads and renders chain and family switcher for multi-agent trees", () => {
+  const {doc} = setup();
+  const container = doc.createElement("nav");
+  const chosen = [];
+  const soloModel = Tree.renderBreadcrumb({document: doc, container, tree: [thread("solo")], rootId: "solo", selectedId: "solo",
+    onSelect: id => chosen.push(id)});
+  assert.equal(soloModel.visible, false);
+  assert.equal(container.hidden, true);
+  assert.equal(container.children.length, 0);
+
+  const root = thread("root", null, {title: "Root task", response_state: "working"});
+  const lead = thread("lead", "root", {title: "Lead", response_state: "available"});
+  const specialist = thread("specialist", "lead", {title: "Specialist", response_state: "failed"});
+  const reviewer = thread("reviewer", "root", {title: "Reviewer", checkpoint: {id: 2, next_actor: "user", next_action: "Approve"}});
+  const external = thread("external", "root", {title: "CLI helper", browser_session: false});
+  const records = [root, lead, specialist, reviewer, external];
+
+  const rootModel = Tree.renderBreadcrumb({document: doc, container, tree: records, rootId: "root", selectedId: "root",
+    onSelect: id => chosen.push(id)});
+  assert.equal(rootModel.visible, true);
+  assert.equal(container.children.length, 1);
+  assert.equal(container.children[0].children[0].children[1].textContent, "4 agents");
+
+  const model = Tree.renderBreadcrumb({document: doc, container, tree: records, rootId: "root", selectedId: "specialist",
+    onSelect: id => chosen.push(id)});
+  assert.equal(model.visible, true);
+  assert.deepEqual(model.ids, ["root", "lead", "specialist"]);
+  assert.deepEqual(model.family.map(m => [m.id, m.depth]), [["root", 0], ["lead", 1], ["specialist", 2], ["reviewer", 1]]);
+  assert.equal(container.hidden, false);
+  assert.equal(container.attrs.role, "navigation");
+
+  // Ancestor buttons + separators precede the active agent's <details> switcher.
+  assert.equal(container.children.length, 5);
+  const [rootBtn, sep1, leadBtn, sep2, menu] = container.children;
+  assert.equal(rootBtn.dataset.agentId, "root");
+  assert.equal(rootBtn.dataset.status, "running");
+  assert.equal(sep1.textContent, "›");
+  assert.equal(leadBtn.dataset.agentId, "lead");
+  assert.equal(sep2.textContent, "›");
+  assert.equal(menu.tagName, "details");
+
+  leadBtn.onclick();
+  assert.deepEqual(chosen, ["lead"]);
+
+  const [summary, list] = menu.children;
+  assert.equal(summary.dataset.agentId, "specialist");
+  assert.equal(summary.dataset.status, "failed");
+  assert.equal(summary.children.at(-1).textContent, "▾");
+  assert.equal(list.children.length, 4, "only browser-accessible family members appear in the switcher");
+  const specialistOpt = list.children.find(opt => opt.dataset.agentId === "specialist");
+  const reviewerOpt = list.children.find(opt => opt.dataset.agentId === "reviewer");
+  assert.equal(specialistOpt.attrs["aria-checked"], "true");
+  assert.equal(specialistOpt.style["--agent-breadcrumb-depth"], "2");
+  assert.equal(reviewerOpt.attrs["aria-checked"], "false");
+  assert.equal(reviewerOpt.dataset.status, "waiting");
+
+  menu.open = true;
+  specialistOpt.onclick();
+  assert.equal(menu.open, false);
+  assert.deepEqual(chosen, ["lead"], "re-selecting the current agent closes the menu without redundant navigation");
+
+  menu.open = true;
+  reviewerOpt.onclick();
+  assert.equal(menu.open, false);
+  assert.deepEqual(chosen, ["lead", "reviewer"]);
+
+  menu.open = true;
+  let prevented = false;
+  menu.onkeydown({key: "Escape", preventDefault() { prevented = true; }, stopPropagation() {}});
+  assert.equal(prevented, true);
+  assert.equal(menu.open, false);
+  assert.equal(doc.activeElement, summary);
 });

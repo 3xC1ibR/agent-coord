@@ -3,7 +3,7 @@ const {test} = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const {actionMessage, reconcileChildren, commit} = require("../plugins/agent-coord/scripts/agent_coord/web/openui.js");
+const {actionMessage, reconcileChildren, commit, detach, restore, frameUrl} = require("../plugins/agent-coord/scripts/agent_coord/web/openui.js");
 const {normalizeSource, renderError} = require("../plugins/agent-coord/scripts/agent_coord/web/openui-frame.js");
 
 test("saved portfolio layout and tab shorthand adapt to the installed chat catalog", () => {
@@ -186,13 +186,107 @@ test("accepted responses remain successful if history refresh fails", async () =
   assert.equal(calls.length, 1);
 });
 
-test("cached-tab restoration rebuilds detached interactive previews", () => {
+test("cached-tab restoration retains OpenUI nodes when OpenUIThread.detach is present and falls back safely otherwise", () => {
   const source = fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/app.js"), "utf8");
-  const context = {state: {selected: "thread", detail: {}, conversations: new Map()}, isSessionDraft: () => false,
-    $: () => ({childNodes: [{dataset: {openuiKey: "thread/turn/item"}}], scrollTop: 30})};
-  vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function sameConversation(")), context);
-  vm.runInContext("retainConversation()", context);
-  assert.equal(context.state.conversations.get("thread").nodes, null);
-  assert.equal(context.state.conversations.get("thread").scroll, 30);
+  const node = {dataset: {openuiKey: "thread/turn/item"}};
+  const fallbackContext = {state: {selected: "thread", detail: {}, conversations: new Map()}, isSessionDraft: () => false,
+    globalThis: {}, $: () => ({childNodes: [node], scrollTop: 30})};
+  vm.createContext(fallbackContext);
+  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function sameConversation(")), fallbackContext);
+  vm.runInContext("retainConversation()", fallbackContext);
+  assert.equal(fallbackContext.state.conversations.get("thread").nodes, null);
+  assert.equal(fallbackContext.state.conversations.get("thread").scroll, 30);
+
+  let detached = false;
+  const liveContext = {state: {selected: "thread", detail: {}, conversations: new Map()}, isSessionDraft: () => false,
+    globalThis: {OpenUIThread: {detach() { detached = true; }}}, $: () => ({childNodes: [node], scrollTop: 42})};
+  vm.createContext(liveContext);
+  vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function sameConversation(")), liveContext);
+  vm.runInContext("retainConversation()", liveContext);
+  assert.equal(detached, true);
+  assert.deepEqual(Array.from(liveContext.state.conversations.get("thread").nodes), [node]);
+  assert.equal(liveContext.state.conversations.get("thread").scroll, 42);
+});
+
+test("frameUrl resolves a permanent loopback URL and detach/restore preserve interactive block state across tab switches", () => {
+  assert.equal(frameUrl({origin: "http://127.0.0.1:48120"}), "http://127.0.0.1:48120/openui-frame.html");
+  assert.equal(frameUrl({}), "/openui-frame.html");
+
+  const OriginalChannel = globalThis.MessageChannel;
+  const channels = [];
+  globalThis.MessageChannel = class {
+    constructor() {
+      const pair = {
+        port1: {onmessage: null, start() {}, close() { pair.closed = true; }, postMessage: data => pair.sentToFrame.push(data)},
+        port2: {postMessage: data => pair.port1.onmessage?.({data})},
+        sentToFrame: [],
+        closed: false,
+      };
+      channels.push(pair);
+      return pair;
+    }
+  };
+  try {
+    const createdFrames = [];
+    const ownerDocument = {
+      createElement(tag) {
+        const node = new Element(tag);
+        node.style = {};
+        node.attributes = {};
+        node.setAttribute = (k, v) => { node.attributes[k] = v; };
+        if (tag === "iframe") {
+          node.contentWindow = {postMessage(_msg, _origin, ports) { node.framePort = ports[0]; }};
+          createdFrames.push(node);
+        }
+        return node;
+      },
+    };
+    const makeBlockCard = (key, source) => {
+      const card = new Element("article");
+      card.dataset = {openuiKey: key, openuiText: source, openuiStreaming: "false"};
+      const preview = new Element("div");
+      preview.prepend = child => preview.insertBefore(child, preview.firstChild);
+      preview.append = child => preview.insertBefore(child, null);
+      preview.replaceChildren = () => { while (preview.firstChild) preview.firstChild.remove(); };
+      const details = {open: false};
+      const code = {textContent: source};
+      const block = new Element("div");
+      block.ownerDocument = ownerDocument;
+      block.querySelector = sel => sel === "code" ? code : sel === ".openui-preview" ? preview : sel === "details" ? details : null;
+      card.querySelectorAll = sel => sel === ".openui-block" ? [block] : [];
+      card.preview = preview;
+      return card;
+    };
+
+    const timeline = new Element("timeline");
+    const cardA = makeBlockCard("thread-a/turn-1/msg-1", 'root = Card([TextContent("Alpha")])');
+    const cardB = makeBlockCard("thread-b/turn-1/msg-1", 'root = Card([TextContent("Beta")])');
+
+    commit(timeline, {childNodes: [cardA]}, {thread: "thread-a", origin: "http://127.0.0.1:48120"});
+    assert.equal(createdFrames.length, 1);
+    assert.equal(createdFrames[0].src, "http://127.0.0.1:48120/openui-frame.html");
+    createdFrames[0].onload();
+    createdFrames[0].framePort.postMessage({type: "ready"});
+    createdFrames[0].framePort.postMessage({type: "state", state: {activeTab: "metrics"}});
+
+    // Detach Thread A's timeline nodes when switching tabs, then commit Thread B.
+    const cachedNodesA = detach(timeline);
+    assert.deepEqual(cachedNodesA, [cardA]);
+    assert.equal(channels[0].closed, true);
+
+    commit(timeline, {childNodes: [cardB]}, {thread: "thread-b", origin: "http://127.0.0.1:48120"});
+    assert.equal(timeline.firstChild, cardB);
+
+    // Restore Thread A's cached nodes and verify its interactive state is rehydrated.
+    reconcileChildren(timeline, cachedNodesA);
+    restore(timeline, {thread: "thread-a", origin: "http://127.0.0.1:48120"});
+    const restoredFrame = createdFrames.at(-1);
+    restoredFrame.onload();
+    restoredFrame.framePort.postMessage({type: "ready"});
+    const lastRender = channels.at(-1).sentToFrame.find(msg => msg.type === "render");
+    assert.deepEqual(lastRender.state, {activeTab: "metrics"});
+    detach(timeline);
+  } finally {
+    globalThis.MessageChannel = OriginalChannel;
+  }
 });

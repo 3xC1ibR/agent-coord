@@ -1,0 +1,320 @@
+/* Canonical design tokens for Ribbon Field (single source of truth).
+   Light surfaces and ink live here; dark theme overrides live in theme.css. */
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+
+  /* Surface, ink, and semantic status colors */
+  --paper: #f5f5f4;
+  --surface: #ffffff;
+  --panel: #ededee;
+  --tint: #ededee;
+  --hover-bg: #ededee;
+  --ink: #18181b;
+  --muted: #6a6a71;
+  --line: #e4e4e6;
+  --line-strong: #cfcfd3;
+  --hover-line: #b3b3b9;
+  --border: var(--line);
+  --accent: #2550d8;
+  --accent-hover: #1d42b8;
+  --on-accent: #ffffff;
+  --user-message-bg: #e4edff;
+  --user-message-line: #c3d3f5;
+  --user-message-muted: var(--muted);
+  --warm: #c2410c;
+  --warm-tint: #fbe9e0;
+  --danger: #c0392b;
+  --danger-tint: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  --responded: #1f8a4c;
+  --responded-tint: color-mix(in srgb, var(--responded) 12%, var(--surface));
+  --dot-idle: #a6a6ad;
+  --backdrop: color-mix(in srgb, var(--ink) 38%, transparent);
+  --shadow: #18181b26;
+  --brand-claude: #d97757;
+  --brand-google-blue: #4285f4;
+  --brand-google-green: #34a853;
+  --brand-google-yellow: #fbbc04;
+  --brand-google-red: #e94235;
+
+  /* Dark workspace navigation sidebar */
+  --sb-bg: #121215;
+  --sb-hover: #242429;
+  --sb-ink: #f5f5f4;
+  --sb-muted: #8a8a93;
+  --sb-line: #303036;
+  --sb-accent: #7fa3ff;
+  --sb-primary-bg: #7fa3ff;
+  --sb-primary-ink: #121215;
+
+  /* Typography & exact 7-step type scale */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --mono: var(--font-mono);
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --leading-none: 1;
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+  --leading-loose: 1.75;
+  --tracking-tight: -0.02em;
+  --tracking-heading: -0.5px;
+
+  /* Exact 4-step border radius scale */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* 4px-grid spacing scale & offsets */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-9: 36px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-24: 96px;
+  --offset-neg-xs: -2px;
+  --offset-neg-sm: -4px;
+  --offset-neg-md: -8px;
+  --offset-skip: -60px;
+
+  /* Control heights, touch target, icons, and marks */
+  --control-2xs: 24px;
+  --control-xs: 28px;
+  --control-sm: 32px;
+  --control-md: 36px;
+  --control-lg: 40px;
+  --hit-target: 44px;
+  --bar-height: 48px;
+  --header-tabs-height: 52px;
+  --mobile-header-height: 56px;
+  --monitor-header-height: 72px;
+  --icon-xs: 12px;
+  --icon-sm: 16px;
+  --icon-md: 20px;
+  --dot-xs: 4px;
+  --dot-sm: 6px;
+  --dot-md: 8px;
+  --badge-sm: 20px;
+  --rule-width: 1px;
+  --marker-width: 2px;
+  --ring-offset: 2px;
+
+  /* Containers, panels, dialogs, tables, and component measures */
+  --sidebar-width: 256px;
+  --sidebar-width-compact: 232px;
+  --sidebar-width-mobile: 288px;
+  --monitor-nav-width: 312px;
+  --panel-2xs: 72px;
+  --panel-xs: 144px;
+  --panel-sm: 180px;
+  --panel-md: 220px;
+  --panel-lg: 280px;
+  --panel-xl: 340px;
+  --card-min: 288px;
+  --card-compact-min: 240px;
+  --dialog-xs: 400px;
+  --dialog-sm: 480px;
+  --dialog-md: 560px;
+  --dialog-lg: 640px;
+  --dialog-xl: 740px;
+  --dialog-2xl: 860px;
+  --dialog-3xl: 1048px;
+  --dialog-4xl: 1180px;
+  --dialog-max-h: 820px;
+  --dialog-tall-h: 900px;
+  --reading-width: 760px;
+  --content-md: 700px;
+  --content-lg: 980px;
+  --content-xl: 1000px;
+  --content-2xl: 1120px;
+  --popover-sm: 300px;
+  --popover-md: 360px;
+  --popover-lg: 420px;
+  --popover-max-h: 520px;
+  --hover-max-h: 620px;
+  --menu-max-h: 320px;
+  --list-sm-max-h: 140px;
+  --list-max-h: 180px;
+  --pre-sm-max-h: 160px;
+  --pre-md-max-h: 280px;
+  --pre-max-h: 400px;
+  --table-col-xs: 72px;
+  --table-col-sm: 92px;
+  --table-col-md: 112px;
+  --table-col-lg: 176px;
+  --table-min-sm: 640px;
+  --table-min-md: 680px;
+  --table-min-lg: 760px;
+  --chart-height: 208px;
+  --thumb-width: 112px;
+  --thumb-height: 80px;
+  --thumb-sm-w: 80px;
+  --thumb-sm-h: 60px;
+  --image-max-w: 320px;
+  --image-max-h: 240px;
+  --tab-min-w: 88px;
+  --tab-max-w: 240px;
+  --tab-compact-max-w: 188px;
+  --pane-tab-min-w: 60px;
+  --agent-card-w: 232px;
+  --agent-card-h: 152px;
+  --agent-tree-min-h: 220px;
+  --ws-min-h: 320px;
+  --ws-page-bottom: 224px;
+  --ws-page-bottom-mobile: 244px;
+  --atlas-min-h: 580px;
+  --atlas-chrome-offset: 180px;
+  --atlas-bottom-panel: 192px;
+  --dispatcher-rail-w: 300px;
+  --dispatcher-rail-compact-w: 260px;
+  --dispatcher-dock-max-h: 580px;
+  --dispatcher-expanded-max-h: 360px;
+  --dispatcher-expanded-mobile-h: 240px;
+  --native-titlebar-tab-height: 32px;
+
+  /* List overview column metrics */
+  --tl-row: var(--control-md);
+  --tl-title: clamp(200px, 24vw, 360px);
+  --tl-label: 112px;
+  --tl-phase: 104px;
+  --tl-time: var(--hit-target);
+  --tl-mark: var(--dot-md);
+  --tl-logo: var(--icon-sm);
+  --tl-indent: var(--space-7);
+
+  /* Shadows, motion, and z-index layers */
+  --shadow-sm: 0 2px 10px var(--shadow);
+  --shadow-md: 0 8px 28px var(--shadow);
+  --shadow-lg: 0 20px 64px var(--shadow);
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-panel: 320ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  --duration-fast: 800ms;
+  --duration-blink: 1.4s;
+  --duration-pulse: 1.6s;
+  --duration-slow: 2.8s;
+  --layer-sticky: 10;
+  --layer-floating: 20;
+  --layer-popover: 40;
+  --layer-drawer: 60;
+  --layer-dialog: 100;
+  --layer-menu: 1100;
+  --layer-toast: 1200;
+
+  /* Mobile chat & conversation composition aliases */
+  --mobile-chat-header-height: var(--mobile-header-height);
+  --mobile-chat-header-inset: var(--space-1);
+  --mobile-chat-inset: var(--space-3);
+  --mobile-chat-gap: var(--space-2);
+  --mobile-chat-title-size: var(--text-base);
+  --mobile-chat-message-size: var(--text-base);
+  --mobile-chat-input-size: var(--text-lg);
+  --mobile-chat-input-leading: var(--leading-normal);
+  --mobile-chat-control-padding: var(--space-1);
+  --mobile-draft-max-height: 320px;
+  --mobile-input-max-height: 240px;
+
+  --chat-reading-width: var(--reading-width);
+  --chat-reference-width: 288px;
+  --chat-reading-inset: var(--space-8);
+  --chat-reading-gap: var(--space-7);
+  --chat-message-size: var(--text-base);
+  --chat-message-leading: var(--leading-loose);
+  --chat-title-size: var(--text-xl);
+  --chat-title-leading: 1.35;
+  --chat-heading-height: 68px;
+  --chat-reference-title-size: var(--text-base);
+  --chat-reference-inset: var(--space-6);
+  --chat-meta-size: var(--text-sm);
+  --chat-code-size: var(--text-sm);
+  --chat-radius: var(--radius-lg);
+  --chat-rule: 1px;
+  --chat-chevron-size: 6px;
+  --chat-chevron-stroke: 1.5px;
+  --chat-message-padding: var(--space-4);
+  --chat-request-width: 88%;
+  --chat-note-height: 80px;
+  --chat-note-active-height: 128px;
+  --chat-composer-inset: var(--space-4);
+  --chat-composer-edge: var(--space-5);
+  --chat-editor-height: var(--control-sm);
+  --chat-working-mark: 6px;
+  --chat-working-mark-inset: var(--space-3);
+  --chat-stop-mark: var(--space-2);
+  --chat-header-control: var(--control-md);
+  --chat-toolbar-gap: var(--space-3);
+  --chat-control-size: var(--hit-target);
+  --chat-control-icon: var(--icon-md);
+  --chat-placeholder-leading: 1.375;
+  --chat-menu-width: 340px;
+  --chat-menu-edge: var(--space-3);
+  --chat-menu-gap: var(--space-2);
+  --chat-group-gap: var(--space-4);
+  --chat-option-inset: var(--space-2);
+  --chat-option-description: var(--text-xs);
+
+  --response-action-gap: var(--space-2);
+  --response-action-edge: var(--space-3);
+  --response-action-size: var(--control-sm);
+  --response-action-touch-size: var(--hit-target);
+  --response-action-radius: var(--radius-md);
+  --response-action-layer: var(--layer-popover);
+  --response-copy-buffer-offset: -10000px;
+
+  --schedule-gap: var(--space-2);
+  --schedule-action-height: var(--hit-target);
+  --schedule-form-inset: 100px;
+
+  --context-heading-size: var(--text-sm);
+  --context-heading-weight: 600;
+  --context-section-gap: var(--space-6);
+  --context-text-gap: var(--space-2);
+  --context-divider-width: 1px;
+
+  --asks-toggle-count-offset: var(--offset-neg-sm);
+  --asks-toggle-count-ring: 2px;
+  --thread-asks-inset: var(--space-7);
+  --thread-asks-inset-narrow: var(--space-4);
+  --thread-asks-inset-phone: var(--space-3);
+  --thread-asks-height: 40vh;
+  --thread-asks-height-narrow: 55%;
+  --thread-asks-height-editing: 75%;
+
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  color: var(--ink);
+  background: var(--paper);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

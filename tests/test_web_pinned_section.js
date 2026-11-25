@@ -1,5 +1,6 @@
 "use strict";
 const {test} = require("node:test"), assert = require("node:assert/strict");
+const WorkingSet = require("../plugins/agent-coord/scripts/agent_coord/web/working-set.js");
 function thread(id, extra = {}) { return {thread_id: id, title: id, attention: "now", work_phase: "implementation", response_state: "working", ...extra}; }
 function overview() {
   const vm = require("node:vm"), fs = require("node:fs");
@@ -9,6 +10,7 @@ function overview() {
     return {tag, textContent: text, className, children: [], dataset: {}, value: "", hidden: false, scrollLeft: 0,
       get isConnected() { return this.root || Boolean(this.parent?.isConnected); },
       get clientWidth() { return this.isConnected && !controls.welcome.hidden ? 346 : 0; },
+      classList: {toggle() {}},
       setAttribute() {},
       append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } },
       replaceChildren(...items) { for (const item of this.children) item.parent = null; this.children = []; this.append(...items); },
@@ -17,47 +19,39 @@ function overview() {
   const c = {conversationSearch: null, node: element, $: id => controls[id] ||= Object.assign(element("div"), {root: true}),
     document: {activeElement: null}, savedViews: {activeId: "all", render() {}},
     state: {sessions: [], selected: null, pinning: new Set(), updatingThreads: new Set(),
-      phaseScroll: new Map(), organization: {projects: []}, listSignature: "",
-      overviewMotion: {capture() {}, play() {}}},
+      phaseScroll: new Map(), organization: {projects: []}, listSignature: ""},
     threadGrouping: require("../plugins/agent-coord/scripts/agent_coord/web/thread-groups.js"),
     threadOrganization: require("../plugins/agent-coord/scripts/agent_coord/web/organization.js"),
     threadViews: require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews,
+    WorkingSet,
     groupHeading: label => element("h2", label),
     threadCard: thread => Object.assign(element("button"), {dataset: {thread: thread.thread_id}}),
     renderStatus() {}, renderClosedToggle() {},
   };
   c.$("welcome"); c.$("view").value = "active"; c.$("group-by").value = "phase";
-  c.threadsInProject = threads => threads; // This fixture supplies one project’s inventory.
+  c.threadsInProject = threads => threads;
   vm.createContext(c);
-  vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("async function select(")), c);
-  c.board = () => c.$("overview").children.find(el => el.className === "phase-board");
+  vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("function conversationEntry(")), c);
   c.renderList();
   return c;
 }
 
-const cardIds = section => section.children.find(el => el.className === "thread-cards")
-  .children.map(card => card.dataset.cardThread);
-const attentionCards = c => {
-  const panel = c.$("overview").children.find(el => el.className === "attention-panel");
-  return panel ? cardIds(panel.children[0]) : [];
-};
 const sidebarAttentionIds = c => c.$("sessions").children
-  .find(el => el.className === "thread-group priority").children
-  .map(el => el.dataset.thread).filter(Boolean);
+  .find(el => el.className === "thread-group priority")?.children
+  .map(el => el.dataset.thread).filter(Boolean) || [];
 
-test("pinned replies appear once while attention badges and sidebar navigation remain available", () => {
+test("pinned replies appear once in List Pinned while attention badges and sidebar navigation remain available", () => {
   const c = overview();
   c.state.sessions = [thread("pin", {pinned: true}),
-    thread("pinned-reply", {pinned: true, response_state: "reply", needs_attention: true}),
-    thread("reply", {response_state: "reply", needs_attention: true})];
+    thread("pinned-reply", {pinned: true, response_state: "reply", unread_result: true, needs_attention: true, attention_since: 100}),
+    thread("reply", {response_state: "reply", unread_result: true, needs_attention: true, attention_since: 90})];
   for (const view of ["active", "attention"]) {
     c.$("view").value = view;
     c.renderList();
-    const sections = c.$("overview").children;
-    assert.equal(sections[0].dataset.group, "pinned");
-    assert.equal(sections[1].className, "attention-panel");
-    assert.deepEqual(cardIds(sections[0]), view === "active" ? ["pin", "pinned-reply"] : ["pinned-reply"]);
-    assert.deepEqual(attentionCards(c), ["reply"]);
+    assert.equal(c.$("overview").children.length, 0, "Cards overview board is retired");
+    const list = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+    assert.deepEqual(list.sections.pinned.map(t => t.thread_id), ["pinned-reply", "pin"]);
+    assert.deepEqual(list.sections.attention.map(t => t.thread_id), ["reply"]);
     assert.deepEqual(sidebarAttentionIds(c), ["pinned-reply", "reply"]);
     assert.match(c.$("results-count").textContent, view === "active" ? /^3 threads/ : /^2 threads/);
     assert.equal(c.threadViews.badges(c.state.sessions, {}).attention, 2);
@@ -65,60 +59,69 @@ test("pinned replies appear once while attention badges and sidebar navigation r
   }
   c.state.sessions.forEach(item => { item.pinned = false; });
   c.renderList();
-  assert.equal(c.$("overview").children[0].className, "attention-panel");
-  assert.deepEqual(attentionCards(c), ["pinned-reply", "reply"]);
+  const unpinnedList = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+  assert.deepEqual(unpinnedList.sections.pinned, []);
+  assert.deepEqual(unpinnedList.sections.attention.map(t => t.thread_id), ["pinned-reply", "reply"]);
 });
 
-test("Attention hides when all its cards are pinned without losing required actions", () => {
+test("List Attention hides pinned items into Pinned without losing sidebar attention or badges", () => {
   for (const response_state of ["input", "action", "failed", "reply"]) {
     const c = overview();
-    c.state.sessions = [thread("pinned", {pinned: true, response_state, needs_attention: true})];
+    c.state.sessions = [thread("pinned", {pinned: true, response_state, unread_result: true, needs_attention: true, attention_since: 100})];
     c.renderList();
-    assert.deepEqual(cardIds(c.$("overview").children[0]), ["pinned"]);
-    assert.ok(!c.$("overview").children.some(el => el.className === "attention-panel"));
-    assert.ok(c.board());
+    const list = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+    assert.deepEqual(list.sections.pinned.map(t => t.thread_id), ["pinned"]);
+    assert.deepEqual(list.sections.attention, []);
     assert.deepEqual(sidebarAttentionIds(c), ["pinned"]);
     assert.equal(c.threadViews.badges(c.state.sessions, {}).attention, 1);
     assert.equal(c.state.sessions[0].needs_attention, true);
   }
 });
 
-test("pinning removes stage and organization cards, preserves navigation, and unpinning restores them", () => {
-  for (const groupBy of ["phase", "project", "repository"]) {
-    for (const phase of ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"]) {
-      const c = overview();
-      c.$("group-by").value = groupBy;
-      c.state.sessions = [thread("pin", {pinned: true, work_phase: phase}), thread("other", {work_phase: phase})];
-      const boardCards = () => c.$("overview").children.find(el => el.className.endsWith("-board"))
-        .children.flatMap(cardIds).filter(Boolean);
-      const sidebarCards = () => c.$("sessions").children.flatMap(el => el.children)
-        .map(el => el.dataset.thread).filter(Boolean);
-      c.renderList();
-      assert.deepEqual(cardIds(c.$("overview").children[0]), ["pin"]);
-      assert.deepEqual(boardCards(), ["other"]);
-      assert.ok(sidebarCards().includes("pin"));
-      assert.match(c.$("results-count").textContent, /^2 threads/);
-      assert.equal(c.state.sessions[0].work_phase, phase);
-      c.state.sessions[0].pinned = false;
-      c.renderList();
-      assert.deepEqual(boardCards().sort(), ["other", "pin"]);
-    }
+test("pinning moves threads to List Pinned, preserves sidebar navigation, and unpinning restores them", () => {
+  for (const phase of ["new", "investigation", "planning", "orchestrating", "implementation", "validation", "deployment", "finished"]) {
+    const c = overview();
+    c.state.sessions = [thread("pin", {pinned: true, work_phase: phase, checkpoint: {id: 1}}),
+      thread("other", {work_phase: phase, checkpoint: {id: 2}})];
+    const sidebarCards = () => c.$("sessions").children.flatMap(el => el.children)
+      .map(el => el.dataset.thread).filter(Boolean);
+    c.renderList();
+    const pinnedList = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+    assert.deepEqual(pinnedList.sections.pinned.map(t => t.thread_id), ["pin"]);
+    assert.ok(sidebarCards().includes("pin"));
+    assert.match(c.$("results-count").textContent, /^2 threads/);
+    c.state.sessions[0].pinned = false;
+    c.renderList();
+    const restoredList = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+    assert.deepEqual(restoredList.sections.pinned, []);
+    assert.deepEqual(sidebarCards().sort(), ["other", "pin"]);
   }
 });
 
-test("a pinned Later thread stays in Attention when it is absent from Pinned", () => {
-  const c = overview();
-  c.state.sessions = [thread("now", {pinned: true, response_state: "reply", needs_attention: true}),
-    thread("later", {pinned: true, attention: "later", response_state: "reply", needs_attention: true})];
-  c.renderList();
-  assert.deepEqual(cardIds(c.$("overview").children[0]), ["now"]);
-  assert.deepEqual(attentionCards(c), ["later"]);
-});
 test("Pinned obeys search and placement filters; snoozed pins stay in Later", () => {
- const c=overview(); c.state.sessions=[thread("keep",{pinned:true}),thread("sleep",{pinned:true,attention:"later",snoozed:true})]; c.renderList();
- assert.equal(c.$("overview").children[0].children.find(e=>e.className==="thread-cards").children.length,1);
- c.$("search").value="missing"; c.renderList(); assert.ok(!c.$("overview").children.some(e=>e.dataset.group==="pinned"));
- c.$("search").value=""; c.$("view").value="later"; c.renderList();
- assert.equal(c.$("overview").children[0].dataset.group,"later");
- assert.match(c.$("results-count").textContent, /^1 thread/);
+  const c = overview();
+  c.state.sessions = [thread("keep", {pinned: true}), thread("sleep", {pinned: true, attention: "later", snoozed: true})];
+  c.renderList();
+  const list = WorkingSet.listSections(c.state.sessions, {now: 120, workspace: "/work"});
+  assert.deepEqual(list.sections.pinned.map(t => t.thread_id), ["keep"]);
+  c.$("search").value = "missing"; c.renderList();
+  assert.match(c.$("results-count").textContent, /^0 threads/);
+  c.$("search").value = ""; c.$("view").value = "later"; c.renderList();
+  assert.equal(c.$("sessions").children[0].dataset.group, "later");
+  assert.match(c.$("results-count").textContent, /^1 thread/);
+});
+
+test("sidebar attention order stays stakes-first with pins breaking ties within the same severity rank", () => {
+  const c = overview();
+  c.state.sessions = [
+    thread("done-newest", {response_state: "update", attention_reason: "done", needs_attention: true, attention_since: 500}),
+    thread("reply-unpinned", {response_state: "reply", attention_reason: "reply", needs_attention: true, attention_since: 400}),
+    thread("reply-pinned", {pinned: true, response_state: "reply", attention_reason: "reply", needs_attention: true, attention_since: 100}),
+    thread("review-item", {response_state: "action", attention_reason: "review", needs_attention: true, attention_since: 200}),
+    thread("blocked-oldest", {response_state: "failed", attention_reason: "blocked", needs_attention: true, attention_since: 50}),
+  ];
+  c.renderList();
+  assert.deepEqual(sidebarAttentionIds(c), [
+    "blocked-oldest", "review-item", "reply-pinned", "reply-unpinned", "done-newest",
+  ]);
 });

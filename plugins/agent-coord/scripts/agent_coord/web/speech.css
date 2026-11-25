@@ -1,18 +1,17 @@
-#speech-toggle[aria-pressed="true"] { color: var(--ink, #222); background: var(--tint, #eee); border-color: var(--line-strong, #ccc); }
-.speech-controls { padding: 18px 22px; border-bottom: 1px solid var(--line, #aaa); }
-#speech-toggle { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 44px; }
+#speech-toggle[aria-pressed="true"] { color: var(--ink); background: var(--tint); border-color: var(--line-strong); }
+.speech-controls { padding: var(--space-4) var(--space-6); border-bottom: 1px solid var(--line); }
+#speech-toggle { display: flex; align-items: center; justify-content: center; gap: var(--space-2); width: 100%; min-height: var(--hit-target); }
 #speech-toggle svg { flex-shrink: 0; }
-.mobile-thread-sheet .speech-controls { padding: 0 0 16px; }
-.speech-player { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; font-size: 13px; }
-.speech-player[hidden] { display: none; }
-.speech-player span { flex: 1; min-width: 120px; overflow-wrap: anywhere; }
-.speech-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: auto; border: 1px solid var(--line, #aaa); border-radius: 12px; background: var(--surface, #fff); color: var(--ink, #222); padding: 24px; }
-.speech-dialog::backdrop { background: #0006; }
+.mobile-thread-sheet .speech-controls { padding: 0 0 var(--space-4); }
+.speech-player { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-2) var(--space-4); font-size: var(--text-md); }
+.speech-player span { flex: 1; min-width: var(--table-col-md); overflow-wrap: anywhere; }
+.speech-dialog { box-sizing: border-box; width: min(var(--dialog-sm), calc(100vw - var(--space-8))); max-height: calc(100dvh - var(--space-8)); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); color: var(--ink); padding: var(--space-6); }
+.speech-dialog::backdrop { background: var(--backdrop); }
 .speech-dialog h2 { margin-top: 0; }
-.speech-dialog p { font-size: 14px; line-height: 1.5; }
-.speech-dialog label { display: grid; gap: 6px; margin: 14px 0; }
-.speech-dialog input, .speech-dialog select { width: 100%; min-height: 44px; box-sizing: border-box; }
-.speech-dialog footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
-.speech-dialog audio { display: block; width: 100%; margin-top: 12px; }
+.speech-dialog p { font-size: var(--text-base); line-height: var(--leading-normal); }
+.speech-dialog label { display: grid; gap: var(--space-1); margin: var(--space-3) 0; }
+.speech-dialog input, .speech-dialog select { width: 100%; min-height: var(--hit-target); box-sizing: border-box; }
+.speech-dialog footer { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
+.speech-dialog audio { display: block; width: 100%; margin-top: var(--space-3); }
 .speech-dialog a { text-decoration: underline; }
-@media (max-width: 700px) { .speech-player button { min-height: 44px; } }
+@media (max-width: 700px) { .speech-player button { min-height: var(--hit-target); } }

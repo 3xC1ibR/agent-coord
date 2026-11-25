@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
 from agent_coord.codex_app_server import BrowserSessions
@@ -26,6 +27,7 @@ class ThreadHandlingTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.now = 1000.0
         self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
+        self.addCleanup(self.store.close_idle_connections)
         self.store.register(session_id="terminal", client="codex", cwd=str(self.root))
         self.sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(self.sessions.close)
@@ -69,6 +71,150 @@ class ThreadHandlingTests(unittest.TestCase):
         self.assertTrue(read["needs_attention"])
         self.assertTrue(read["can_handle_response"])
         self.assertEqual(read["handled_completion_id"], 0)
+
+    def test_smart_auto_clear_handles_informational_replies_and_preserves_sticky_blockers(self):
+        from agent_coord import attention as attention_module
+        from agent_coord import stall_notifications
+
+        # 1. Informational reply / completed turn with no blockers auto-clears Attention.
+        info = self.result("info-turn", phase="investigation", actor="nobody", status="completed")
+        self.assertTrue(info["needs_attention"])
+        cleared = self.sessions.update_work_thread(
+            "terminal",
+            {
+                "seen": True,
+                "seen_checkpoint_id": info["checkpoint"]["id"],
+                "seen_completion_id": info["turn_completion"]["id"],
+                "auto_handle": True,
+            },
+        )
+        self.assertFalse(cleared["unread"])
+        self.assertFalse(cleared["needs_attention"])
+        self.assertEqual(cleared["handled_checkpoint_id"], info["checkpoint"]["id"])
+        self.assertEqual(cleared["handled_completion_id"], info["turn_completion"]["id"])
+
+        # Minimal receipt mode also reports auto_handled without projecting thread detail.
+        info2 = self.result("info-turn-2", phase="finished", actor="nobody", status="completed")
+        minimal = self.sessions.update_work_thread(
+            "terminal",
+            {
+                "seen": True,
+                "seen_checkpoint_id": info2["checkpoint"]["id"],
+                "seen_completion_id": info2["turn_completion"]["id"],
+                "auto_handle": True,
+            },
+            prefer_minimal=True,
+        )
+        self.assertEqual(minimal, {"seen": True, "auto_handled": True})
+        self.assertFalse(self.sessions.work_thread("terminal")["needs_attention"])
+
+        # 2. Checkpoint requiring user action stays in Attention.
+        needs_user = self.result("user-action-turn", phase="planning", actor="user", status="completed")
+        prev_handled_comp = needs_user["handled_completion_id"]
+        after_read = self.sessions.update_work_thread(
+            "terminal",
+            {
+                "seen": True,
+                "seen_checkpoint_id": needs_user["checkpoint"]["id"],
+                "seen_completion_id": needs_user["turn_completion"]["id"],
+                "auto_handle": True,
+            },
+        )
+        self.assertFalse(after_read["unread"])
+        self.assertTrue(after_read["needs_attention"])
+        self.assertEqual(after_read["handled_completion_id"], prev_handled_comp)
+        # Explicit Dismiss clears it.
+        self.assertFalse(self.sessions.update_work_thread("terminal", self.receipt(after_read))["needs_attention"])
+
+        # 3. Failed turn stays in Attention.
+        failed = self.result("failed-turn", phase="implementation", actor="nobody", status="failed")
+        prev_handled_comp = failed["handled_completion_id"]
+        read_failed = self.sessions.update_work_thread("terminal", {"seen": True, "auto_handle": True})
+        self.assertFalse(read_failed["unread"])
+        self.assertTrue(read_failed["needs_attention"])
+        self.assertEqual(read_failed["handled_completion_id"], prev_handled_comp)
+        self.sessions.update_work_thread("terminal", self.receipt(read_failed))
+
+        # 4. Open Ask stays in Attention until resolved.
+        with_ask = self.result("ask-turn", phase="implementation", actor="nobody", status="completed")
+        ask = self.store.asks.create("terminal", "Which region should we deploy to?", blocking=True)
+        prev_handled_comp = with_ask["handled_completion_id"]
+        read_ask = self.sessions.update_work_thread("terminal", {"seen": True, "auto_handle": True})
+        self.assertFalse(read_ask["unread"])
+        self.assertTrue(read_ask["needs_attention"])
+        self.assertEqual(read_ask["handled_completion_id"], prev_handled_comp)
+        self.store.asks.answer(ask["id"], answer="us-east-1")
+        cleared_after_ask = self.sessions.update_work_thread("terminal", {"seen": True, "auto_handle": True})
+        self.assertFalse(cleared_after_ask["needs_attention"])
+        self.assertEqual(cleared_after_ask["handled_completion_id"], with_ask["turn_completion"]["id"])
+
+        # 5. Response classification of 'review' or 'blocked' stays in Attention; 'findings' auto-clears.
+        for choice, should_clear in (("review", False), ("blocked", False), ("findings", True)):
+            with self.subTest(classification=choice):
+                turn_state = self.result(f"cls-{choice}", phase="validation", actor="nobody", status="completed")
+                prior_comp = turn_state["handled_completion_id"]
+                with self.store._connection() as db:
+                    db.execute(
+                        """INSERT OR REPLACE INTO response_classification_cache
+                           (completion_id, checkpoint_id, model, policy_version, status, choice, confidence, updated_at)
+                           VALUES (?, ?, ?, ?, 'classified', ?, 0.95, ?)""",
+                        (
+                            turn_state["turn_completion"]["id"],
+                            turn_state["checkpoint"]["id"],
+                            attention_module.MODEL,
+                            attention_module.POLICY_VERSION,
+                            choice,
+                            self.now,
+                        ),
+                    )
+                observed = self.sessions.update_work_thread("terminal", {"seen": True, "auto_handle": True})
+                self.assertFalse(observed["unread"])
+                if should_clear:
+                    self.assertFalse(observed["needs_attention"])
+                    self.assertEqual(observed["handled_completion_id"], turn_state["turn_completion"]["id"])
+                else:
+                    self.assertTrue(observed["needs_attention"])
+                    self.assertEqual(observed["handled_completion_id"], prior_comp)
+                    self.sessions.update_work_thread("terminal", self.receipt(observed))
+
+        # 6. Live pending provider approval and active stall incident prevent auto-clear.
+        browser_id = self.sessions.create({})["session"]["thread_id"]
+        self.sessions.rpc.fast_turn = True
+        self.sessions.send(browser_id, {"message": "Run checks."})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=browser_id))
+        before_approval = self.sessions.work_thread(browser_id)
+        self.sessions._event(
+            {"id": 99, "method": "item/commandExecution/requestApproval", "params": {"threadId": browser_id}}
+        )
+        blocked_live = self.sessions.update_work_thread(browser_id, {"seen": True, "auto_handle": True})
+        self.assertTrue(blocked_live["needs_attention"])
+        self.assertEqual(blocked_live["handled_completion_id"], 0)
+        self.sessions.requests.clear()
+        cleared_browser = self.sessions.update_work_thread(browser_id, {"seen": True, "auto_handle": True})
+        self.assertEqual(cleared_browser["handled_completion_id"], before_approval["turn_completion"]["id"])
+
+        # Active stall incident on a running turn prevents auto-handle.
+        self.now += 10
+        self.store.threads.start_turn("terminal", prompt="Long work", turn_id="stall-turn")
+        stall_notifications.record_stall(
+            self.store,
+            "terminal",
+            "stall-turn",
+            progress_at=self.now - 1200,
+            detail="No output",
+            classification="stalled",
+        )
+        self.assertEqual(
+            self.sessions.update_work_thread("terminal", {"seen": True, "auto_handle": True}, prefer_minimal=True),
+            {"seen": True, "auto_handled": False},
+        )
+
+        # Validation rejects invalid auto_handle shapes without mutating state.
+        snapshot = self.sessions.work_thread("terminal")
+        for bad in ({"auto_handle": True}, {"seen": False, "auto_handle": True}, {"seen": True, "auto_handle": "yes"}):
+            with self.subTest(bad=bad), self.assertRaises(CoordinationError):
+                self.sessions.update_work_thread("terminal", {**bad, "title": "Should not apply"})
+            self.assertEqual(self.sessions.work_thread("terminal")["title"], snapshot["title"])
 
     def test_delayed_and_duplicate_receipts_never_handle_a_newer_response(self):
         first = self.result()

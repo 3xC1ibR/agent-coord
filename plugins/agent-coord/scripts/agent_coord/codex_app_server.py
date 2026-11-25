@@ -53,7 +53,12 @@ from .organization import OrganizationStore, app_agent_creators, describe_creato
 from . import notification_policy
 from .session_close import is_external_codex_session, stop_terminal_session, verify_terminal_handoff
 from .session_defaults import session_defaults
-from .workspaces import matches_workspace, workspace_choices
+from .workspaces import (
+    matches_any_workspace,
+    matches_workspace,
+    thread_in_workspace,
+    workspace_choices,
+)
 from .activity_api import activity_context, record_accepted
 
 
@@ -367,6 +372,8 @@ class BrowserSessions:
         self.rpc_factory = rpc_factory
         self.permission_catalogs = {}
         self.permission_effective = {}
+        self.extra_workspaces: set[str] = set()
+        self.model_catalogs: dict[str, list[dict]] = {}
         from .execution_state import RuntimeExecution
         self.execution = RuntimeExecution(self)
         self.closed = False
@@ -483,17 +490,51 @@ class BrowserSessions:
         with self.lock:
             return self.thread_locks.setdefault(thread_id, threading.RLock())
 
+    def allow_workspace(self, path: str) -> None:
+        """Allow cross-repo access to an explicitly registered repository root."""
+        resolved = str(Path(path).expanduser().resolve())
+        with self.lock:
+            extras = getattr(self, "extra_workspaces", None)
+            if extras is None:
+                extras = self.extra_workspaces = set()
+            extras.add(resolved)
+            ws_cache = getattr(self, "_verified_workspaces", None)
+            if ws_cache is not None:
+                ws_cache.clear()
+        self.inventory_changed()
+
+    def allows_workspace(self, cwd: str) -> bool:
+        return matches_any_workspace(cwd, self.cwd, getattr(self, "extra_workspaces", ()))
+
+    def allows_thread(self, thread_id: str, *, cwd: str | None = None, project_cwd: str | None = None) -> bool:
+        return thread_in_workspace(
+            self.store,
+            thread_id,
+            self.cwd,
+            cwd=cwd,
+            project_cwd=project_cwd,
+            extra_workspaces=getattr(self, "extra_workspaces", ()),
+        )
+
+    def _message_timeline(self, thread_id: str, thread_cwd: str) -> list[dict]:
+        return message_timeline(
+            self.store,
+            thread_id,
+            self.cwd if matches_workspace(thread_cwd, self.cwd) else None,
+        )
+
     def _record_from_row(self, thread_id: str, row) -> dict:
         if row is None:
             raise CoordinationError("Browser session not found in this workspace.")
         ws_cache = getattr(self, "_verified_workspaces", None)
         if ws_cache is None:
             ws_cache = self._verified_workspaces = set()
-        ws_key = (row["cwd"], self.cwd)
+        ws_key = (row["cwd"], self.cwd, tuple(sorted(getattr(self, "extra_workspaces", ()))))
         if ws_key not in ws_cache:
-            if not matches_workspace(row["cwd"], self.cwd):
+            if self.allows_workspace(row["cwd"]):
+                ws_cache.add(ws_key)
+            elif not self.allows_thread(thread_id, cwd=row["cwd"]):
                 raise CoordinationError("Browser session not found in this workspace.")
-            ws_cache.add(ws_key)
         record = dict(row)
         record["permission_mode"] = selected_mode(record)
         cached = self.permission_catalogs.get((record["client"], record["cwd"]))
@@ -516,7 +557,7 @@ class BrowserSessions:
     def permission_modes(self, client: str = "codex", cwd: str | None = None) -> list[dict]:
         provider = self._provider(client)
         cwd = str(Path(cwd or self.cwd or os.getcwd()).expanduser().resolve())
-        if not Path(cwd).is_dir() or not matches_workspace(cwd, self.cwd):
+        if not Path(cwd).is_dir() or not self.allows_workspace(cwd):
             raise CoordinationError("Choose an existing directory within this UI's workspace.")
         key = (client, cwd)
         with self.lock:
@@ -553,7 +594,7 @@ class BrowserSessions:
             session = db.execute("SELECT cwd, client FROM sessions WHERE session_id=?", (thread_id,)).fetchone()
         if session is None:
             raise CoordinationError(f"Session {thread_id} is not registered.")
-        if not matches_workspace(session["cwd"], self.cwd):
+        if not self.allows_thread(thread_id, cwd=session["cwd"]):
             raise CoordinationError("Session not found in this workspace.")
         return self._provider(session["client"])
 
@@ -1509,7 +1550,7 @@ class BrowserSessions:
     def completions_after(self, sequence: int) -> dict:
         batch = self.store.threads.completions_after(sequence)
         batch["events"] = [event for event in batch["events"]
-                           if event["attention"] != "archived" and matches_workspace(event["cwd"], self.cwd)
+                           if event["attention"] != "archived" and self.allows_thread(event["thread_id"], cwd=event["cwd"])
                            and not (event["snoozed_until"] and event["snoozed_until"] > self.store.clock())
                            and self.completion_notification_allowed(event["id"])]
         self.label_app_agents(batch["events"])
@@ -1559,7 +1600,7 @@ class BrowserSessions:
 
     def snooze_notifications(self, *, include_claimed: bool = False) -> list[dict]:
         return [event for event in self.store.threads.snooze_notifications(include_claimed=include_claimed)
-                if matches_workspace(event["cwd"], self.cwd)]
+                if self.allows_thread(event["thread_id"], cwd=event["cwd"])]
 
     def claim_snooze_notification(self, notification_id: int) -> bool:
         if type(notification_id) is not int or notification_id <= 0:
@@ -1600,7 +1641,7 @@ class BrowserSessions:
             ).fetchall()
             labels = {}
             for row in rows:
-                if matches_workspace(row["browser_cwd"], self.cwd):
+                if self.allows_thread(row["thread_id"], cwd=row["browser_cwd"]):
                     association = (row if row["organized"] is not None else
                                    OrganizationStore.projected_association(db, row["thread_id"], row["cwd"]))
                     labels[row["thread_id"]] = {"thread_id": row["thread_id"], "client": row["client"],
@@ -1634,7 +1675,7 @@ class BrowserSessions:
                 thread = self.store.threads.get(ask["session_id"], history=False)
             except CoordinationError:
                 continue
-            if thread["attention"] != "archived" and not thread["snoozed"] and matches_workspace(thread["cwd"], self.cwd):
+            if thread["attention"] != "archived" and not thread["snoozed"] and self.allows_thread(ask["session_id"], cwd=thread["cwd"], project_cwd=thread.get("project_cwd")):
                 notifications.append({"request_key": "ask:" + str(ask["id"]), "thread_id": ask["session_id"],
                                       "status": "question", "client": thread["client"], "title": thread["title"],
                                       "project_name": thread["project_name"], "repository_name": thread["repository_name"]})
@@ -1675,7 +1716,12 @@ class BrowserSessions:
             known = [row[0] for row in connection.execute(
                 "SELECT DISTINCT cwd FROM sessions UNION SELECT root FROM work_projects"
             )]
-        return workspace_choices(self.cwd or os.getcwd(), known, workspace=self.cwd)
+        return workspace_choices(
+            self.cwd or os.getcwd(),
+            known,
+            workspace=self.cwd,
+            extra_workspaces=getattr(self, "extra_workspaces", ()),
+        )
 
     def desktop_projects(self) -> dict:
         """Return the live union of project tabs reported by native windows."""
@@ -1722,10 +1768,11 @@ class BrowserSessions:
             ).fetchall()
         with self.lock:
             waiting = {r["params"].get("threadId") for r in self.requests.values()}
-            return [{**dict(row), "status": "needs input" if row["thread_id"] in waiting else
-                     "running" if row["thread_id"] in self.active else
-                     "idle" if row["thread_id"] in self.loaded else "saved"}
-                    for row in rows if matches_workspace(row["cwd"], self.cwd)]
+            snapshot = [{**dict(row), "status": "needs input" if row["thread_id"] in waiting else
+                         "running" if row["thread_id"] in self.active else
+                         "idle" if row["thread_id"] in self.loaded else "saved"}
+                        for row in rows]
+        return [item for item in snapshot if self.allows_thread(item["thread_id"], cwd=item["cwd"])]
 
     def pending_requests(self, thread_id: str) -> list[dict]:
         self._record(thread_id)
@@ -1754,7 +1801,7 @@ class BrowserSessions:
                 creators = app_agent_creators(connection)
         else:
             creators = app_agent_creators(db)
-        describe_creators(creators, lambda cwd: matches_workspace(cwd, self.cwd))
+        describe_creators(creators, self.allows_workspace)
         with self.inventory_lock:
             self.creators_cache = (generation, time.monotonic(), creators)
         return creators
@@ -1802,7 +1849,7 @@ class BrowserSessions:
     def work_thread(self, thread_id: str, *, history=True, _creators=None, _inventory=None, _runtime=None) -> dict:
         thread = (self.store.threads.get(thread_id, history=history) if _inventory is None
                   else _inventory.projected[thread_id])
-        if not matches_workspace(thread["cwd"], self.cwd):
+        if _inventory is None and not self.allows_thread(thread_id, cwd=thread["cwd"], project_cwd=thread.get("project_cwd")):
             raise CoordinationError("Work thread not found in this workspace.")
         creators = self._app_agent_creators(shared=True) if _creators is None else _creators
         thread["created_by"] = creators.get(thread_id)
@@ -1976,8 +2023,9 @@ class BrowserSessions:
         if history:
             usage = self.store.usage.summary(thread_id)
             # Detail-only, bounded, no-model recovery. Durable notes prevent
-            # repeated failed scans after restart; overview never reads logs.
-            if usage["observed_at"] is None and thread_id not in self.usage_recovery_attempts:
+            # repeated failed scans after restart; overview and read-only scopes never read logs.
+            reading_only = self.store.read_only or getattr(self.store._connection_options, "reading", False)
+            if usage["observed_at"] is None and not reading_only and thread_id not in self.usage_recovery_attempts:
                 self.usage_recovery_attempts.add(thread_id)
                 try:
                     usage = self.store.usage.backfill(thread_id)
@@ -2004,8 +2052,20 @@ class BrowserSessions:
             inventory.creators = self._app_agent_creators(db=db)
             from .supervision import relations
             inventory.supervision = relations(db)
+            allowed_groups = set()
+            if self.cwd is not None and has_table(db, "named_projects"):
+                allowed_groups = {
+                    g["id"]
+                    for g in db.execute("SELECT id, cwd FROM named_projects")
+                    if g["cwd"] is None or self.allows_workspace(g["cwd"])
+                }
+            def _inventory_row_allowed(row):
+                if self.cwd is None or self.allows_workspace(row["cwd"]):
+                    return True
+                assoc = inventory.associations.get(row["thread_id"])
+                return bool(assoc and assoc["project_id"] in allowed_groups)
             inventory.projected = {row["thread_id"]: inventory.read(db, row) for row in inventory.rows
-                                   if row["thread_id"] not in inventory.delegated and matches_workspace(row["cwd"], self.cwd)}
+                                   if row["thread_id"] not in inventory.delegated and _inventory_row_allowed(row)}
         # One consistent snapshot for the entire list. Taking the shared provider
         # lock for every card can make a single list wait for hundreds of checkpoints.
         with self.lock:
@@ -2022,10 +2082,18 @@ class BrowserSessions:
     def update_work_thread(self, thread_id: str, body: dict, *, prefer_minimal=False) -> dict:
         with self._thread_lock(thread_id):
             before = self.store.threads.get(thread_id)
-            if not matches_workspace(before["cwd"], self.cwd):
+            allowed = self.allows_thread(thread_id, cwd=before["cwd"], project_cwd=before.get("project_cwd"))
+            if not allowed and isinstance(body.get("project_id"), str):
+                with self.store.reading(), self.store._connection() as db:
+                    group = db.execute("SELECT cwd FROM named_projects WHERE id = ?", (body["project_id"],)).fetchone()
+                allowed = bool(group is not None and (group["cwd"] is None or self.allows_workspace(group["cwd"])))
+            if not allowed:
                 raise CoordinationError("Work thread not found in this workspace.")
-            minimal_receipt = (prefer_minimal and body.get("seen") is True
-                               and body.keys() == {"seen", "seen_checkpoint_id", "seen_completion_id"})
+            minimal_receipt = (
+                prefer_minimal
+                and body.get("seen") is True
+                and set(body).issubset({"seen", "seen_checkpoint_id", "seen_completion_id", "auto_handle"})
+            )
             result = self._update_work_thread(thread_id, body, minimal_receipt=minimal_receipt)
             changed = {key: {"before": before.get(key), "after": result.get(key)}
                        for key in ("domain", "project_id", "repository_id")
@@ -2039,7 +2107,7 @@ class BrowserSessions:
 
     def _update_work_thread(self, thread_id: str, body: dict, *, minimal_receipt: bool) -> dict:
         if set(body) - {"attention", "title", "domain", "pinned", "quiet", "seen", "seen_checkpoint_id", "seen_completion_id",
-                        "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
+                        "auto_handle", "handled", "handled_checkpoint_id", "handled_completion_id", "repository_id", "project_id",
                         "snoozed_until", "resume_snooze"}:
             raise CoordinationError("Thread update accepts attention, title, domain, pinned, quiet, read and handled markers, snoozed_until, resume_snooze, repository_id, and project_id.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
@@ -2048,6 +2116,10 @@ class BrowserSessions:
             raise CoordinationError("Attention must be now, later, or archived.")
         if "seen" in body and not isinstance(body["seen"], bool):
             raise CoordinationError("Seen must be true or false.")
+        if "auto_handle" in body and not isinstance(body["auto_handle"], bool):
+            raise CoordinationError("Auto-handle must be true or false.")
+        if body.get("auto_handle") and not body.get("seen"):
+            raise CoordinationError("Auto-handle requires seen: true.")
         if "handled" in body and not isinstance(body["handled"], bool):
             raise CoordinationError("Handled must be true or false.")
         # Only handling and placement depend on the provider's current state.
@@ -2067,13 +2139,33 @@ class BrowserSessions:
             raise BrowserBusyError("Stop the running turn before archiving this thread.")
         if body.get("attention") in {"now", "later"} and thread["browser_session"] and self._record(thread_id)["archived"]:
             self.update(thread_id, {"archived": False})
-        self.store.threads.update(thread_id, return_thread=False, title=body.get("title"), attention=body.get("attention"), seen=body.get("seen", False),
-                                  seen_checkpoint_id=body.get("seen_checkpoint_id"), seen_completion_id=body.get("seen_completion_id"),
-                                  handled=body.get("handled", False), handled_checkpoint_id=body.get("handled_checkpoint_id"),
-                                  handled_completion_id=body.get("handled_completion_id"),
-                                  **({"domain": body["domain"]} if "domain" in body else {}),
-                                  **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
-                                  **{key: body[key] for key in ("pinned", "quiet") if key in body}, **associations)
+        live_blocked = False
+        if body.get("auto_handle"):
+            with self.lock:
+                waiting_here = any(r["params"].get("threadId") == thread_id for r in self.requests.values())
+                active_here = thread_id in self.active
+                health = self.watchdog.snapshot(thread_id) if hasattr(self, "watchdog") else None
+            live_blocked = bool(waiting_here or active_here or (health and health.get("state") == "stalled"))
+        out_receipt: dict[str, Any] = {}
+        self.store.threads.update(
+            thread_id,
+            return_thread=False,
+            title=body.get("title"),
+            attention=body.get("attention"),
+            seen=body.get("seen", False),
+            seen_checkpoint_id=body.get("seen_checkpoint_id"),
+            seen_completion_id=body.get("seen_completion_id"),
+            auto_handle=body.get("auto_handle", False),
+            handled=body.get("handled", False),
+            handled_checkpoint_id=body.get("handled_checkpoint_id"),
+            handled_completion_id=body.get("handled_completion_id"),
+            _live_blocked=live_blocked,
+            out_receipt=out_receipt,
+            **({"domain": body["domain"]} if "domain" in body else {}),
+            **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
+            **{key: body[key] for key in ("pinned", "quiet") if key in body},
+            **associations,
+        )
         if "title" in body or "domain" in body:
             updated_meta = self.store.threads.get(thread_id, history=False)
             self.store.search_store.enqueue_metadata(
@@ -2083,7 +2175,9 @@ class BrowserSessions:
                 body=updated_meta.get("original_request") or "",
             )
         self._publish("browser/changed", {"threadId": thread_id})
-        return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
+        if minimal_receipt:
+            return {"seen": True, "auto_handled": bool(out_receipt.get("auto_handled"))} if "auto_handle" in body else {"seen": True}
+        return self.work_thread(thread_id)
 
     def close_work_thread(self, thread_id: str, *, stop_timeout: float = 10) -> dict:
         """Stop owned execution, or hide an externally owned conversation.
@@ -2325,7 +2419,27 @@ class BrowserSessions:
             models.extend(result["data"])
             cursor = result.get("nextCursor")
             if not cursor:
+                with self.lock:
+                    self.model_catalogs[client] = copy.deepcopy(models)
                 return models
+
+    def cached_models(self, client: str = "codex") -> list[dict] | None:
+        """Return already-loaded model metadata from memory without spawning or calling a provider."""
+        try:
+            provider = self._provider(client)
+        except CoordinationError:
+            return None
+        with self.lock:
+            cached = self.model_catalogs.get(client)
+            if cached is not None:
+                return copy.deepcopy(cached)
+        provider_catalog = getattr(provider, "catalog", None)
+        if isinstance(provider_catalog, list) and provider_catalog:
+            copied = copy.deepcopy(provider_catalog)
+            with self.lock:
+                self.model_catalogs[client] = copy.deepcopy(copied)
+            return copied
+        return None
 
     def _options(self, record: dict) -> dict:
         options: dict = {
@@ -2470,7 +2584,7 @@ class BrowserSessions:
                 raise ValueError("Empty or invalid directory.")
             path = Path(argument).expanduser()
             directory = str((Path(record["cwd"]) / path).resolve())
-            valid = Path(directory).is_dir() and matches_workspace(directory, self.cwd)
+            valid = Path(directory).is_dir() and self.allows_workspace(directory)
         except (OSError, RuntimeError, ValueError) as exc:
             raise CoordinationError("Use /cd <directory>, with matching quotes around quoted paths.") from exc
         if not valid:
@@ -2557,13 +2671,15 @@ class BrowserSessions:
         return {"command": {"name": command, "message": reply}, "session": self._record(thread_id)}
 
     def _creation_settings(self, body: dict) -> tuple[dict, dict]:
+        if "quiet" in body and not isinstance(body["quiet"], bool):
+            raise CoordinationError("Quiet must be true or false.")
         associations = {key: body[key] for key in ("repository_id", "project_id") if key in body}
         self.store.threads.organization.validate_assignments(**associations)
         cwd = body.get("cwd") or self.cwd or os.getcwd()
         if not isinstance(cwd, str):
             raise CoordinationError("Choose a workspace directory.")
         repository = str(Path(cwd).expanduser().resolve())
-        if not Path(repository).is_dir() or not matches_workspace(repository, self.cwd):
+        if not Path(repository).is_dir() or not self.allows_workspace(repository):
             raise CoordinationError("Choose an existing directory within this UI's workspace.")
         name = body.get("name") or "New session"
         self._text(name, "Session name", 160)
@@ -2617,7 +2733,11 @@ class BrowserSessions:
             except sqlite3.Error:
                 logging.getLogger(__name__).warning("Could not remove incomplete browser session %s", thread_id)
             raise
-        self.store.threads.update(thread_id, **associations)
+        self.store.threads.update(
+            thread_id,
+            **associations,
+            **({"quiet": True} if body.get("quiet") is True else {}),
+        )
         self._remember_thread(result["thread"])
         with self.lock:
             self.loaded.add(thread_id)
@@ -2704,7 +2824,7 @@ class BrowserSessions:
             return {"session": record, "thread": thread, "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
                     "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                     "activeTurn": active_turn, "running": running,
-                    "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                    "coordinationMessages": self._message_timeline(thread_id, record["cwd"]),
                     "dispatchRequests": self.dispatch.receipts(thread_id),
                     "dispatchSettings": self.dispatch.settings(thread_id),
                     "reviews": self.reviews.list(thread_id),
@@ -2755,7 +2875,7 @@ class BrowserSessions:
             thread = recent_view(thread, before_seq=before_seq, limit=limit)
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": self._message_timeline(thread_id, work_thread["cwd"]),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
     def _read_snapshot(
@@ -2867,10 +2987,148 @@ class BrowserSessions:
                 "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
                 "work_thread": work_thread, "requests": self._public_requests(waiting.values()),
                 "activeTurn": active_turn, "running": running,
-                "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
+                "coordinationMessages": self._message_timeline(thread_id, record["cwd"]),
                 "dispatchRequests": self.dispatch.receipts(thread_id),
                 "dispatchSettings": self.dispatch.settings(thread_id),
                 "reviews": self.reviews.list(thread_id), "queuedMessages": self.queue.list(thread_id)}
+
+    def _read_sidecars_snapshot(self, db, thread_id: str, *, is_browser_session: bool) -> dict:
+        """Project sidecar watches and pending requests inside a query-only scope without DB mutation."""
+        if not is_browser_session:
+            return {"watches": [], "requests": []}
+        watches = []
+        if has_table(db, "sidecar_watches"):
+            rows = db.execute(
+                "SELECT * FROM sidecar_watches WHERE target_id = ? OR sidecar_id = ? ORDER BY created_at DESC",
+                (thread_id, thread_id),
+            ).fetchall()
+            watches = [self.sidecars.watches.describe(db, dict(row)) for row in rows]
+        requests = []
+        if has_table(db, "app_control_requests"):
+            from .app_control import LEASE_SECONDS
+            cutoff = self.store.clock() - LEASE_SECONDS
+            has_runtimes = has_table(db, "app_control_runtimes")
+            has_index = bool(
+                db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='index' AND name='app_control_sidecar_requests'"
+                ).fetchone()
+            )
+            indexed = " INDEXED BY app_control_sidecar_requests" if has_index else ""
+            req_rows = db.execute(
+                f"""SELECT * FROM app_control_requests{indexed}
+                    WHERE operation = 'sidecar' AND status NOT IN ('completed', 'cancelled')
+                      AND json_extract(payload_json, '$.target_id') = ?""",
+                (thread_id,),
+            ).fetchall()
+            for row in req_rows:
+                status = row["status"]
+                error = row["error"]
+                if status == "running" and row["updated_at"] < cutoff:
+                    alive = (
+                        db.execute(
+                            "SELECT 1 FROM app_control_runtimes WHERE id = ? AND heartbeat >= ?",
+                            (row["owner"], cutoff),
+                        ).fetchone()
+                        if has_runtimes
+                        else None
+                    )
+                    if not alive:
+                        status = "uncertain"
+                        error = (
+                            "The app runtime stopped before confirming the result. "
+                            "Inspect the conversation before retrying."
+                        )
+                elif status == "queued_sidecar":
+                    status = "queued"
+                item = {
+                    "request_id": row["request_id"],
+                    "operation": row["operation"],
+                    "status": status,
+                    "thread_id": row["thread_id"],
+                    "error": error,
+                    "result": json.loads(row["result_json"]) if row["result_json"] else None,
+                }
+                if status == "queued":
+                    item["message"] = (
+                        "Queued for Ribbon Field. The app must be running in this workspace; "
+                        "settings and project moves wait for idle."
+                    )
+                requests.append(item)
+        return {"watches": watches, "requests": requests}
+
+    def open_conversation(
+        self,
+        thread_id: str,
+        *,
+        recent: bool = True,
+        before_seq: int | None = None,
+        limit: int = RECENT_TURNS,
+    ) -> dict:
+        """Composite read-only conversation open payload without provider process resumes or DB writes."""
+        from .agent_tree import family_parents, project_family
+        from .supervision import overrides as supervision_overrides
+        from .thread_control import ThreadControl
+
+        with self.store.reading():
+            is_browser = self.store.threads.is_browser_session(thread_id)
+            if is_browser:
+                detail = self._read_snapshot(
+                    thread_id,
+                    recent=recent or before_seq is not None,
+                    before_seq=before_seq,
+                    limit=limit,
+                )
+            else:
+                work = self.work_thread(thread_id)
+                windowed = recent or before_seq is not None
+                saved = read_history(
+                    self.store,
+                    thread_id,
+                    windows=self.saved_history_windows if windowed else None,
+                    before_seq=before_seq,
+                    limit=limit,
+                )
+                if saved is None:
+                    thread_payload = {"id": thread_id, "turns": [], "historyUnavailable": True}
+                    if windowed:
+                        thread_payload = recent_view(thread_payload, before_seq=before_seq, limit=limit)
+                else:
+                    thread_payload = saved
+                detail = {
+                    "session": {"thread_id": thread_id, "cwd": work["cwd"], "client": work["client"]},
+                    "thread": thread_payload,
+                    "work_thread": work,
+                    "requests": [],
+                    "running": False,
+                    "activeTurn": None,
+                    "coordinationMessages": self._message_timeline(thread_id, work["cwd"]),
+                    "dispatchRequests": [],
+                    "reviews": [],
+                    "queuedMessages": [],
+                }
+            work = detail["work_thread"]
+            close_status = ThreadControl(self.store).status(work["thread_id"])
+            work["close_when_done"] = close_status
+            detail["close_when_done"] = close_status
+            detail["recent_turns"] = detail["thread"].get("turns", [])
+            detail["asks"] = self.store.asks.overview(status="open")
+            creators = self._app_agent_creators(shared=True)
+            selected_card = {
+                k: v for k, v in work.items() if k not in {"checkpoints", "usage", "children", "close_when_done"}
+            }
+            with self.store._connection() as db:
+                parents = family_parents(db, creators, supervision_overrides(db))
+                sidecars = self._read_sidecars_snapshot(db, thread_id, is_browser_session=is_browser)
+            detail["agent_tree"] = project_family(
+                selected_card,
+                parents,
+                lambda ident: self.work_thread(ident, history=False, _creators=creators),
+            )
+            detail["sidecars"] = sidecars
+            detail["schedules"] = self.schedules.list()
+            client = detail["session"].get("client") or work.get("client") or "codex"
+            detail["models"] = self.cached_models(client) if is_browser else None
+            return detail
 
     def _schedule_saved_completion(self, thread_id, history, work_thread, revision):
         """Recover a proven terminal outcome after a crash, outside the read."""
@@ -2949,15 +3207,22 @@ class BrowserSessions:
 
     def submit(self, thread_id: str, body: dict, *, queued=False, transfer=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
+        if "quiet" in body and not isinstance(body["quiet"], bool):
+            raise CoordinationError("Quiet must be true or false.")
+        mark_quiet = body.get("quiet") is True
         context = activity_context(body)
         request_id = body.get("requestId")
         event_id = ("request:" + str(uuid.uuid5(uuid.NAMESPACE_URL, thread_id + ":" + request_id))
                     if request_id else None)
         activity_recorded = False
+        quiet_recorded = False
 
         def record_inline_activity(db, res):
-            nonlocal activity_recorded
+            nonlocal activity_recorded, quiet_recorded
             cmd = res.get("command")
+            if mark_quiet and not cmd:
+                db.execute("UPDATE work_threads SET quiet = 1 WHERE thread_id = ? AND quiet = 0", (thread_id,))
+                quiet_recorded = True
             t_id = res.get("turnId") or (res.get("turn") or {}).get("id")
             record_accepted(
                 self.store,
@@ -2988,6 +3253,9 @@ class BrowserSessions:
                 )
             else:
                 result = self._submit(thread_id, body, queued=queued, on_complete_db=record_inline_activity)
+        if mark_quiet and not quiet_recorded and not result.get("command"):
+            self.store.threads.update(thread_id, quiet=True, return_thread=False)
+            self._publish("browser/changed", {"threadId": thread_id})
         if result.get("acceptedMessage"):
             # Only a committed completed receipt proves provider acceptance.
             # Replayed receipts retain their identity; windows reconcile them once.
@@ -3070,6 +3338,9 @@ class BrowserSessions:
               coordination_delivery=None, accepted_input=None) -> dict:
         # A new user turn must not overtake deferred completion/disconnect
         # bookkeeping and then be overwritten by that older state.
+        if "quiet" in body and not isinstance(body["quiet"], bool):
+            raise CoordinationError("Quiet must be true or false.")
+        mark_quiet = body.get("quiet") is True
         with self.store._writer.measure_request("send.persistence_barrier"):
             ordinary_input = not (automatic or recovery or start_only or coordination_delivery or completed_turn_id)
             self._await_persistence(thread_id, before_input=ordinary_input)
@@ -3269,6 +3540,7 @@ class BrowserSessions:
                     user_input=True,
                     publish_changed=True,
                     active_steer_clean=(thread_attention == "now" and not thread_snoozed and not wake_dirty),
+                    quiet=mark_quiet,
                 )
                 if (
                     owned
@@ -3350,7 +3622,7 @@ class BrowserSessions:
             # Some app-server versions omit input items from turn/started.
             self._record_accepted_input(thread_id, result["turn"]["id"], context, user_input=not automatic and not recovery,
                                         original_request=message or "\n".join("[Image]" for _ in images),
-                                        publish_changed=True)
+                                        publish_changed=True, quiet=mark_quiet)
             if accepted_input is not None:
                 accepted_input["turnId"] = result["turn"]["id"]
             return result
@@ -3365,8 +3637,11 @@ class BrowserSessions:
         user_input,
         original_request=None,
         active_steer_clean=False,
+        quiet=False,
     ):
         from .desktop_runtime import _OWNED_DATABASES
+        if quiet:
+            db.execute("UPDATE work_threads SET quiet = 1 WHERE thread_id = ? AND quiet = 0", (thread_id,))
         owned = self.store._database_identity in _OWNED_DATABASES
         recorded_turns = getattr(self, "_recorded_user_turns", None)
         if recorded_turns is None:
@@ -3429,6 +3704,7 @@ class BrowserSessions:
         original_request=None,
         publish_changed=False,
         active_steer_clean=False,
+        quiet=False,
     ):
         # These state changes all describe the same provider acknowledgement.
         # Commit them together before publishing browser/changed.
@@ -3442,6 +3718,7 @@ class BrowserSessions:
                 user_input=user_input,
                 original_request=original_request,
                 active_steer_clean=active_steer_clean,
+                quiet=quiet,
             ),
             after_commit=after,
         ):
@@ -3457,6 +3734,7 @@ class BrowserSessions:
                 user_input=user_input,
                 original_request=original_request,
                 active_steer_clean=active_steer_clean,
+                quiet=quiet,
             )
         if after is not None:
             after()

@@ -156,13 +156,18 @@ class DesktopPackagingTests(unittest.TestCase):
                 if relative not in {"agent_coord/web/index.html", "agent_coord/web/app.js", "agent_coord/web/styles.css"}:
                     self.assertEqual(data, (build.SCRIPTS / relative).read_bytes())
             web = root / "backend/agent_coord/web"
-            index, application = (web / "index.html").read_text(), (web / "app.js").read_text()
+            index = (web / "index.html").read_text()
+            manifest = json.loads((web / "dist/manifest.json").read_text())
+            self.assertIn('/dist/app.js', index)
+            self.assertIn('/dist/app.css', index)
+            self.assertTrue((web / "dist/app.js").is_file())
+            self.assertTrue((web / "dist/app.css").is_file())
             for name in ("html-preview.js", "response-actions.js", "permission-menu.js"):
                 self.assertNotIn(f'src="/{name}"', index)
                 self.assertNotIn(f'href="/{name}"', index)
-                self.assertIn((build.SCRIPTS / "agent_coord/web" / name).read_text(), application)
+                self.assertIn(name, manifest["js_order"])
             self.assertNotIn('href="/html-preview.css"', index)
-            self.assertIn((build.SCRIPTS / "agent_coord/web/html-preview.css").read_text(), (web / "styles.css").read_text())
+            self.assertIn("html-preview.css", manifest["css_order"])
 
     def test_packaged_kimi_hook_runs_and_prompt_guidance_exists(self):
         for standalone in (False, True):

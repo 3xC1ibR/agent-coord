@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 PLUGIN_SCRIPTS = Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.managed_pty import output_log_path
@@ -120,6 +121,7 @@ class OperatorUITests(unittest.TestCase):
         self.store = CoordinationStore(
             self.root / "state.sqlite3", clock=lambda: self.now
         )
+        self.addCleanup(self.store.close_idle_connections)
         self.store.register(
             session_id="parent", client="codex", cwd=str(self.root), name="release"
         )
@@ -427,6 +429,7 @@ class BrowserHTTPTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+        self.store.close_idle_connections()
 
     def test_minimal_read_receipt_validates_cursors_without_projecting_thread_detail(self):
         thread = self.sessions.create({})["session"]["thread_id"]
@@ -805,19 +808,20 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("New session", shell)
         self.assertEqual(self.request("/app.js")[0], 200)
+        self.assertEqual(self.request("/dist/app.js")[0], 200)
+        self.assertEqual(self.request("/dist/app.css")[0], 200)
         self.assertEqual(self.request("/slash-commands.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/slash-commands.js?v=', shell)
+        self.assertIn('rel="preload" as="script" href="/dist/app.js?v=', shell)
+        self.assertIn('href="/dist/app.css?v=', shell)
         self.assertIn('aria-controls="slash-commands"', shell)
         self.assertEqual(self.request("/styles.css")[0], 200)
         self.assertEqual(self.request("/mobile-chat.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/mobile-chat.js?v=', shell)
         self.assertEqual(self.request("/filter-menu.js")[0], 200)
         self.assertEqual(self.request("/filter-menu.css")[0], 200)
         self.assertIn('id="filter-menu"', shell)
         self.assertIn('id="repository"', shell)
         self.assertIn('id="project"', shell)
         self.assertEqual(self.request("/markdown.js")[0], 200)
-        self.assertIn('rel="preload" as="script" href="/markdown.js?v=', shell)
         monitor = self.request("/monitor")[1]
         self.assertIn('src="/markdown.js"', monitor)
         self.assertIn("messageMarkdown.render(m.body)", monitor)
@@ -948,6 +952,170 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(self.request(path, {"attention": "archived"})[0], 200)
         self.assertEqual(self.request("/api/browser/threads")[1]["data"], [])
         self.assertEqual(len(self.request("/api/browser/threads?archived=true")[1]["data"]), 1)
+
+    def test_static_bundle_dist_and_tokens_serving_and_digest_injection(self):
+        from agent_coord import ui
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dist").mkdir()
+            (root / "tokens.css").write_bytes(b":root { --space-1: 4px; }")
+            (root / "dist/app.css").write_bytes(b".bundled { display: grid; }")
+            (root / "dist/app.js").write_bytes(b"console.log('bundled');")
+            (root / "dist/app.js.map").write_bytes(b'{"version":3,"sources":["app.js"]}')
+            (root / "dist/app.css.map").write_bytes(b'{"version":3,"sources":["app.css"]}')
+            (root / "index.html").write_bytes(
+                b'<link rel="stylesheet" href="/tokens.css">'
+                b'<link rel="stylesheet" href="/dist/app.css">'
+                b'<script src="/dist/app.js" defer></script>'
+            )
+            outside = Path(directory).parent / f"escape-{root.name}.js"
+            outside.write_bytes(b"secret")
+            self.addCleanup(lambda: outside.unlink(missing_ok=True))
+
+            def raw_get(path):
+                req = urllib.request.Request(self.url + path)
+                try:
+                    resp = urllib.request.urlopen(req, timeout=3)
+                except urllib.error.HTTPError as exc:
+                    resp = exc
+                with resp:
+                    return resp.status, resp.headers["Content-Type"], resp.headers["Cache-Control"], resp.read()
+
+            with patch.object(ui, "_WEB_ROOT", root):
+                status, _, policy, html = raw_get("/")
+                self.assertEqual((status, policy), (200, "no-store"))
+                refs = [m.decode() for m in re.findall(rb'(?:src|href)="([^"]+)"', html)]
+                self.assertEqual(len(refs), 3)
+                expected_types = {
+                    "/tokens.css": "text/css; charset=utf-8",
+                    "/dist/app.css": "text/css; charset=utf-8",
+                    "/dist/app.js": "application/javascript; charset=utf-8",
+                }
+                for ref in refs:
+                    base_path = ref.split("?")[0]
+                    status, ctype, cache_ctl, body = raw_get(ref)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(ctype, expected_types[base_path])
+                    self.assertEqual(cache_ctl, "private, max-age=31536000, immutable")
+                    self.assertTrue(ref.endswith("?v=" + hashlib.sha256(body).hexdigest()))
+
+                for map_path in ("/dist/app.js.map", "/dist/app.css.map"):
+                    status, ctype, cache_ctl, body = raw_get(map_path)
+                    self.assertEqual(status, 200)
+                    self.assertEqual(ctype, "application/json; charset=utf-8")
+                    self.assertEqual(cache_ctl, "no-store")
+                    self.assertEqual(json.loads(body)["version"], 3)
+
+                # Symlink escape and traversal attempts must never escape _WEB_ROOT.
+                (root / "dist/app.js").unlink()
+                (root / "dist/app.js").symlink_to(outside)
+                self.assertEqual(raw_get("/dist/app.js")[0], 404)
+                self.assertEqual(raw_get("/dist/../index.html")[0], 404)
+
+    def test_quiet_submission_on_create_messages_and_queue_over_http(self):
+        # 1. Create with quiet: True
+        status, created = self.request("/api/browser/sessions", {"name": "Quiet create", "quiet": True})
+        self.assertEqual(status, 201)
+        quiet_id = created["session"]["thread_id"]
+        self.assertTrue(self.request(f"/api/browser/threads/{quiet_id}")[1]["quiet"])
+
+        # Invalid quiet on create is rejected without starting provider session.
+        calls_before = len(self.sessions.rpc.calls)
+        self.assertEqual(self.request("/api/browser/sessions", {"name": "Bad quiet", "quiet": "yes"})[0], 400)
+        self.assertEqual(len(self.sessions.rpc.calls), calls_before)
+
+        # 2. Fire-and-forget quiet: True on /messages
+        status, ordinary = self.request("/api/browser/sessions", {"name": "Composer quiet"})
+        self.assertEqual(status, 201)
+        msg_id = ordinary["session"]["thread_id"]
+        self.assertFalse(self.request(f"/api/browser/threads/{msg_id}")[1]["quiet"])
+        self.assertEqual(
+            self.request(f"/api/browser/sessions/{msg_id}/messages", {"message": "Bad", "quiet": 1})[0],
+            400,
+        )
+        self.sessions.rpc.fast_turn = True
+        status, sent = self.request(
+            f"/api/browser/sessions/{msg_id}/messages",
+            {"message": "Run in background", "quiet": True},
+        )
+        self.assertEqual(status, 200, sent)
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=msg_id))
+        thread_after = self.request(f"/api/browser/threads/{msg_id}")[1]
+        self.assertTrue(thread_after["quiet"])
+        self.assertFalse(thread_after["needs_attention"])
+        self.assertEqual(self.sessions.completions_after(0)["events"], [])
+
+        # 3. Quiet: True on /queue while a turn is running
+        self.sessions.rpc.fast_turn = False
+        status, q_created = self.request("/api/browser/sessions", {"name": "Queue quiet"})
+        q_id = q_created["session"]["thread_id"]
+        self.assertEqual(self.request(f"/api/browser/sessions/{q_id}/messages", {"message": "First"})[0], 200)
+        self.assertFalse(self.request(f"/api/browser/threads/{q_id}")[1]["quiet"])
+        status, queued = self.request(
+            f"/api/browser/sessions/{q_id}/queue",
+            {"message": "Queued quiet follow-up", "quiet": True},
+        )
+        self.assertEqual(status, 200, queued)
+        self.assertTrue(self.request(f"/api/browser/threads/{q_id}")[1]["quiet"])
+
+    def test_cross_repo_workspaces_and_shared_groups_across_routes(self):
+        with tempfile.TemporaryDirectory() as other_parent:
+            external_repo = Path(other_parent).resolve() / "service-b"
+            (external_repo / ".git").mkdir(parents=True)
+            (external_repo / "report.html").write_text("<!doctype html><title>Service B</title>")
+            local_repo = self.root / "service-a"
+            (local_repo / ".git").mkdir(parents=True)
+
+            # Create an unscoped cross-repo Group and assign threads from both repos to it.
+            status, group = self.request("/api/browser/projects", {"name": "Cross-repo launch", "cwd": None})
+            self.assertEqual(status, 201, group)
+            self.assertIsNone(group["cwd"])
+
+            local_id = self.request("/api/browser/sessions", {"cwd": str(local_repo), "project_id": group["id"]})[1]["session"]["thread_id"]
+            self.store.register(session_id="cross-repo-ext", client="claude", cwd=str(external_repo), name="Service B worker")
+            self.store.threads.ensure("cross-repo-ext")
+            self.sessions.activity.record("message_submitted", "cross-repo-ext")
+
+            # Assigning an external repo thread into the shared Group succeeds and unlocks all read/open routes!
+            status, assigned = self.request("/api/browser/threads/cross-repo-ext", {"project_id": group["id"]})
+            self.assertEqual(status, 200, assigned)
+            self.assertEqual(assigned["project_id"], group["id"])
+
+            listed_ids = {t["thread_id"] for t in self.request("/api/browser/threads")[1]["data"]}
+            self.assertIn(local_id, listed_ids)
+            self.assertIn("cross-repo-ext", listed_ids)
+
+            for route in (
+                "/api/browser/conversations/cross-repo-ext/open",
+                "/api/browser/sessions/cross-repo-ext",
+                "/api/browser/threads/cross-repo-ext",
+                "/api/browser/threads/cross-repo-ext/agent-tree",
+                "/api/browser/threads/cross-repo-ext/messages",
+                "/api/browser/threads/cross-repo-ext/close-when-done",
+                "/api/browser/html-preview?thread=cross-repo-ext&path=report.html",
+                "/api/browser/activity/history?thread_id=cross-repo-ext",
+            ):
+                with self.subTest(route=route):
+                    status, payload = self.request(route)
+                    self.assertEqual(status, 200, payload)
+
+            # Registering a second repository also enables launching browser sessions directly in it (including /sidecars).
+            second_ext = Path(other_parent).resolve() / "service-c"
+            (second_ext / ".git").mkdir(parents=True)
+            (second_ext / "preview.html").write_text("<!doctype html><title>Service C</title>")
+            self.assertEqual(self.request("/api/browser/repositories", {"path": str(second_ext)})[0], 201)
+            status, created_ext = self.request("/api/browser/sessions", {"cwd": str(second_ext), "project_id": group["id"]})
+            self.assertEqual(status, 201, created_ext)
+            ext_session_id = created_ext["session"]["thread_id"]
+            for app_route in (
+                f"/api/browser/conversations/{ext_session_id}/open",
+                f"/api/browser/threads/{ext_session_id}/sidecars",
+                f"/api/browser/html-preview?thread={ext_session_id}&path=preview.html",
+            ):
+                with self.subTest(app_route=app_route):
+                    status, payload = self.request(app_route)
+                    self.assertEqual(status, 200, payload)
 
 
 if __name__ == "__main__":

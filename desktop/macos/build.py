@@ -166,25 +166,10 @@ def copy_backend(resources: Path, *, standalone: bool = False) -> dict[str, str]
         data = source.read_bytes()
         target.write_bytes(data)
         snapshot[str(Path("..") / relative)] = hashlib.sha256(data).hexdigest()
-    # A compatible older runtime serves the new web root through its existing
-    # asset allowlist. Load new modules through established URLs until its safe
-    # idle handover, rather than requiring new HTTP routes to boot the interface.
     web = resources / "backend/agent_coord/web"
-    if (web / "index.html").is_file():
-        index = (web / "index.html").read_text()
-        modules = ("html-preview.js", "response-actions.js", "permission-menu.js")
-        scripts = []
-        for name in modules:
-            scripts.append((web / name).read_text())
-            index = index.replace(f'  <script src="/{name}" defer></script>\n', "")
-            index = index.replace(f'  <link rel="preload" as="script" href="/{name}" data-startup>\n', "")
-        (web / "app.js").write_text("\n;\n".join(scripts + [(web / "app.js").read_text()]))
-        index = index.replace('  <link rel="stylesheet" href="/html-preview.css">\n', "")
-        (web / "index.html").write_text(index)
-        with (web / "styles.css").open("a") as style:
-            style.write("\n" + (web / "html-preview.css").read_text())
-        for name in ("index.html", "app.js", "styles.css"):
-            snapshot["agent_coord/web/" + name] = hashlib.sha256((web / name).read_bytes()).hexdigest()
+    for bundle_asset in ("dist/app.js", "dist/app.css", "dist/manifest.json", "tokens.css"):
+        if not (web / bundle_asset).is_file():
+            raise ValueError(f"Missing bundled web asset {bundle_asset}; run python3 scripts/build_web.py")
     return snapshot
 
 
@@ -207,6 +192,7 @@ def main() -> int:
     parser.add_argument("--update-private-key-file", type=Path, help="Private mode-600 Sparkle signing key; otherwise use Keychain")
     parser.add_argument("--update-archive", type=Path, help="Create a signed update ZIP and appcast; requires notarization")
     parser.add_argument("--update-channel", choices=("alpha", "beta", "stable"), default="alpha")
+    parser.add_argument("--no-smoke-tests", action="store_true", help="Exclude SmokeHarness.swift even in unnotarized builds.")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("Building the native app requires macOS and Xcode Command Line Tools.")
@@ -320,10 +306,13 @@ def main() -> int:
         from sparkle import bundle_runtime_metadata
         bundle_runtime_metadata(app)
         environment = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
+        include_smoke = not args.no_smoke_tests and not args.notary_profile and not args.update_archive
+        smoke_args = ["-DRIBBON_SMOKE_TESTS", str(HERE / "SmokeHarness.swift")] if include_smoke else []
         subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-O",
                         "-target", f"{args.arch}-apple-macosx12.0", str(HERE / "App.swift"),
                         str(HERE / "WorkspaceFiles.swift"), str(HERE / "FileBrowser.swift"),
-                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), str(HERE / "IntegratedTitlebar.swift"), *linker_flags,
+                        str(HERE / "RuntimeHost.swift"), str(HERE / "Updater.swift"), str(HERE / "WindowRestoration.swift"), str(HERE / "IntegratedTitlebar.swift"),
+                        *smoke_args, *linker_flags,
                         "-o", str(binaries / EXECUTABLE_NAME)], check=True, env=environment)
         subprocess.run(["xcrun", "swift", str(HERE / "Icon.swift"), str(scratch / "AppIcon.iconset")], check=True)
         subprocess.run(["iconutil", "-c", "icns", str(scratch / "AppIcon.iconset"),

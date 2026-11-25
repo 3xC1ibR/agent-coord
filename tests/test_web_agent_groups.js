@@ -39,20 +39,20 @@ function harness(threads) {
   vm.runInContext(source.slice(source.indexOf("function renderList("), source.indexOf("function conversationEntry(")), c);
   c.$("view").value = "active"; c.$("group-by").value = "phase";
   c.renderList();
-  c.cards = () => walk(c.$("overview")).filter(n => n.dataset.cardThread).map(n => n.dataset.cardThread);
-  c.rows = () => withClass(c.$("overview"), "agent-row");
+  c.cards = () => walk(c.$("sessions")).filter(n => n.className?.split(" ").includes("session")).map(n => n.dataset.thread);
+  c.rows = () => withClass(c.$("sessions"), "agent-row");
   c.selected = selected;
   return c;
 }
 
 test("cross-folder descendants render in the parent's project with working-directory labels", async () => {
-  const root = thread("parent", null, {project_cwd: "/projects", cwd: "/projects"});
+  const root = thread("parent", null, {project_cwd: "/projects/main", cwd: "/projects/main"});
   const child = thread("child", "parent", {project_cwd: "/projects/foobar", cwd: "/projects/foobar",
-    orchestration_workspaces: ["/projects"]});
+    orchestration_workspaces: ["/projects/main"]});
   const unrelated = thread("unrelated", null, {project_cwd: "/projects/other", cwd: "/projects/other"});
   const c = harness([root, child, unrelated]);
   const {inProject} = require("../plugins/agent-coord/scripts/agent_coord/web/folders.js");
-  c.state.projectCwd = "/projects";
+  c.state.projectCwd = "/projects/main";
   c.threadsInProject = records => records.filter(t => inProject(t, c.state.projectCwd));
   c.renderList();
   assert.deepEqual(c.cards(), ["parent"]);
@@ -64,7 +64,7 @@ test("cross-folder descendants render in the parent's project with working-direc
   // A closed/hidden creator doesn't strand its child or require its folder open.
   c.state.sessions = [child, unrelated]; c.renderList();
   assert.deepEqual(c.cards(), ["child"]);
-  assert.ok(withClass(c.$("overview"), "placement-label").some(label =>
+  assert.ok(withClass(c.$("sessions"), "placement-label").some(label =>
     label.textContent === "foobar" && label.title === "Working folder: /projects/foobar"));
   let menu, opened;
   c.state.threadActions = {showMenu: (_trigger, _title, items) => { menu = items; }};
@@ -107,7 +107,7 @@ test("only explicit orchestration creations nest across phases without changing 
   assert.ok(c.rows()[0].className.split(" ").includes("working"));
   c.rows()[0].onclick(); assert.deepEqual(c.selected, ["orchestrated"]);
   assert.equal(withClass(c.$("sessions"), "agent-row").length, 1);
-  assert.equal(withClass(c.$("overview"), "card-app-agent")[0].attrs["aria-label"], "App agent · Created by parent");
+  assert.equal(withClass(c.threadCard(records[1]), "card-app-agent")[0].attrs["aria-label"], "App agent · Created by parent");
 });
 
 test("card menu exposes fork and group actions for the card rather than the selected conversation", async () => {
@@ -163,7 +163,7 @@ test("a standalone dispatched agent can create its own grouped orchestration", (
 
 test("collapse persists with count-free disclosure and styled unread child rows", () => {
   const c = harness([thread("parent"), thread("child", "parent", {status: "running", unread_result: true})]);
-  let details = withClass(c.$("overview"), "agent-children")[0];
+  let details = withClass(c.$("sessions"), "agent-children")[0];
   assert.equal(details.open, true);
   assert.equal(withClass(details, "agent-counts").length, 0);
   assert.equal(withClass(details, "agent-children-toggle")[0].attrs["aria-label"], "Agents created by parent · 1 agent · 1 working · 1 unread");
@@ -171,7 +171,7 @@ test("collapse persists with count-free disclosure and styled unread child rows"
   assert.ok(walk(details).every(n => !/\d+ agents?|unread|read response/i.test(n.textContent || "")));
   details.open = false; details.ontoggle();
   c.state.sessions[1].status = "idle"; c.renderList();
-  details = withClass(c.$("overview"), "agent-children")[0];
+  details = withClass(c.$("sessions"), "agent-children")[0];
   assert.equal(details.open, false);
   assert.equal(withClass(details, "agent-counts").length, 0);
   c.state.sessions[1].unread_result = false; c.renderList();
@@ -183,10 +183,11 @@ test("required input stays in Attention while routine agent replies remain neste
     thread("approval", "parent", {response_state: "input", attention_reason: "blocked"})]);
   assert.deepEqual(c.cards(), ["approval", "parent"]);
   assert.deepEqual(c.rows().map(n => n.dataset.thread), ["answer", "approval"]);
-  const origin = withClass(c.$("overview"), "card-app-agent")[0];
+  const focusCard = c.threadCard(c.state.sessions[2], false, true);
+  const origin = withClass(focusCard, "card-app-agent")[0];
   assert.equal(origin.attrs["aria-label"], "App agent · Created by parent"); origin.onclick(); assert.deepEqual(c.selected, ["parent"]);
-  assert.ok(origin.parent.className.split(" ").includes("thread-card"), "creator belongs inside its overview card");
-  assert.ok(walk(c.$("overview")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button")), "card controls must not nest buttons");
+  assert.ok(origin.parent.className.split(" ").includes("thread-card"), "creator belongs inside its Focus card");
+  assert.ok(walk(c.$("sessions")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button")), "sidebar controls must not nest buttons");
 });
 
 test("every counted child response stays visible in Attention beside its idle parent", () => {
@@ -197,7 +198,8 @@ test("every counted child response stays visible in Attention beside its idle pa
     const before = JSON.stringify(records), c = harness(records);
     assert.equal(c.threadViews.badges(records, {}).attention, 1);
     assert.deepEqual(c.cards(), ["child", "parent"], attention_reason);
-    assert.equal(withClass(c.$("overview"), "attention-card").length, 1, attention_reason);
+    const attentionGroup = c.$("sessions").children.find(n => n.dataset.group === "priority");
+    assert.ok(attentionGroup, attention_reason);
     assert.equal(JSON.stringify(records), before);
     c.$("view").value = "attention"; c.renderList();
     assert.deepEqual(c.cards(), ["child"]);
@@ -237,7 +239,7 @@ test("nested spawns are navigable, malformed cycles stay visible, and unavailabl
     assert.equal(harness(items).cards().length, items.length);
   }
   const outside = harness([thread("child", "parent", {created_by: {title: "Outside workspace", available: false}})]);
-  const origin = withClass(outside.$("overview"), "card-app-agent")[0];
+  const origin = withClass(outside.threadCard(outside.state.sessions[0]), "card-app-agent")[0];
   assert.equal(origin.attrs["aria-disabled"], "true");
   origin.onclick(); assert.deepEqual(outside.selected, []);
 });
@@ -267,14 +269,14 @@ test("app-agent identity and creator navigation use the shared card renderer in 
   assert.equal(withClass(c.threadCard(thread("direct")), "card-app-agent").length, 0);
 });
 
-test("pinned agents remain directly accessible and Later and Closed support grouping", () => {
+test("pinned agents remain directly accessible in List Pinned and Later and Closed support grouping", () => {
   const c = harness([thread("parent"), thread("child", "parent", {pinned: true})]);
-  assert.deepEqual(c.cards(), ["child", "parent"]);
+  const list = c.WorkingSet.listSections(c.state.sessions, {now: 100, workspace: "/work"});
+  assert.deepEqual(list.sections.pinned.map(t => t.thread_id), ["child"]);
   for (const [placement, view] of [["later", "later"], ["archived", "archived"]]) {
     c.state.sessions.forEach(t => t.attention = placement); c.$("view").value = view; c.renderList();
     assert.deepEqual(c.cards(), ["parent"]); assert.equal(c.rows().length, 1);
-    // Disclosure is a sibling of the card, never inside a button.
-    assert.ok(walk(c.$("overview")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button" || x.tag === "details")));
+    assert.ok(walk(c.$("sessions")).filter(n => n.tag === "button").every(n => !walk(n).slice(1).some(x => x.tag === "button" || x.tag === "details")));
   }
 });
 
@@ -284,8 +286,8 @@ test("agents group under their current supervisor, and the user's agents stand a
   const kept = thread("kept", "lead", {supervisor_thread_id: "lead"});
   const c = harness([thread("lead"), thread("next"), moved, orphan, kept]);
   assert.deepEqual(c.cards().sort(), ["lead", "next", "orphan"]);
-  const groups = walk(c.$("overview")).filter(n => n.className.split(" ").includes("agent-thread-group"));
-  const membership = Object.fromEntries(groups.map(group => [walk(group).find(n => n.dataset.cardThread)?.dataset.cardThread,
+  const groups = walk(c.$("sessions")).filter(n => n.className.split(" ").includes("agent-thread-group"));
+  const membership = Object.fromEntries(groups.map(group => [walk(group).find(n => n.className?.split(" ").includes("session"))?.dataset.thread,
     withClass(group, "agent-row").map(row => row.dataset.thread).sort()]));
   assert.deepEqual(membership.next, ["moved"]);
   assert.deepEqual(membership.lead, ["kept"]);
@@ -297,7 +299,7 @@ test("sidebar agent rows share the needs-you rule: a dismissed request clears, a
   const c = harness([thread("parent"), thread("child", "parent", request)]);
   const row = () => c.rows().find(r => r.dataset.thread === "child");
   const label = () => walk(row()).map(n => n.textContent || "").join(" ");
-  const counts = () => walk(withClass(c.$("overview"), "agent-children")[0]).filter(n => n.className === "agent-counts").map(n => n.textContent);
+  const counts = () => walk(withClass(c.$("sessions"), "agent-children")[0]).filter(n => n.className === "agent-counts").map(n => n.textContent);
   assert.match(row().className, /needs-attention/, "the child's own open request marks its row, as in the tree");
   assert.deepEqual(counts(), [], "a child's saved request does not count toward its parent");
   // Dismissed in the thread: the backend records the handled checkpoint and clears needs_attention.
@@ -309,4 +311,15 @@ test("sidebar agent rows share the needs-you rule: a dismissed request clears, a
   c.renderList();
   assert.match(row().className, /needs-attention/);
   assert.deepEqual(counts(), ["1 needs you"], "a live approval escalates to the parent");
+});
+
+test("orchestrated and standalone attention items follow stakes-first priority order regardless of timestamps", () => {
+  const c = harness([
+    thread("parent", null, {needs_attention: false}),
+    thread("child-done", "parent", {response_state: "update", attention_reason: "done", needs_attention: true, attention_since: 900}),
+    thread("child-findings", "parent", {response_state: "update", attention_reason: "findings", needs_attention: true, attention_since: 800}),
+    thread("child-review", "parent", {response_state: "action", attention_reason: "review", needs_attention: true, attention_since: 200}),
+    thread("child-stalled", "parent", {status: "stalled", needs_attention: true, attention_since: 100}),
+  ]);
+  assert.deepEqual(c.cards(), ["child-stalled", "child-review", "child-findings", "child-done", "parent"]);
 });

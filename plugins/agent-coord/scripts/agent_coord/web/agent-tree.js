@@ -423,6 +423,167 @@ const AgentTree = (() => {
       if (["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) e.preventDefault();
     }
   }
-  return {graph, layout, status, duration, Panel, CARD_W, CARD_H};
+  function breadcrumb(tree, rootId, selectedId) {
+    const resolvedTree = Array.isArray(tree) ? graph(tree) : tree;
+    if (!resolvedTree?.nodes?.size) {
+      return {visible: false, rootId: null, selectedId: selectedId || null, ids: [], path: [], family: []};
+    }
+    const root = rootId && resolvedTree.nodes.has(rootId)
+      ? rootId
+      : selectedId && resolvedTree.nodes.has(selectedId)
+        ? resolvedTree.root(selectedId)
+        : null;
+    if (!root) {
+      return {visible: false, rootId: null, selectedId: selectedId || null, ids: [], path: [], family: []};
+    }
+    const activeId = selectedId && resolvedTree.nodes.has(selectedId) ? selectedId : root;
+    const familyIds = resolvedTree.family(root).filter(id => resolvedTree.nodes.get(id)?.browser_session !== false);
+    const depths = new Map([[root, 0]]);
+    for (const id of familyIds) {
+      if (id === root) continue;
+      let d = 0, p = resolvedTree.parents.get(id);
+      const seen = new Set([id]);
+      while (p && !seen.has(p)) {
+        seen.add(p); d++;
+        if (p === root) break;
+        p = resolvedTree.parents.get(p);
+      }
+      depths.set(id, d);
+    }
+    const chain = [];
+    const seenChain = new Set();
+    for (let cur = activeId; cur && !seenChain.has(cur) && resolvedTree.nodes.has(cur); cur = cur === root ? null : resolvedTree.parents.get(cur)) {
+      seenChain.add(cur);
+      chain.push(cur);
+      if (cur === root) break;
+    }
+    chain.reverse();
+    if (chain[0] !== root && resolvedTree.nodes.has(root)) chain.unshift(root);
+    const describe = id => {
+      const node = resolvedTree.nodes.get(id);
+      const st = status(node);
+      return {
+        id,
+        title: node.title || "Untitled agent",
+        status: st,
+        relationship: resolvedTree.relationships.get(id) || "root",
+        depth: depths.get(id) || 0,
+        selected: id === activeId,
+      };
+    };
+    return {
+      visible: familyIds.length > 1,
+      rootId: root,
+      selectedId: activeId,
+      ids: chain,
+      path: chain.map(describe),
+      family: familyIds.map(describe),
+    };
+  }
+
+  function renderBreadcrumb({document, container, tree, rootId, selectedId, onSelect}) {
+    if (!container || !document) return null;
+    const model = breadcrumb(tree, rootId, selectedId);
+    if (!model.visible) {
+      container.hidden = true;
+      if (container.dataset) container.dataset.signature = "";
+      container.replaceChildren();
+      return model;
+    }
+    container.hidden = false;
+    container.classList?.add("agent-breadcrumb");
+    container.setAttribute?.("role", "navigation");
+    container.setAttribute?.("aria-label", "Agent family");
+    const signature = JSON.stringify([model.rootId, model.selectedId, model.path, model.family]);
+    if (container.dataset?.signature === signature) return model;
+    const existingMenu = container.querySelector?.(".agent-breadcrumb-menu");
+    const wasOpen = Boolean(existingMenu?.open);
+    if (container.dataset) container.dataset.signature = signature;
+    const el = (tag, cls, text) => {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text != null) node.textContent = text;
+      return node;
+    };
+    const parts = [];
+    model.path.forEach((step, index) => {
+      if (index > 0) {
+        const sep = el("span", "agent-breadcrumb-sep", "›");
+        sep.setAttribute("aria-hidden", "true");
+        parts.push(sep);
+      }
+      if (index < model.path.length - 1) {
+        const btn = el("button", "quiet agent-breadcrumb-item");
+        btn.type = "button";
+        btn.dataset.agentId = step.id;
+        btn.dataset.status = step.status.key;
+        btn.setAttribute("aria-label", step.title + " · " + step.status.label);
+        btn.title = step.title + " · " + step.status.label;
+        const dot = el("span", "agent-breadcrumb-dot");
+        dot.dataset.status = step.status.key;
+        dot.setAttribute("aria-hidden", "true");
+        btn.append(dot, el("span", "agent-breadcrumb-label", step.title));
+        btn.onclick = () => onSelect?.(step.id);
+        parts.push(btn);
+      } else {
+        const menu = el("details", "agent-breadcrumb-menu");
+        if (wasOpen) { menu.open = true; menu.setAttribute("open", ""); }
+        const summary = el("summary", "agent-breadcrumb-current");
+        summary.dataset.agentId = step.id;
+        summary.dataset.status = step.status.key;
+        summary.setAttribute("aria-label", step.title + " · " + step.status.label + " · Switch agent");
+        summary.title = step.title + " · " + step.status.label;
+        const dot = el("span", "agent-breadcrumb-dot");
+        dot.dataset.status = step.status.key;
+        dot.setAttribute("aria-hidden", "true");
+        const caret = el("span", "agent-breadcrumb-caret", "▾");
+        caret.setAttribute("aria-hidden", "true");
+        const summaryLabel = model.path.length === 1 ? model.family.length + " agents" : step.title;
+        summary.append(dot, el("span", "agent-breadcrumb-label", summaryLabel), caret);
+        const list = el("div", "agent-breadcrumb-list");
+        list.setAttribute("role", "menu");
+        list.setAttribute("aria-label", "Family conversations");
+        for (const member of model.family) {
+          const option = el("button", "quiet agent-breadcrumb-option");
+          option.type = "button";
+          option.dataset.agentId = member.id;
+          option.dataset.status = member.status.key;
+          option.dataset.depth = String(member.depth);
+          option.style?.setProperty?.("--agent-breadcrumb-depth", String(member.depth));
+          option.setAttribute("role", "menuitemradio");
+          option.setAttribute("aria-checked", String(member.selected));
+          const mDot = el("span", "agent-breadcrumb-dot");
+          mDot.dataset.status = member.status.key;
+          mDot.setAttribute("aria-hidden", "true");
+          option.append(
+            mDot,
+            el("span", "agent-breadcrumb-label", member.title),
+            el("span", "agent-breadcrumb-state", member.status.label)
+          );
+          option.onclick = () => {
+            menu.open = false;
+            menu.removeAttribute?.("open");
+            if (member.id !== model.selectedId) onSelect?.(member.id);
+          };
+          list.append(option);
+        }
+        menu.onkeydown = event => {
+          if (event.key === "Escape" && menu.open) {
+            event.preventDefault?.();
+            event.stopPropagation?.();
+            menu.open = false;
+            menu.removeAttribute?.("open");
+            summary.focus?.({preventScroll: true});
+          }
+        };
+        menu.append(summary, list);
+        parts.push(menu);
+      }
+    });
+    container.replaceChildren(...parts);
+    return model;
+  }
+
+  return {graph, layout, status, duration, breadcrumb, renderBreadcrumb, Panel, CARD_W, CARD_H};
 })();
 if (typeof module !== "undefined") module.exports = AgentTree;

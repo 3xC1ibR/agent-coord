@@ -202,23 +202,29 @@ test("toggle returns to the original single conversation and resyncs its edited 
   assert.equal(draft.text, "Edited outside panes"); assert.equal(draft.scroll, 260);
 });
 
-test("toggle respects modal/send guards and view restoration returns to that view's overview", async () => {
+test("toggle respects modal and attachment guards while allowing active sends and busy state", async () => {
   const {shell, state, doc, visits, errors, setView} = shellFixture();
-  // Tiling would copy an unaccepted send's draft into its pane.
-  state.sending = new Set(["a"]);
+  let pendingAttachment = "a";
+  state.attachments.pending = id => id === pendingAttachment;
   assert.equal(shell.tileCurrent(), false); assert.equal(shell.active, false); assert.equal(errors.length, 1);
-  state.sending.clear();
-  state.selected = "a"; shell.tileCurrent();
+
+  // Optimistic sends and busy state do not block in-process tiling.
+  pendingAttachment = null;
+  state.sending = new Set(["a"]);
+  state.busy = true;
+  state.selected = "a";
+  assert.equal(shell.tileCurrent(), true); assert.equal(shell.active, true); assert.equal(errors.length, 1);
+
   doc.querySelector = () => ({});
   assert.equal(await shell.toggleCurrent(), false); assert.equal(shell.active, true);
-  doc.querySelector = () => null; state.busy = true;
-  assert.equal(await shell.toggleCurrent(), false); assert.equal(errors.length, 2);
-  state.busy = false;
-  shell.leave(); state.selected = null; setView("second"); await shell.toggleCurrent();
+  doc.querySelector = () => null;
+  assert.equal(await shell.toggleCurrent(), true); assert.equal(shell.active, false);
+  state.busy = false; state.sending.clear();
+  state.selected = null; setView("second"); await shell.toggleCurrent();
   assert.equal(shell.viewId, "second");
   shell.leave(); setView("first"); shell.restoreView();
   await shell.toggleCurrent();
-  assert.deepEqual(visits, [null]);
+  assert.deepEqual(visits, ["a", null]);
 });
 
 test("retile reuses conversations, preserves selected thread and excludes closed threads", () => {
@@ -686,4 +692,203 @@ test("explicit overview links leave old tiles; Back restores tiling only for a t
   assert.equal(panes.active, false); assert.equal(state.selected, "single-thread");
   await c.navigation.apply({kind: "view", id: "other"});
   assert.equal(panes.active, false); assert.equal(views.activeId, "other");
+});
+
+test("in-process pane conversations mount zero iframes, sync drafts, send messages, and stream shared events", async () => {
+  const vm = require("node:vm"), fs = require("node:fs");
+  const createdTags = [], apiCalls = [], errors = [];
+  const makeClassList = owner => {
+    const set = owner._classes ||= new Set();
+    return {
+      add: (...cs) => { cs.forEach(c => set.add(c)); owner._className = [...set].join(" "); },
+      remove: (...cs) => { cs.forEach(c => set.delete(c)); owner._className = [...set].join(" "); },
+      toggle(c, on) { if (on ?? !set.has(c)) set.add(c); else set.delete(c); owner._className = [...set].join(" "); },
+      contains: c => set.has(c),
+    };
+  };
+  function makeNode(tag) {
+    createdTags.push(tag);
+    const node = {
+      tagName: tag,
+      hidden: false,
+      disabled: false,
+      value: "",
+      textContent: "",
+      scrollTop: 0,
+      scrollHeight: 200,
+      clientHeight: 160,
+      children: [],
+      dataset: {},
+      attributes: {},
+      listeners: {},
+      parentNode: null,
+      set className(val) {
+        this._className = String(val || "");
+        this._classes = new Set(this._className.split(/\s+/).filter(Boolean));
+        this.classList = makeClassList(this);
+      },
+      get className() { return this._className || ""; },
+      append(...kids) {
+        for (const kid of kids) {
+          if (kid.parentNode) kid.parentNode.children = kid.parentNode.children.filter(c => c !== kid);
+          kid.parentNode = this;
+          this.children.push(kid);
+        }
+      },
+      replaceChildren(...kids) {
+        for (const kid of this.children) kid.parentNode = null;
+        this.children = [];
+        this.append(...kids);
+      },
+      remove() {
+        if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(c => c !== this);
+        this.parentNode = null;
+      },
+      setAttribute(k, v) { this.attributes[k] = String(v); },
+      getAttribute(k) { return this.attributes[k]; },
+      addEventListener(type, fn) { this.listeners[type] = fn; },
+      focus() {},
+      scrollIntoView() {},
+      getBoundingClientRect: () => ({left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800}),
+      matches(sel) {
+        if (sel.includes(",")) return sel.split(",").some(part => this.matches(part.trim()));
+        if (sel.startsWith(".")) return this.classList.contains(sel.slice(1));
+        if (sel === "[data-pane-thread]") return this.dataset.paneThread !== undefined;
+        if (sel === "[data-drop-side]") return this.dataset.dropSide !== undefined;
+        if (sel === "[data-agent-message-id]") return this.dataset.agentMessageId !== undefined;
+        if (sel === "[data-message-id]") return this.dataset.messageId !== undefined;
+        if (sel === "[data-item-id]") return this.dataset.itemId !== undefined;
+        return this.tagName === sel;
+      },
+      querySelectorAll(sel) {
+        const out = [];
+        for (const child of this.children) {
+          if (child.matches(sel)) out.push(child);
+          out.push(...child.querySelectorAll(sel));
+        }
+        return out;
+      },
+      querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+    };
+    node.style = {};
+    node.classList = makeClassList(node);
+    return node;
+  }
+  const controls = new Map();
+  const doc = {
+    createElement: makeNode,
+    body: makeNode("body"),
+    hasFocus: () => true,
+    querySelector: () => null,
+    addEventListener() {},
+    getElementById(id) {
+      if (!controls.has(id)) controls.set(id, makeNode("div"));
+      return controls.get(id);
+    },
+  };
+  const state = {
+    selected: "a",
+    drafts: new Map([["a", "Initial draft A"], ["b", "Draft B"]]),
+    conversations: new Map(),
+    attachments: {drafts: new Map(), pending: () => false, items(id) { return this.drafts.get(id) || []; }},
+  };
+  controls.get("message");
+  doc.getElementById("message").value = "Initial draft A";
+  const turnsByThread = {
+    a: [{id: "t1", items: [{id: "m1", type: "agentMessage", text: "Ready on A"}]}],
+    b: [{id: "t2", items: [{id: "m2", type: "agentMessage", text: "Waiting on B"}]}],
+    c: [{id: "t3", items: [{id: "m3", type: "agentMessage", text: "Idle on C"}]}],
+  };
+  const api = async (path, body) => {
+    apiCalls.push({path, body});
+    if (path.endsWith("/open")) {
+      const id = decodeURIComponent(path.split("/")[1]);
+      return {
+        work_thread: {...thread(id), browser_session: true, turn_completion: {id: 1}},
+        recent_turns: turnsByThread[id] || [],
+        requests: id === "b" ? [{id: "req-1", description: "Approve deploy"}] : [],
+        running: false,
+      };
+    }
+    if (path.endsWith("/messages")) {
+      const id = decodeURIComponent(path.split("/")[1]);
+      turnsByThread[id].push({id: "t-user", items: [{id: "u1", type: "userMessage", text: body.message}]});
+      return {turnId: "t-user"};
+    }
+    return {ok: true};
+  };
+  const threadViews = require("../plugins/agent-coord/scripts/agent_coord/web/views.js").threadViews;
+  const context = vm.createContext({
+    window: {addEventListener() {}, dispatchEvent() {}},
+    document: doc,
+    location: {search: ""},
+    Event,
+    URLSearchParams,
+    CSS: {escape: s => s},
+    setTimeout,
+    clearTimeout,
+    threadViews,
+    EventSource: class { constructor() { throw new Error("Pane opened duplicate EventSource"); } },
+  });
+  vm.runInContext(fs.readFileSync(require.resolve("../plugins/agent-coord/scripts/agent_coord/web/thread-panes.js"), "utf8"), context);
+  const threads = [
+    {...thread("a"), browser_session: true},
+    {...thread("b"), browser_session: true},
+    {...thread("c"), browser_session: true},
+  ];
+  const shell = context.setupPaneShell({
+    state,
+    document: doc,
+    api,
+    select: async id => { state.selected = id; },
+    goHome() { shell.leave(); },
+    refreshList: async () => {},
+    getView: () => "main",
+    getThreads: () => threads,
+    showError: error => errors.push(error),
+    notifications: () => null,
+  });
+
+  assert.equal(shell.tileCurrent(), true);
+  await new Promise(resolve => setImmediate(resolve));
+
+  // Zero iframes created across 3 tiled conversations!
+  assert.equal(createdTags.filter(tag => tag === "iframe").length, 0);
+  const paneConversations = doc.getElementById("thread-panes").querySelectorAll(".pane-conversation");
+  assert.equal(paneConversations.length, 3);
+
+  const recordA = shell.records.get("a"), recordB = shell.records.get("b");
+  assert.equal(recordA.frame, null);
+  assert.ok(recordA.element);
+  assert.equal(recordA.input.value, "Initial draft A");
+  assert.equal(recordB.element.querySelector(".pane-requests").hidden, false);
+
+  // Live composer typing syncs with state.drafts.
+  recordB.input.value = "Updated draft B";
+  recordB.input.listeners.input();
+  assert.equal(state.drafts.get("b"), "Updated draft B");
+
+  // Pressing Enter in pane A sends the message and updates the timeline.
+  recordA.input.value = "Ship the patch";
+  recordA.input.listeners.input();
+  recordA.input.onkeydown({key: "Enter", preventDefault() {}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(apiCalls.some(call => call.path === "sessions/a/messages" && call.body?.message === "Ship the patch"));
+  assert.equal(recordA.input.value, "");
+  assert.equal(state.drafts.get("a"), "");
+
+  // Streaming delta events update the in-process timeline directly without EventSource.
+  shell.receive({events: [{method: "item/agentMessage/delta", params: {threadId: "a", delta: " — confirmed"}}]});
+  const agentTexts = recordA.element.querySelector(".pane-timeline").children.map(n => n.children[0]?.textContent || "");
+  assert.ok(agentTexts.some(text => text.includes("confirmed")));
+
+  // Splitting, maximizing, and closing preserve record elements and drafts without iframes.
+  shell.moveThread(threads[2], 0, "bottom");
+  shell.maximize(0);
+  shell.maximize(0);
+  shell.close(1);
+  assert.equal(createdTags.filter(tag => tag === "iframe").length, 0);
+  assert.equal(shell.records.get("b").element, recordB.element);
+  assert.equal(shell.exportDraft("b").text, "Updated draft B");
+  assert.deepEqual(errors, []);
 });

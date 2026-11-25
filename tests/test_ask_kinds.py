@@ -655,9 +655,11 @@ class AskBrowserTests(unittest.TestCase):
         self.assertIs(self.get("/api/browser/config")["askKinds"], True)
         with urllib.request.urlopen(self.base + "/") as response:
             workspace = response.read().decode()
-        # An older backend serves the new web root from its existing asset list until its update is applied.
-        for script in ("/asks.js", "/asks.css"):
-            self.assertIn(script, workspace)
+        for bundle in ("/dist/app.js?v=", "/dist/app.css?v="):
+            self.assertIn(bundle, workspace)
+        for asset in ("/asks.js", "/asks.css"):
+            with urllib.request.urlopen(self.base + asset) as response:
+                self.assertEqual(response.status, 200)
         for absent in ("asks-page", "asks-copy", "asks-frame"):
             self.assertNotIn(absent, workspace)
 

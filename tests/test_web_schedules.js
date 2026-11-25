@@ -420,3 +420,31 @@ test("Later schedule selection follows workspace and view filters without moving
   controls.view.value = "later"; context.state.folders.selected.cwd = "/other";
   assert.deepEqual(ids(""), ["elsewhere"]);
 });
+
+test("hydrate seeds schedules without HTTP reads and live SSE suppresses background polling", async t => {
+  const c = setup(t);
+  let now = 200000, reads = 0, changes = 0;
+  t.mock.method(Date, "now", () => now);
+  c.ui.onChange = () => { changes++; };
+  c.ui.api = async () => { reads++; return {data: [scheduled("polled")]}; };
+
+  try {
+    c.ui.hydrate([scheduled("hydrated", {target_thread_id: "a"})]);
+    assert.equal(reads, 0);
+    assert.equal(changes, 1);
+    assert.deepEqual(c.ui.upcoming({threadId: "a"}).map(item => item.id), ["hydrated"]);
+
+    globalThis.agentCoordEventsConnected = true;
+    now += 60000;
+    c.$("schedules-dialog").showModal();
+    await c.ui.refresh({background: true});
+    assert.equal(reads, 0, "SSE-connected windows skip background schedule polling");
+
+    // Explicit refresh (after user mutation or opening manager) still reads immediately.
+    await c.ui.refresh();
+    assert.equal(reads, 1);
+    assert.deepEqual(c.ui.upcoming().map(item => item.id), ["polled"]);
+  } finally {
+    delete globalThis.agentCoordEventsConnected;
+  }
+});

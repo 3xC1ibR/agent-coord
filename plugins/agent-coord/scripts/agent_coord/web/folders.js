@@ -1,18 +1,24 @@
 "use strict";
 
-// Only the active project supplies the launch directory. Views may select a
-// group, but repository metadata and filters never choose a workspace.
+// The active workspace supplies the default launch directory, while groups may
+// organize threads across repositories and directories.
 function newThreadContext(organization, filters, folder) {
   const project = organization.projects.find(item => item.id === filters.project);
   if (filters.project && filters.project !== "__none__" && !project)
     throw new Error("This group is unavailable. Choose another group.");
-  if (project?.cwd && project.cwd !== folder?.cwd)
-    throw new Error("This group belongs to another project. Choose a group in this project.");
-  return {cwd: folder?.cwd || "", project_id: project?.id || null};
+  return {cwd: folder?.cwd || project?.cwd || "", project_id: project?.id || null};
 }
 
-function inProject(thread, cwd) {
-  return !!cwd && ((thread.project_cwd || thread.cwd) === cwd || thread.orchestration_workspaces?.includes(cwd) === true);
+function inProject(thread, cwd, {projectIds} = {}) {
+  if (!cwd || cwd === "all") return true;
+  if (!thread) return false;
+  const prefix = cwd.endsWith("/") ? cwd : cwd + "/";
+  const matchesPath = path => typeof path === "string" && (path === cwd || (cwd !== "/" && path.startsWith(prefix)));
+  const threadDir = thread.project_cwd || thread.cwd || "";
+  return matchesPath(threadDir) ||
+    Boolean(thread.orchestration_workspaces?.some(matchesPath)) ||
+    Boolean(thread.workspace_cwds?.includes(cwd) || thread.workspace_cwds?.some(matchesPath)) ||
+    Boolean(thread.project_id && projectIds?.has?.(thread.project_id));
 }
 
 class WorkingFolders {
@@ -134,7 +140,7 @@ class ProjectTabs {
     };
   }
   async close(cwd) {
-    if (!this.canSwitch()) return;
+    if (this.doc.querySelector?.("dialog[open]")) return;
     const active = this.folders.selected?.cwd === cwd;
     this.folders.close(cwd);
     if (active) await this.onSwitch();
@@ -172,7 +178,7 @@ class ProjectTabs {
     if (close) close.hidden = !this.folders.selected;
   }
   async activate(cwd) {
-    if (!this.canSwitch()) return;
+    if (this.doc.querySelector?.("dialog[open]")) return;
     this.folders.activate(cwd);
     const changing = this.onSwitch();
     this.render();
@@ -185,7 +191,7 @@ class ProjectTabs {
     this.threads = threads;
     const tabs = this.doc.getElementById("view-tabs");
     const signature = JSON.stringify([this.folders.projects, this.folders.selected?.cwd,
-      threads.map(t => [t.thread_id, t.project_cwd, t.orchestration_workspaces, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
+      threads.map(t => [t.thread_id, t.project_cwd, t.cwd, t.orchestration_workspaces, t.workspace_cwds, t.attention, t.needs_attention, t.attention_reason, t.snoozed, t.response_state, t.unread, t.unread_result, t.unhandled_response])]);
     if (signature === this.signature) return;
     this.signature = signature;
     this.renderMobilePicker(threads);

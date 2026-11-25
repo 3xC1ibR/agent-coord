@@ -231,7 +231,7 @@ test("opening acknowledges either advancing marker even when the unread badge is
     await c.select("one");
     const writes = c.calls.filter(call => call.body?.seen);
     assert.equal(writes.length, 1);
-    assert.deepEqual(clone(writes[0].body), {seen: true, seen_checkpoint_id: 8, seen_completion_id: 12});
+    assert.deepEqual(clone(writes[0].body), {seen: true, auto_handle: true, seen_checkpoint_id: 8, seen_completion_id: 12});
     assert.equal(writes[0].options.headers.Prefer, "return=minimal");
   }
 });
@@ -702,8 +702,13 @@ test("a fresh live snapshot acknowledges a reply after a previously invalidated 
   assert.equal(c.replies.get("one").work_thread.unread_result, false);
 });
 
-test("the transcript cache evicts old conversations while retaining the current selection", async () => {
+test("the transcript cache defaults to 64 entries and evicts old conversations while retaining the current selection", async () => {
+  const cDefault = setup();
+  for (let i = 0; i < 66; i++) await cDefault.select("t-" + i);
+  assert.equal(cDefault.state.conversations.size, 64);
+
   const c = setup();
+  c.state.maxCachedConversations = 4;
   for (const id of ["one", "two", "three", "four", "five", "six"]) await c.select(id);
   assert.equal(c.state.conversations.size, 4);
   assert.equal(c.state.conversations.has("one"), false);
@@ -712,6 +717,7 @@ test("the transcript cache evicts old conversations while retaining the current 
 
 test("tab navigation preserves drafts and reading positions beyond the transcript cache limit", async () => {
   const c = setup();
+  c.state.maxCachedConversations = 4;
   const tabs = c.state.threadTabs = new ThreadTabs({onSelect: id => id ? c.select(id) : c.goHome()});
   tabs.setProject("/project");
   for (const [index, id] of ["one", "two", "three", "four", "five", "six"].entries()) {

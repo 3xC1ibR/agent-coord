@@ -35,15 +35,15 @@ function assignmentHarness() {
   return c;
 }
 
-test("card group dialog uses the target group and workspace without changing selection", async () => {
+test("card group dialog lists cross-repo groups while preserving the target workspace and selection", async () => {
   const c = assignmentHarness();
   await c.organizeThread({thread_id: "card", project_cwd: "/card", project_id: "card-group"});
   assert.equal(c.state.selected, "other");
   assert.equal(c.$("organization-dialog").open, true);
   assert.equal(c.$("organization-workspace").textContent, "Project: /card");
   assert.equal(c.$("edit-project").value, "card-group");
-  assert.equal(c.$("edit-project").children.some(item => item.value === "other-group"), false);
-  assert.equal(c.$("edit-project").children.some(item => item.value === "legacy"), false);
+  assert.equal(c.$("edit-project").children.some(item => item.value === "other-group"), true);
+  assert.equal(c.$("edit-project").children.some(item => item.value === "legacy"), true);
   c.$("edit-project").value = "__new__";
   c.$("edit-project-value").value = "New group";
   c.$("organization-form").onsubmit({preventDefault() {}});
@@ -56,10 +56,10 @@ test("card group dialog uses the target group and workspace without changing sel
   assert.equal(c.state.selected, "other");
 });
 
-test("group dialog uses a terminal thread's project when origin is unavailable", async () => {
+test("group dialog uses a terminal thread's project when origin is unavailable and includes shared groups", async () => {
   const c = assignmentHarness();
   await c.organizeThread({thread_id: "card", cwd: "/card", project_id: "card-group"});
-  assert.deepEqual(Array.from(c.$("edit-project").children, item => item.value), ["", "card-group", "__new__"]);
+  assert.deepEqual(Array.from(c.$("edit-project").children, item => item.value), ["", "card-group", "other-group", "legacy", "__new__"]);
 });
 
 test("card group assignment supports an existing group and removing the association", async () => {

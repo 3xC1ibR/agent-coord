@@ -40,62 +40,50 @@ function fixture({themeFailed = false} = {}) {
   };
 }
 
-test("startup executes the complete dependency list in document order, once", () => {
-  assert.equal(paths.length, 51);
-  assert.ok(paths.indexOf("/navigation.js") < paths.indexOf("/app.js"));
-  assert.ok(paths.indexOf("/settings.js") < paths.indexOf("/app.js"));
-  assert.ok(paths.indexOf("/app.js") < paths.indexOf("/thread-hover.js"));
+test("startup executes the bundled workspace script once with zero sequential waterfall", () => {
+  assert.deepEqual(paths, ["/dist/app.js"]);
+  const cssLinks = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)">/g)].map(m => m[1]);
+  assert.deepEqual(cssLinks, ["/dist/app.css"]);
   const page = fixture();
-  for (const [index, path] of paths.entries()) {
-    assert.equal(page.inserted.length, index + 1, "the next dependency waits for load success");
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
+  assert.equal(page.inserted.length, 1);
+  assert.equal(new URL(page.current().src).pathname, "/dist/app.js");
+  page.current().onload();
   assert.equal(page.status.startup, "loaded");
   assert.equal(page.timers.size, 0);
   page.run();
-  assert.equal(page.inserted.length, paths.length, "a second loader invocation cannot initialize again");
+  assert.equal(page.inserted.length, 1, "a second loader invocation cannot initialize again");
 });
 
-test("a failed before-paint theme script recovers before application dependencies", () => {
+test("a failed before-paint theme script recovers before the workspace bundle", () => {
   const page = fixture({themeFailed: true});
   assert.equal(new URL(page.current().src).pathname, "/theme.js");
   page.current().onload();
-  for (const path of paths) {
-    assert.equal(new URL(page.current().src).pathname, path);
+  assert.equal(new URL(page.current().src).pathname, "/dist/app.js");
+  page.current().onload();
+  assert.equal(page.status.startup, "loaded");
+  assert.equal(page.inserted.length, 2);
+});
+
+test("transient bundle load failure retries with cache-preserving retry query", () => {
+  const page = fixture({themeFailed: true});
+  for (const path of ["/theme.js", "/dist/app.js"]) {
+    const previous = page.current(), count = page.inserted.length;
+    previous.onerror();
+    previous.onerror();
+    previous.onload();
+    page.advance(99);
+    assert.equal(page.inserted.length, count);
+    page.advance(1);
+    assert.equal(page.inserted.length, count + 1);
+    const url = new URL(page.current().src);
+    assert.equal(url.pathname, path);
+    assert.equal(url.searchParams.get("v"), "content-digest");
+    assert.equal(url.searchParams.get("startup_retry"), "1");
+    assert.equal(previous.removed, true);
     page.current().onload();
   }
   assert.equal(page.status.startup, "loaded");
-  assert.equal(page.inserted.length, paths.length + 1);
-});
-
-test("several failed assets retry individually before dependents execute", () => {
-  const page = fixture();
-  const failed = new Set(["/navigation.js", "/agent-tree.js", "/settings.js", "/app.js", "/thread-hover.js"]);
-  for (const path of paths) {
-    if (failed.has(path)) {
-      const previous = page.current(), count = page.inserted.length;
-      previous.onerror();
-      previous.onerror();
-      previous.onload();
-      page.advance(99);
-      assert.equal(page.inserted.length, count);
-      page.advance(1);
-      assert.equal(page.inserted.length, count + 1);
-      const url = new URL(page.current().src);
-      assert.equal(url.pathname, path);
-      assert.equal(url.searchParams.get("v"), "content-digest");
-      assert.equal(url.searchParams.get("startup_retry"), "1");
-      assert.equal(previous.removed, true);
-    }
-    const script = page.current();
-    assert.equal(new URL(script.src).pathname, path);
-    script.onload();
-    script.onload();
-    script.onerror();
-  }
-  assert.equal(page.status.startup, "loaded");
-  assert.equal(page.inserted.length, paths.length + failed.size);
+  assert.equal(page.inserted.length, 4);
   assert.equal(page.timers.size, 0);
 });
 
@@ -125,21 +113,15 @@ test("a stalled request reaches the total deadline without unsafe reinsertion", 
   assert.equal(page.inserted.length, 1);
   assert.equal(page.notice.hidden, false);
   assert.equal(page.timers.size, 0);
-  // A late success continues forward without replaying any script or extending
-  // the retry deadline. The real-browser test executes the delayed app itself.
   script.onload(); script.onerror();
-  for (const path of paths.slice(1)) {
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
-  assert.equal(page.inserted.length, paths.length);
+  assert.equal(page.inserted.length, 1);
   assert.equal(page.status.startup, "loaded");
   assert.equal(page.notice.hidden, true);
   assert.equal(page.timers.size, 0);
 });
 
 test("late success cannot start another retry window for a failed dependent", () => {
-  const page = fixture();
+  const page = fixture({themeFailed: true});
   page.advance(4000);
   page.current().onload();
   page.current().onerror();
@@ -164,17 +146,14 @@ test("late completion preserves an unrelated application error", () => {
   const page = fixture();
   page.advance(4000);
   page.message.textContent = "Conversation could not be opened.";
-  for (const path of paths) {
-    assert.equal(new URL(page.current().src).pathname, path);
-    page.current().onload();
-  }
+  page.current().onload();
   assert.equal(page.status.startup, "loaded");
   assert.equal(page.notice.hidden, false);
   assert.equal(page.message.textContent, "Conversation could not be opened.");
 });
 
 test("the recovery deadline covers the whole sequence, not each asset separately", () => {
-  const page = fixture();
+  const page = fixture({themeFailed: true});
   page.advance(3500);
   page.current().onload();
   page.current().onerror();

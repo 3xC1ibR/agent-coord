@@ -151,23 +151,24 @@ test("the open section shows each ask's kind, gain, effort, thread and state", a
   const link = first.byClass("ask-link")[0];
   assert.deepEqual([link.tagName, link.href, link.target, link.rel, link.textContent],
     ["a", "https://console.apify.com/billing", "_blank", "noopener noreferrer", "Open console.apify.com"]);
-  // Every kind offers a reply in the user's own words, in view, beside its resolutions.
+  // Every kind offers an answer field with Enter-to-resolve and a quiet Discuss in thread control.
   assert.deepEqual(first.byTag("button").map(button => button.textContent),
-    ["Checkout <b>", "Send reply", "Mark done", "Not done", "Reply in conversation", "Dismiss"]);
+    ["Checkout <b>", "Answer", "Mark done", "Not done", "Discuss in thread", "Dismiss"]);
   for (const id of [1, 2, 3, 4, 5, 6]) {
     const field = row(id).byClass("ask-note")[0];
-    assert.deepEqual([field.hidden, field.placeholder, field.parent.className], [false, "Reply in your own words…", "ask-reply"], "ask " + id);
+    assert.deepEqual([field.hidden, field.placeholder, field.parent.className], [false, "Type an answer…", "ask-reply"], "ask " + id);
     assert.equal(row(id).byClass("ask-replied")[0].hidden, true);
   }
   assert.equal(row(2).byClass("ask-meta")[0].text, "Approval asked 3d ago Checkout <b> Overdue · due Nov 20");
   assert.equal(row(2).byClass("ask-flag-attention").filter(node => !node.hidden).length, 1);
-  assert.deepEqual(row(2).byTag("button").map(button => button.textContent).slice(1), ["Send reply", "Approve", "Decline", "Reply in conversation", "Dismiss"]);
-  assert.deepEqual(row(4).byTag("button").map(button => button.textContent).slice(1), ["Send reply", "Grant", "Decline", "Reply in conversation", "Dismiss"]);
-  assert.deepEqual(row(5).byTag("button").map(button => button.textContent).slice(1), ["Send reply", "Accept", "Request changes", "Reply in conversation", "Dismiss"]);
-  // Every kind has the same arrangement: the field and Send reply, then its resolutions. A decision's are its options and its own text.
+  assert.deepEqual(row(2).byTag("button").map(button => button.textContent).slice(1), ["Answer", "Approve", "Decline", "Discuss in thread", "Dismiss"]);
+  assert.deepEqual(row(4).byTag("button").map(button => button.textContent).slice(1), ["Answer", "Grant", "Decline", "Discuss in thread", "Dismiss"]);
+  assert.deepEqual(row(5).byTag("button").map(button => button.textContent).slice(1), ["Answer", "Accept", "Request changes", "Discuss in thread", "Dismiss"]);
+  // Every kind uses the primary Answer submit button beside the input; no duplicate Answer with my text button.
   assert.deepEqual(row(3).byTag("button").map(button => button.textContent),
-    ["Crawler", "Send reply", "CSV", "JSON", "Answer with my text", "Reply in conversation", "Dismiss"]);
-  assert.deepEqual([control(row(3), "Send reply").parent.className, control(row(3), "Answer with my text").parent.className,
+    ["Crawler", "Answer", "CSV", "JSON", "Discuss in thread", "Dismiss"]);
+  assert.equal(control(row(3), "Answer with my text"), undefined);
+  assert.deepEqual([control(row(3), "Answer").parent.className, control(row(3), "CSV").parent.className,
     control(row(1), "Mark done").parent.className], ["ask-reply", "ask-entry", "ask-entry"]);
   assert.equal(row(3).byClass("ask-context")[0].textContent, "Default: CSV.");
   // A stale ask says why, and a closed thread is named before the user resolves anything.
@@ -204,38 +205,46 @@ test("resolutions post the kind's outcome with the note and remove the row", asy
   assert.equal($("asks-sections").children[0].text, "Open");
 });
 
-test("a decision is answered by an option or by Answer with my text", async () => {
-  const {view, row, control, posts} = setup([decision, closed]);
+test("Enter and Answer resolve asks directly while preset options attach typed text as a note", async () => {
+  const {view, row, control, posts} = setup([decision, closed, request]);
   await view.refresh();
   const input = row(3).byClass("ask-note")[0];
-  // Answer needs text: without it the field takes focus and nothing is sent.
-  await control(row(3), "Answer with my text").onclick();
+  assert.equal(control(row(3), "Answer").type, "submit");
+  // Empty input focuses the field and sends nothing.
+  await row(3).byTag("form")[0].onsubmit({preventDefault() {}});
   assert.equal(posts().length, 0);
   assert.equal(input.focused, true);
   input.value = "JSON later";
   await control(row(3), "CSV").onclick();
   assert.deepEqual(posts().at(-1), {path: "asks/3", body: {resolution: "answered", option: "CSV", note: "JSON later"}});
+  // Pressing Enter / clicking Answer on a decision resolves with {resolution: "answered", answer}.
   row(6).byClass("ask-note")[0].value = "  Friendly  ";
-  await control(row(6), "Answer with my text").onclick();
+  await row(6).byTag("form")[0].onsubmit({preventDefault() {}});
   assert.deepEqual(posts().at(-1), {path: "asks/6", body: {resolution: "answered", answer: "Friendly"}});
   assert.equal(row(6), undefined);
+  // Pressing Enter on a non-decision ask resolves with its primary resolution and typed note.
+  row(4).byClass("ask-note")[0].value = "  Stored in vault  ";
+  await row(4).byTag("form")[0].onsubmit({preventDefault() {}});
+  assert.deepEqual(posts().at(-1), {path: "asks/4", body: {resolution: "granted", note: "Stored in vault"}});
+  assert.equal(row(4), undefined);
 });
 
-test("a reply in the user's own words goes to the asking conversation and leaves the ask open", async () => {
+test("Shift+Enter and Discuss in thread send a non-resolving comment and leave the ask open", async () => {
   const {view, row, rows, control, posts, state} = setup([action, decision]);
   await view.refresh();
-  const field = row(1).byClass("ask-note")[0], form = row(1).byTag("form")[0];
-  // Nothing typed: Enter and Reply send nothing.
-  await form.onsubmit({preventDefault() {}});
+  const field = row(1).byClass("ask-note")[0];
+  // Nothing typed: Shift+Enter sends nothing and focuses the field.
+  await field.onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.equal(posts().length, 0);
-  // Once something is typed, a line says what each control does with it.
+  assert.equal(field.focused, true);
+  // Once something is typed, a concise hint explains Enter vs Shift+Enter.
   const hint = row(1).byClass("ask-hint")[0];
   assert.equal(hint.hidden, true);
   field.value = "  what do you need for dataforseo?  ";
   field.oninput();
-  assert.deepEqual([hint.hidden, hint.textContent], [false, AsksCopy.reply.hint]);
+  assert.deepEqual([hint.hidden, hint.textContent], [false, "Enter resolves · Shift+Enter discusses in thread"]);
   let prevented = false;
-  await form.onsubmit({preventDefault() { prevented = true; }});
+  await field.onkeydown({key: "Enter", shiftKey: true, preventDefault() { prevented = true; }});
   assert.equal(prevented, true);
   // An ordinary message to the asking conversation that names the ask and says it is still open.
   assert.deepEqual(posts(), [{path: "sessions/thread-1/messages", body: {
@@ -250,10 +259,9 @@ test("a reply in the user's own words goes to the asking conversation and leaves
   assert.equal(mark.text, "You replied just now what do you need for dataforseo?");
   assert.deepEqual(state.sent, ["thread-1"], "the open conversation is told a message went in");
   assert.equal(row(3).byClass("ask-replied")[0].hidden, true);
-  // A later reply replaces the mark; a resolution afterwards still carries typed text as the note.
+  // Clicking Discuss in thread with typed text also sends a non-resolving comment; a resolution afterwards carries typed text as note.
   field.value = "and the login?";
-  assert.equal(control(row(1), "Send reply").type, "submit", "Send reply submits the form, as Enter does");
-  await form.onsubmit({preventDefault() {}});
+  await control(row(1), "Discuss in thread").onclick();
   assert.equal(posts().at(-1).body.message, 'Re ask #1 "Add payout billing details in Apify" (still open): and the login?');
   assert.equal(posts().at(-1).body.requestId, "request-2");
   assert.match(mark.text, /and the login\?$/);
@@ -265,20 +273,20 @@ test("a reply in the user's own words goes to the asking conversation and leaves
 test("a reply keeps its text on failure, is not sent twice on a retry, and names a long ask briefly", async () => {
   let fail = true;
   const long = {...request, id: 8, question: "Verify the DataForSEO account ".repeat(8).trim() + "\nThen tell me the plan."};
-  const {view, row, posts} = setup([long], {respond: path => {
+  const {view, row, control, posts} = setup([long], {respond: path => {
     if (path.startsWith("sessions/") && fail) throw new Error("Could not confirm whether the message was accepted");
     return {turnId: "turn-1"};
   }});
   await view.refresh();
-  const field = row(8).byClass("ask-note")[0], form = row(8).byTag("form")[0], error = row(8).byClass("ask-row-error")[0];
+  const field = row(8).byClass("ask-note")[0], error = row(8).byClass("ask-row-error")[0];
   field.value = "which account?";
-  await form.onsubmit({preventDefault() {}});
+  await field.onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.equal(error.hidden, false);
   assert.equal(error.textContent, "Could not confirm whether the message was accepted. Your input is kept.");
   assert.equal(field.value, "which account?");
   assert.equal(row(8).byClass("ask-replied")[0].hidden, true);
   fail = false;
-  await form.onsubmit({preventDefault() {}});
+  await control(row(8), "Discuss in thread").onclick();
   // The same text retried reuses its request ID, so an accepted first attempt is not repeated.
   assert.deepEqual(posts().map(call => call.body.requestId), ["request-1", "request-1"]);
   const reference = posts()[0].body.message.split(" (still open): ")[0];
@@ -293,7 +301,7 @@ test("a thread outside Ribbon Field cannot take a reply, and says what to do ins
   await view.refresh();
   const field = row(1).byClass("ask-note")[0];
   field.value = "what do you need?";
-  await row(1).byTag("form")[0].onsubmit({preventDefault() {}});
+  await field.onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.equal(posts().length, 0);
   assert.equal(row(1).byClass("ask-row-error")[0].textContent, AsksCopy.reply.external + " Your input is kept.");
   assert.equal(field.value, "what do you need?");
@@ -305,7 +313,7 @@ test("the replied mark comes from the backend where it records replies, else fro
   const first = setup([action, decision], {storage});
   await first.view.refresh();
   first.row(1).byClass("ask-note")[0].value = "which card?";
-  await first.row(1).byTag("form")[0].onsubmit({preventDefault() {}});
+  await first.row(1).byClass("ask-note")[0].onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.deepEqual(first.posts().map(call => call.path), ["sessions/thread-1/messages"], "an older backend has no reply record");
   assert.deepEqual(Object.keys(JSON.parse(stored["agent-coord.ask-replies"])), ["1"]);
   // The page reloads: the mark is read back from this browser.
@@ -323,7 +331,7 @@ test("the replied mark comes from the backend where it records replies, else fro
       ? {id: 1, reply_text: body.text, replied_at: "2026-11-22T09:15:00+00:00"} : {turnId: "turn-1"}});
   await recorded.view.refresh();
   recorded.row(1).byClass("ask-note")[0].value = "which card?";
-  await recorded.row(1).byTag("form")[0].onsubmit({preventDefault() {}});
+  await recorded.row(1).byClass("ask-note")[0].onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.deepEqual(recorded.posts().map(call => [call.path, call.body.text]),
     [["sessions/thread-1/messages", undefined], ["asks/1/reply", "which card?"]]);
   assert.equal(recorded.view.open[0].replied_at, "2026-11-22T09:15:00+00:00");
@@ -335,28 +343,32 @@ test("the replied mark comes from the backend where it records replies, else fro
     respond: path => { if (path === "asks/1/reply") throw new Error("Unknown route"); return {turnId: "turn-1"}; }});
   await unrecorded.view.refresh();
   unrecorded.row(1).byClass("ask-note")[0].value = "which card?";
-  await unrecorded.row(1).byTag("form")[0].onsubmit({preventDefault() {}});
+  await unrecorded.row(1).byClass("ask-note")[0].onkeydown({key: "Enter", shiftKey: true, preventDefault() {}});
   assert.equal(unrecorded.row(1).byClass("ask-row-error")[0].hidden, true);
   assert.equal(unrecorded.row(1).byClass("ask-replied")[0].hidden, false);
 });
 
-test("Reply in conversation hands the ask and any typed text to the conversation's draft", async () => {
-  const {view, row, control, state, posts, opened} = setup([action]);
+test("Discuss in thread opens the asking conversation when empty and posts a comment when text is typed", async () => {
+  const {view, row, control, state, posts} = setup([action]);
   await view.refresh();
   const field = row(1).byClass("ask-note")[0];
-  await control(row(1), "Reply in conversation").onclick();
+  await control(row(1), "Discuss in thread").onclick();
   assert.deepEqual(state.composed, [["thread-1", 'Re ask #1 "Add payout billing details in Apify" (still open): ']]);
-  field.value = "  which card?  ";
-  await control(row(1), "Reply in conversation").onclick();
-  assert.deepEqual(state.composed.at(-1), ["thread-1", 'Re ask #1 "Add payout billing details in Apify" (still open): which card?']);
-  assert.equal(field.value, "", "the text moved to the draft");
-  // A conversation whose draft cannot take text is still opened; the typed text stays with the ask.
-  state.composable = false;
-  field.value = "keep me";
-  await control(row(1), "Reply in conversation").onclick();
-  assert.equal(field.value, "keep me");
   assert.equal(posts().length, 0);
-  assert.deepEqual(opened, []);
+
+  field.value = "  which card?  ";
+  await control(row(1), "Discuss in thread").onclick();
+  assert.equal(posts().length, 1);
+  assert.equal(posts()[0].path, "sessions/thread-1/messages");
+  assert.equal(posts()[0].body.message, 'Re ask #1 "Add payout billing details in Apify" (still open): which card?');
+  assert.equal(field.value, "");
+
+  // Without a draft composer callback, empty Discuss in thread still opens the thread directly.
+  const plain = setup([action]);
+  plain.view.compose = null;
+  await plain.view.refresh();
+  await plain.control(plain.row(1), "Discuss in thread").onclick();
+  assert.deepEqual(plain.opened, ["thread-1"]);
 });
 
 test("a failed resolution keeps the row, its input and says what went wrong", async () => {
@@ -519,13 +531,13 @@ test("an older backend gets decisions only, answered with the bodies it accepts"
   assert.deepEqual(list.byClass("ask-group-title").map(node => node.text), ["Blocking 1", "No project 1"]);
   assert.equal(row(40).byClass("ask-meta")[0].text, "Decision asked 1h ago Apify");
   assert.deepEqual(row(40).byTag("button").map(button => button.textContent),
-    ["Apify", "Send reply", "Staging", "Production", "Answer with my text", "Reply in conversation"]);
+    ["Apify", "Answer", "Staging", "Production", "Discuss in thread"]);
   assert.equal(row(40).byTag("select").length, 0);
   row(40).byClass("ask-note")[0].value = "typed first";
   await control(row(40), "Production").onclick();
   assert.deepEqual(posts().at(-1), {path: "asks/40", body: {option: "Production"}});
   row(41).byClass("ask-note")[0].value = " Friendly ";
-  await control(row(41), "Answer with my text").onclick();
+  await row(41).byTag("form")[0].onsubmit({preventDefault() {}});
   assert.deepEqual(posts().at(-1), {path: "asks/41", body: {answer: "Friendly"}});
   assert.equal(rows().length, 0);
   // Once the backend is updated the full view returns.

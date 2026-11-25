@@ -234,19 +234,19 @@ test("conversation eviction releases settled reconciliation state and snapshots 
   assert.equal(messages.acceptedRequests.size, 0);
 });
 
-test("reconciliation state follows the four-conversation cache instead of accumulating across visits", () => {
+test("reconciliation state follows the bounded 64-conversation cache instead of accumulating unboundedly across visits", () => {
   const messages = outgoing();
   const c = {state: {outgoing: messages, conversations: new Map(), selected: null}};
   vm.createContext(c);
   vm.runInContext(source.slice(source.indexOf("function conversationEntry("), source.indexOf("function retainConversation(")), c);
-  for (let index = 0; index < 20; index++) {
+  for (let index = 0; index < 80; index++) {
     const id = "conversation-" + index;
     c.state.selected = id;
     c.conversationEntry(id);
     messages.confirm(id, [acceptance("first", "Correction", {threadId: id})]);
     messages.settle(id, detailWith(user("old", "Earlier"), user("canonical", "Correction")));
-    assert.ok(messages.consumedItems.size <= 4);
-    assert.ok(messages.acceptedRequests.size <= 4);
+    assert.ok(messages.consumedItems.size <= 64);
+    assert.ok(messages.acceptedRequests.size <= 64);
   }
 });
 
@@ -372,6 +372,7 @@ test("acceptance for an evicted pending send still resolves a lost HTTP response
     return new Promise((resolve, reject) => { rejectResponse = reject; });
   };
   const sending = c.sendMessage();
+  c.state.maxCachedConversations = 4;
   for (let index = 0; index < 5; index++) {
     c.state.selected = "visited-" + index;
     c.conversationEntry(c.state.selected);

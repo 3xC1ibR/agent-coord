@@ -3,10 +3,40 @@
 const threadViews = (() => {
   const grouping = typeof module !== "undefined" ? require("./thread-groups.js") : threadGrouping;
   const overview = typeof module !== "undefined" ? require("./working-set.js") : WorkingSet;
+  const folderUtils = () => typeof module !== "undefined" ? require("./folders.js") : {inProject};
   const defaults = {repository: "", project: "", phase: "", show: "active", search: ""};
   function filters(values = {}) {
     return Object.fromEntries(Object.entries(defaults).map(([key, value]) =>
       [key, typeof values[key] === "string" ? values[key].trim() : value]));
+  }
+  function ownerProjectId(thread, byId) {
+    if (!thread) return null;
+    if (thread.project_id) return thread.project_id;
+    if (!byId?.size) return null;
+    const seen = new Set([thread.thread_id]);
+    for (let cur = overview.parentOf(thread, byId); cur && !seen.has(cur.thread_id); cur = overview.parentOf(cur, byId)) {
+      seen.add(cur.thread_id);
+      if (cur.project_id) return cur.project_id;
+    }
+    return null;
+  }
+  function inWorkspace(thread, cwd, {groups = [], filters: viewFilters = {}, threads = []} = {}) {
+    if (!cwd || cwd === "all") return true;
+    if (!thread) return false;
+    const {inProject: matchesDir} = folderUtils();
+    if (!thread.cwd && !thread.project_cwd) return true;
+    if (matchesDir(thread, cwd)) return true;
+    const allowed = new Set();
+    for (const group of groups) {
+      if (!group?.id) continue;
+      if (!group.cwd || matchesDir({project_cwd: group.cwd, workspace_cwds: group.workspace_cwds}, cwd)) allowed.add(group.id);
+    }
+    const f = filters(viewFilters);
+    if (f.project && f.project !== "__none__") allowed.add(f.project);
+    if (!allowed.size) return false;
+    const byId = threads.length ? new Map(threads.map(item => [item.thread_id, item])) : null;
+    const projectId = ownerProjectId(thread, byId);
+    return Boolean(projectId && allowed.has(projectId));
   }
   function matches(thread, values) {
     const f = filters(values);
@@ -94,7 +124,7 @@ const threadViews = (() => {
     if (["ArrowLeft", "ArrowRight"].includes(event.key)) return (index + (event.key === "ArrowLeft" ? -1 : 1) + count) % count;
     return null;
   }
-  return {filters, matches, badges, needsAction, same, shortcut};
+  return {filters, inWorkspace, matches, badges, needsAction, same, shortcut};
 })();
 
 class SavedViews {
@@ -229,11 +259,25 @@ class SavedViews {
       try { order = JSON.parse(this.preferences?.getItem(this.key + ".group-order") || "[]"); } catch { /* Optional preference. */ }
       this.groupOrders.set(this.key, Array.isArray(order) ? order.filter(id => typeof id === "string") : []);
     }
+    const {inProject: matchesDir} = typeof module !== "undefined" ? require("./folders.js") : {inProject};
+    const activeProjectIds = new Set((this.threads || [])
+      .filter(t => this.cwd === undefined || !this.cwd || matchesDir(t, this.cwd))
+      .map(t => t.project_id).filter(Boolean));
     const rank = new Map(this.groupOrders.get(this.key).map((id, index) => [id, index]));
-    return this.groups.filter(group => this.cwd === undefined || group.cwd === this.cwd)
+    return this.groups.filter(group => this.cwd === undefined || !this.cwd ||
+      (group.cwd ? matchesDir({project_cwd: group.cwd, workspace_cwds: group.workspace_cwds}, this.cwd) : group.cross_repo === true) ||
+      activeProjectIds.has(group.id))
       .map(group => ({id: "group-" + group.id, kind: "group", projectId: group.id, name: group.name,
         cwd: this.cwd, version: 1, filters: threadViews.filters({project: group.id}), group_by: "phase"}))
       .sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  }
+  workspaceThreads(threads = this.threads, view = this.current()) {
+    if (!this.cwd) return threads;
+    return threads.filter(thread => threadViews.inWorkspace(thread, this.cwd, {
+      groups: this.groups,
+      filters: this.effective(view).filters,
+      threads,
+    }));
   }
   moveGroup(id, targetId, after = false) {
     const order = this.groupItems().map(view => view.id);
@@ -572,9 +616,10 @@ class SavedViews {
     this.threads = threads;
     // Inventory polling must not replace the native drag source mid-gesture.
     if (this.dragGroup?.key === this.key) return;
+    if (this.loaded && this.cwd) this.rebuild();
     this.changed();
     const layout = this.getLayout(), now = Date.now() / 1000;
-    const badges = this.items.map(view => threadViews.badges(threads, this.effective(view).filters,
+    const badges = this.items.map(view => threadViews.badges(this.workspaceThreads(threads, view), this.effective(view).filters,
       {layout, now, workspace: this.cwd || "all", group: view.kind === "group" ? view.projectId : null}));
     const signature = JSON.stringify([this.items, this.activeId, badges, [...this.hiddenGroupIds()]]);
     if (signature === this.signature) return;

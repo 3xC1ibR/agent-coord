@@ -224,11 +224,21 @@
       await this.refresh();
       clearInterval(this.timer);
       this.timer = setInterval(() => {
-        if (this.$("schedules-dialog").open && !this.mutating) this.refresh({background: true}).catch(error => this.error("schedules-error", error));
+        if (this.$("schedules-dialog").open && !this.mutating && !globalThis.agentCoordEventsConnected) {
+          this.refresh({background: true}).catch(error => this.error("schedules-error", error));
+        }
       }, 5000);
     }
 
+    hydrate(items) {
+      if (!Array.isArray(items)) return;
+      ++this.revision;
+      this.update(items);
+      this.lastReadAt = Date.now();
+    }
+
     async refresh({background = false} = {}) {
+      if (background && globalThis.agentCoordEventsConnected && this.lastReadAt !== undefined) return;
       if (background && this.pending?.revision === this.revision) return this.pending.promise;
       // Conversation refreshes share one workspace-wide schedule list. The open
       // schedule manager polls for status changes on its own shorter interval.

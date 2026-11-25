@@ -23,6 +23,7 @@ class WorkThreadTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.now = 1000.0
         self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
+        self.addCleanup(self.store.close_idle_connections)
         self.store.register(session_id="conversation", client="codex", cwd=str(self.root))
         self.threads = self.store.threads
 
@@ -626,6 +627,56 @@ class WorkThreadTests(unittest.TestCase):
         self.assertEqual(result["title_source"], "agent")
         self.assertIsNone(self.store.get_session("conversation")["bead_id"])
         self.assertEqual(self.store.get_session("conversation")["presence"], "offline")
+
+    def test_auto_handle_fences_to_seen_cursors_when_newer_turn_arrives(self):
+        self.threads.start_turn("conversation", prompt="First question", turn_id="t1")
+        first_cp = self.threads.checkpoint(
+            "conversation",
+            {"phase": "investigation", "summary": "First answer.", "next_actor": "nobody", "next_action": ""},
+        )["checkpoint"]["id"]
+        self.threads.finish_turn("conversation", turn_id="t1", status="completed")
+        self.store.touch("conversation", turn_active=False)
+        first_comp = self.threads.get("conversation")["turn_completion"]["id"]
+
+        self.now += 5
+        self.threads.start_turn("conversation", prompt="Second question", turn_id="t2")
+        second_cp = self.threads.checkpoint(
+            "conversation",
+            {"phase": "investigation", "summary": "Second answer.", "next_actor": "nobody", "next_action": ""},
+        )["checkpoint"]["id"]
+        self.threads.finish_turn("conversation", turn_id="t2", status="completed")
+        self.store.touch("conversation", turn_active=False)
+        second_comp = self.threads.get("conversation")["turn_completion"]["id"]
+
+        receipt = {}
+        updated = self.threads.update(
+            "conversation",
+            seen=True,
+            seen_checkpoint_id=first_cp,
+            seen_completion_id=first_comp,
+            auto_handle=True,
+            out_receipt=receipt,
+        )
+        self.assertTrue(receipt["auto_handled"])
+        self.assertEqual(updated["handled_checkpoint_id"], first_cp)
+        self.assertEqual(updated["handled_completion_id"], first_comp)
+        # Turn 2 arrived after the displayed cursors, so it remains unread and unhandled!
+        self.assertTrue(updated["unread"])
+        self.assertTrue(updated["unhandled_response"])
+
+        updated2 = self.threads.update(
+            "conversation",
+            seen=True,
+            seen_checkpoint_id=second_cp,
+            seen_completion_id=second_comp,
+            auto_handle=True,
+            out_receipt=receipt,
+        )
+        self.assertTrue(receipt["auto_handled"])
+        self.assertEqual(updated2["handled_checkpoint_id"], second_cp)
+        self.assertEqual(updated2["handled_completion_id"], second_comp)
+        self.assertFalse(updated2["unread"])
+        self.assertFalse(updated2["unhandled_response"])
 
 
 if __name__ == "__main__":
