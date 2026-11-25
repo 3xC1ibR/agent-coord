@@ -742,6 +742,7 @@ class AntigravityDeliveryTests(unittest.TestCase):
     def test_provider_activity_refreshes_liveness(self):
         thread = self.create()
         self.start(thread)
+        self.assertTrue(self.sessions.persistence.flush(key=thread))
         with self.store._connection() as db:
             db.execute('UPDATE sessions SET last_seen_at = last_seen_at - 7200 WHERE session_id = ?', (thread,))
         self.assertEqual(self.store.get_session(thread)['presence'], 'stale')

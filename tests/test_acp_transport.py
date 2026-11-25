@@ -96,7 +96,9 @@ def extract_prompt_text(parts):
 def wait_for_gate(gate_name, cancel_event=None):
     gate_path = STATE_PATH.parent / f"gate-{gate_name}.flag"
     ready_path = STATE_PATH.parent / f"ready-{gate_name}.flag"
-    ready_path.write_text(str(os.getpid()), encoding="utf-8")
+    ready_temp = ready_path.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+    ready_temp.write_text(str(os.getpid()), encoding="utf-8")
+    ready_temp.replace(ready_path)
     while not gate_path.exists():
         if cancel_event is not None and cancel_event.is_set():
             return False
