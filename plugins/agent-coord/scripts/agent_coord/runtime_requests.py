@@ -223,6 +223,8 @@ def _discover_ready_owner(runtime, database, directory, timeout):
         try:
             record = runtime.discover(database, timeout=max(.001, deadline - time.monotonic()))
         except RuntimeError as error:
+            from .entrypoint import close_http_errors
+            close_http_errors(error)
             if str(error) != "The runtime owner is unavailable. Refusing a second owner.":
                 raise
             record = None
@@ -258,6 +260,12 @@ def forward_request(kind, payload, database=None, *, timeout=45):
     except CoordinationError:
         raise
     except (OSError, ValueError, RuntimeError) as error:
+        from urllib.error import HTTPError
+        if isinstance(error, HTTPError):
+            try:
+                error.close()
+            except Exception:
+                pass
         raise RuntimeRequestUnavailable("Runtime request outcome is unavailable; inspect its state before retrying: " + str(error)) from error
     if response.get("failure"):
         raise_failure(response["failure"])

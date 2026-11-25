@@ -6,7 +6,8 @@ Each conversation owns its process; Claude owns the resumable native transcript.
 """
 from __future__ import annotations
 
-from .history_persistence import prepare_history, publish_history, read_history, stage_history
+from . import history_persistence
+from .history_persistence import read_history
 
 import copy
 import json
@@ -17,6 +18,7 @@ import stat
 import tempfile
 import subprocess
 import threading
+import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
@@ -282,6 +284,8 @@ class ClaudeRPC:
         self.catalog = None
         self.closed = False
         self.effective_permissions = {}
+        self.turn_events = {}
+        self.interrupted_turns = {}
         with store._connection() as db:
             db.execute("CREATE TABLE IF NOT EXISTS claude_sessions (thread_id TEXT PRIMARY KEY, started INTEGER NOT NULL DEFAULT 0)")
             columns = {row[1] for row in db.execute("PRAGMA table_info(claude_sessions)")}
@@ -367,76 +371,90 @@ class ClaudeRPC:
         return current
 
     def _history(self, thread_id, *, include_turns=True):
-        with self.lock:
-            if not include_turns:
+        if not include_turns:
+            with self.lock:
                 return {"id": thread_id, "turns": [],
                         "status": {"type": "active" if thread_id in self.turns else "idle"}}
-            return self._read_history(thread_id)
+        return self._read_history(thread_id)
 
     def _fork(self, thread_id, params):
         with self.lock:
             if thread_id in self.turns or any(r[0] == thread_id for r in self.requests.values()):
                 raise CoordinationError("Wait for the running Claude turn and pending input to finish before forking.")
-            history = self._read_history(thread_id)
-            with self.store._connection() as db:
-                source = db.execute("SELECT * FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
-            if source is None:
-                raise CoordinationError("Fork requires a Claude conversation created in Ribbon Field.")
-            child_id = str(uuid.uuid4())
-            snapshot = None
-            snapshot_created = False
-            started = thread_id in self.started or bool(source["started"])
-            if started or source["fork_path"]:
-                # Freeze the native transcript now, including tool/context data
-                # absent from display history. Claude performs the actual branch
-                # on first input; --resume <snapshot> never follows later parent
-                # turns, even after restart or when forking an unused fork.
-                try:
-                    if started:
-                        session_id = str(uuid.UUID(source["native_id"] or thread_id))
-                        root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-                        paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
-                        if len(paths) != 1:
-                            raise ValueError("Native transcript is missing or ambiguous")
-                        path = paths[0]
-                    else:
-                        path = Path(source["fork_path"])
-                    content = path.read_bytes()
-                    entries = [json.loads(line) for line in content.splitlines() if line.strip()]
-                    if not any(isinstance(e, dict) and e.get("type") in {"user", "assistant"}
-                               and not e.get("isSidechain") for e in entries):
-                        raise ValueError("Native transcript has no conversation messages")
-                    latest = history.get("turns", [])[-1:] or [{}]
-                    prompt = next((i for i in latest[0].get("items", []) if i.get("type") == "userMessage"), None)
-                    if prompt and not any(isinstance(e, dict) and e.get("uuid") == prompt["id"] for e in entries):
-                        raise ValueError("Native transcript has not saved the latest turn yet")
-                    directory = self.store.database_path.parent / "claude-forks"
-                    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    snapshot = directory / f"{child_id}.jsonl"
-                    with snapshot.open("xb") as stream:
-                        snapshot_created = True
-                        os.chmod(snapshot, 0o600)
-                        stream.write(content)
-                except (OSError, ValueError) as exc:
-                    if snapshot_created:
-                        snapshot.unlink(missing_ok=True)
-                    raise CoordinationError(f"Cannot fork Claude history: {exc}. Retry after its transcript is saved.") from exc
-            elif history.get("turns"):
-                raise CoordinationError("Cannot fork Claude history before its native transcript has been saved.")
-            history["id"] = child_id
+            started_in_memory = thread_id in self.started
+        history = self._read_history(thread_id)
+        with self.store._connection() as db:
+            source = db.execute("SELECT * FROM claude_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+        if source is None:
+            raise CoordinationError("Fork requires a Claude conversation created in Ribbon Field.")
+        child_id = str(uuid.uuid4())
+        snapshot = None
+        snapshot_created = False
+        started = started_in_memory or bool(source["started"])
+        if started or source["fork_path"]:
+            # Freeze the native transcript now, including tool/context data
+            # absent from display history. Claude performs the actual branch
+            # on first input; --resume <snapshot> never follows later parent
+            # turns, even after restart or when forking an unused fork.
             try:
-                prepared_history = prepare_history(history)
-                stage_history(self.store, prepared_history)
+                if started:
+                    session_id = str(uuid.UUID(source["native_id"] or thread_id))
+                    root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+                    paths = list((root / "projects").glob(f"*/{session_id}.jsonl"))
+                    if len(paths) != 1:
+                        raise ValueError("Native transcript is missing or ambiguous")
+                    path = paths[0]
+                else:
+                    path = Path(source["fork_path"])
+                content = path.read_bytes()
+                entries = [json.loads(line) for line in content.splitlines() if line.strip()]
+                if not any(isinstance(e, dict) and e.get("type") in {"user", "assistant"}
+                           and not e.get("isSidechain") for e in entries):
+                    raise ValueError("Native transcript has no conversation messages")
+                latest = history.get("turns", [])[-1:] or [{}]
+                prompt = next((i for i in latest[0].get("items", []) if i.get("type") == "userMessage"), None)
+                if prompt and not any(isinstance(e, dict) and e.get("uuid") == prompt["id"] for e in entries):
+                    raise ValueError("Native transcript has not saved the latest turn yet")
+                directory = self.store.database_path.parent / "claude-forks"
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                snapshot = directory / f"{child_id}.jsonl"
+                with snapshot.open("xb") as stream:
+                    snapshot_created = True
+                    os.chmod(snapshot, 0o600)
+                    stream.write(content)
+            except (OSError, ValueError) as exc:
+                if snapshot_created:
+                    snapshot.unlink(missing_ok=True)
+                raise CoordinationError(f"Cannot fork Claude history: {exc}. Retry after its transcript is saved.") from exc
+        elif history.get("turns"):
+            raise CoordinationError("Cannot fork Claude history before its native transcript has been saved.")
+        turns = copy.deepcopy(history.get("turns", []))
+        fork_history = {**history, "id": child_id, "turns": turns}
+        try:
+            save_fn = getattr(history_persistence, "save_history", None)
+            if save_fn is not None:
                 with self.store._connection() as db:
                     db.execute("INSERT INTO claude_sessions (thread_id, fork_path, native_id) VALUES (?, ?, ?)",
                                (child_id, str(snapshot) if snapshot else None, child_id))
-                    publish_history(db, child_id, prepared_history)
+                save_fn(self.store, child_id, {"id": child_id, "turns": turns})
+            else:
+                prepared_history = history_persistence.prepare_history(fork_history)
+                history_persistence.stage_history(self.store, prepared_history)
+                with self.store._connection() as db:
+                    db.execute("INSERT INTO claude_sessions (thread_id, fork_path, native_id) VALUES (?, ?, ?)",
+                               (child_id, str(snapshot) if snapshot else None, child_id))
+                    history_persistence.publish_history(db, child_id, prepared_history)
+        except Exception:
+            try:
+                with self.store._connection() as db:
+                    db.execute("DELETE FROM claude_sessions WHERE thread_id = ?", (child_id,))
             except Exception:
-                if snapshot is not None:
-                    snapshot.unlink(missing_ok=True)
-                raise
-            options = self._options(params)
-            return {"thread": history, "model": options["model"], "reasoningEffort": options["effort"]}
+                pass
+            if snapshot is not None:
+                snapshot.unlink(missing_ok=True)
+            raise
+        options = self._options(params)
+        return {"thread": fork_history, "model": options["model"], "reasoningEffort": options["effort"]}
 
     def _read_history(self, thread_id):
         history = read_history(self.store, thread_id)
@@ -570,6 +588,8 @@ class ClaudeRPC:
             user = {"id": params.get("_coordination_input_id") or str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}
             turn = {"id": str(uuid.uuid4()), "items": [user], "status": "inProgress"}
             self.turns[thread_id] = turn
+            self.turn_events[turn["id"]] = threading.Event()
+            self.interrupted_turns.pop(thread_id, None)
             self.blocks[thread_id] = {}
             self.confirmed_blocks[thread_id] = set()
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
@@ -580,15 +600,38 @@ class ClaudeRPC:
                 raise
             return {"turn": copy.deepcopy(turn)}
         if method == "turn/interrupt":
-            turn = self.turns.get(thread_id)
-            if not turn or turn["id"] != params["turnId"]:
-                raise CoordinationError("The active Claude turn changed or finished.")
-            # Kill only this conversation's process: no shared server or other chat.
-            # Closing the transport bounds Stop even when an approval is outstanding.
-            connection = self.connections.pop(thread_id, None)
-            if connection:
-                connection.close()
-            self._finish(thread_id, "interrupted")
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params["turnId"]:
+                    raise CoordinationError("The active Claude turn changed or finished.")
+                turn_id = turn["id"]
+                connection = self.connections.get(thread_id)
+                pending_approval = any(request[0] == thread_id for request in self.requests.values())
+                turn_event = self.turn_events.setdefault(turn_id, threading.Event())
+                self.interrupted_turns[thread_id] = turn_id
+            settled = False
+            if isinstance(connection, ClaudeConnection):
+                deadline = time.monotonic() + 2.0
+                if not pending_approval:
+                    try:
+                        connection.control("interrupt", timeout=2.0)
+                    except CoordinationError:
+                        pass
+                else:
+                    try:
+                        connection.write({"type": "control_request", "request_id": str(uuid.uuid4()),
+                                          "request": {"subtype": "interrupt"}})
+                    except CoordinationError:
+                        pass
+                settled = turn_event.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if not settled:
+                # Escalate to SIGTERM only if Claude did not flush its native turn boundary within 2.0s.
+                self._finish(thread_id, "interrupted")
+                with self.lock:
+                    if self.connections.get(thread_id) is connection:
+                        self.connections.pop(thread_id, None)
+                if connection is not None:
+                    connection.close()
             return {}
         raise CoordinationError(f"Claude does not support {method}.")
 
@@ -742,6 +785,9 @@ class ClaudeRPC:
             elif (message.get("origin") or {}).get("kind") in {"task-notification", "auto-continuation"} or message.get("resume_reason"):
                 return
             # Older CLIs and startup failures can omit attribution entirely.
+            if self.interrupted_turns.get(thread_id) == turn["id"]:
+                self._finish(thread_id, "interrupted")
+                return
             failed = message.get("is_error") or message.get("subtype") != "success"
             error = "\n".join(message.get("errors") or []) or message.get("result") if failed else None
             self._finish(thread_id, "failed" if failed else "completed", error)
@@ -754,6 +800,10 @@ class ClaudeRPC:
         turn = self.turns.pop(thread_id, None)
         if not turn:
             return
+        self.interrupted_turns.pop(thread_id, None)
+        turn_event = self.turn_events.pop(turn["id"], None)
+        if turn_event is not None:
+            turn_event.set()
         turn["status"] = status
         for item in turn["items"]:
             if item.get("status") == "inProgress":

@@ -38,7 +38,7 @@ class EntrypointTests(unittest.TestCase):
         (self.payload / "backend.json").write_text(json.dumps({"python": sys.executable}))
         self.env = dict(os.environ, AGENT_COORD_DB=str(self.database),
                         AGENT_COORD_SESSION_ID="entrypoint-test", AGENT_COORD_CLIENT="claude",
-                        PYTHONPATH=str(SCRIPTS))
+                        AGENT_COORD_ZELLIJ_WAKE="0", PYTHONPATH=str(SCRIPTS))
         self.env.pop("CLAUDE_ENV_FILE", None)
         code = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
                 "from agent_coord.cli import main; raise SystemExit(main())")
@@ -67,11 +67,15 @@ class EntrypointTests(unittest.TestCase):
                        "protocol": runtime.PROTOCOL_VERSION, "payload": str(self.payload), "client_requests": 1}
         self.actions = []
         self.legacy_owner = False
+        self.http_error = None
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if fixture.http_error is not None:
+                    self.send_error(fixture.http_error)
+                    return
                 if (self.headers.get("Authorization") != "Bearer test-token"
                         or body.get("instance") != "test-instance"):
                     self.send_error(403)
@@ -212,12 +216,84 @@ class EntrypointTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("error", json.loads(result.stderr))
         self.save_record()
+        self.actions.clear()
+        fast_result = self.invoke("agent-coord-hook", input=hook)
+        self.assertEqual(fast_result.returncode, 0, fast_result.stderr)
+        self.assertEqual(self.actions, [])
+        routed_hook = json.dumps({"hook_event_name": "UserPromptSubmit",
+                                  "session_id": "entrypoint-test", "cwd": str(self.root),
+                                  "prompt": "Verify owner metadata"})
         for invalid in ([], None, {**self.record, "payload": None}):
             with self.subTest(status=invalid):
                 self.status = invalid
-                result = self.invoke("agent-coord-hook", input=hook)
+                result = self.invoke("agent-coord-hook", input=routed_hook)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("error", json.loads(result.stderr))
+
+    def test_hooks_fail_open_across_transient_restart_and_handover_states(self):
+        self.owner_store.begin_work(session_id="entrypoint-test", scopes=["allowed/**"])
+        allowed_pre_tool = json.dumps({
+            "hook_event_name": "PreToolUse", "tool_name": "Write",
+            "session_id": "entrypoint-test", "cwd": str(self.root),
+            "tool_input": {"file_path": str(self.root / "allowed/main.py")},
+        })
+        denied_pre_tool = json.dumps({
+            "hook_event_name": "PreToolUse", "tool_name": "Write",
+            "session_id": "entrypoint-test", "cwd": str(self.root),
+            "tool_input": {"file_path": str(self.root / "blocked/main.py")},
+        })
+        non_pre_tool_events = [
+            {"hook_event_name": "UserPromptSubmit", "session_id": "entrypoint-test",
+             "cwd": str(self.root), "prompt": "Continue"},
+            {"hook_event_name": "PostToolUse", "session_id": "entrypoint-test",
+             "cwd": str(self.root), "tool_name": "Write",
+             "tool_input": {"file_path": str(self.root / "allowed/main.py")}},
+            {"hook_event_name": "Stop", "session_id": "entrypoint-test", "cwd": str(self.root)},
+            {"hook_event_name": "SessionStart", "session_id": "entrypoint-test", "cwd": str(self.root)},
+            {"hook_event_name": "SessionEnd", "session_id": "entrypoint-test", "cwd": str(self.root)},
+        ]
+
+        def verify_transient_state(label):
+            with self.subTest(state=label, event="PreToolUse-allow"):
+                self.actions.clear()
+                allow_res = self.invoke("agent-coord-hook", input=allowed_pre_tool)
+                self.assertEqual(allow_res.returncode, 0, allow_res.stderr)
+                self.assertEqual(json.loads(allow_res.stdout), {})
+                self.assertEqual(self.actions, [])
+            with self.subTest(state=label, event="PreToolUse-deny"):
+                deny_res = self.invoke("agent-coord-hook", input=denied_pre_tool)
+                self.assertEqual(deny_res.returncode, 0, deny_res.stderr)
+                self.assertEqual(
+                    json.loads(deny_res.stdout)["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+            for payload in non_pre_tool_events:
+                with self.subTest(state=label, event=payload["hook_event_name"]):
+                    res = self.invoke("agent-coord-hook", input=json.dumps(payload))
+                    self.assertEqual(res.returncode, 0, res.stderr)
+                    self.assertEqual(json.loads(res.stdout), {})
+                    self.assertIn("coordinator unavailable", res.stderr)
+
+        original_status = dict(self.status)
+        try:
+            self.http_error = 503
+            verify_transient_state("http_503")
+            self.http_error = 502
+            verify_transient_state("http_502")
+            self.http_error = None
+
+            self.status = {**original_status, "instance": "replacement-handover-instance"}
+            verify_transient_state("instance_mismatch")
+            self.status = dict(original_status)
+
+            runtime.atomic_json(self.directory / "discovery.json", {**self.record, "control_url": "http://127.0.0.1:1/"})
+            verify_transient_state("connection_refused")
+
+            (self.directory / "discovery.json").unlink()
+            verify_transient_state("missing_discovery")
+        finally:
+            self.http_error = None
+            self.status = original_status
+            self.save_record()
 
     def test_no_owner_runs_local_and_install_does_not_pin_owner(self):
         database = self.root / "local.sqlite3"

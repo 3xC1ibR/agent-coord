@@ -16,7 +16,14 @@ from pathlib import Path
 import threading
 import uuid
 
-from .acp import ACPConnection
+from .acp import (
+    ACPConnection,
+    ACPReplayCollector,
+    accepts_keyword,
+    reconcile_replayed_history,
+    run_or_capture_write,
+    transport_handover_active,
+)
 from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
 from .kimi_setup import ensure_hooks, resolve_runtime
@@ -38,7 +45,15 @@ class KimiConnection(ACPConnection):
         removed = {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT_COORD_DELEGATION_ID", "AGENT_COORD_ZELLIJ_WAKE"}
         env = {k: v for k, v in os.environ.items() if k not in removed and not k.startswith("ZELLIJ")}
         env = client_environment(env, store.database_path, "kimi", session_id=options.get("threadId"))
-        super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+        super().__init__(
+            callback,
+            command=command,
+            cwd=options["cwd"],
+            env=env,
+            store=store,
+            provider="kimi",
+            thread_id=options.get("threadId"),
+        )
 
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": 1,
@@ -79,6 +94,9 @@ class KimiRPC:
         self.connections, self.options, self.native, self.generations = {}, {}, {}, {}
         self.turns, self.completed, self.requests, self.settings, self.capabilities = {}, {}, {}, {}, {}
         self.journals = {}
+        self.active_request_ids = {}
+        self.turn_events = {}
+        self._replay_collectors = {}
         # Turns a backend update is stopping; their late requests are refused.
         self.update_stopping = set()
         self.catalog = None
@@ -89,28 +107,224 @@ class KimiRPC:
         with store._connection() as db:
             self.initial_prompt = NativePromptState(store, "kimi", db)
             db.execute("CREATE TABLE IF NOT EXISTS kimi_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(kimi_sessions)")}
+            for column in ("channel", "native_session_id", "turn_id", "request_id", "options_json", "pending_approvals_json"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE kimi_sessions ADD COLUMN {column} TEXT")
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
 
+    def _persist_session_state(self, thread_id: str) -> None:
+        with self.lock:
+            native_id = self.native.get(thread_id)
+            options = dict(self.options.get(thread_id) or {})
+            cwd = options.get("cwd")
+            if not native_id or not cwd:
+                return
+            connection = self.connections.get(thread_id)
+            channel = getattr(connection, "channel", None)
+            turn = self.turns.get(thread_id)
+            turn_id = turn["id"] if turn else None
+            request_id = self.active_request_ids.get(thread_id) if turn_id else None
+            options_payload = {
+                **options,
+                "_settings": list(self.settings.get(thread_id, (None, None))),
+                "_capabilities": self.capabilities.get(thread_id) or {},
+                "_effective_permission": self.effective_permissions.get(thread_id),
+            }
+            approvals_payload = {
+                key: copy.deepcopy(value)
+                for key, value in self.requests.items()
+                if value["thread"] == thread_id
+            }
+        options_json = json.dumps(options_payload, sort_keys=True)
+        approvals_json = json.dumps(approvals_payload, sort_keys=True)
+
+        def write_row():
+            with self.store.database_operation("kimi.session_state"), self.store._connection() as db:
+                db.execute(
+                    """INSERT INTO kimi_sessions (
+                        thread_id, native_id, cwd, channel, native_session_id,
+                        turn_id, request_id, options_json, pending_approvals_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        cwd = excluded.cwd,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id,
+                        turn_id = excluded.turn_id,
+                        request_id = excluded.request_id,
+                        options_json = excluded.options_json,
+                        pending_approvals_json = excluded.pending_approvals_json""",
+                    (thread_id, native_id, cwd, channel, native_id, turn_id, request_id, options_json, approvals_json),
+                )
+
+        run_or_capture_write(write_row, required=True)
+
+    @classmethod
+    def _approval_display(cls, thread_id: str, turn_id: str | None, pending: dict) -> tuple[str, dict]:
+        request = pending["request"]
+        questions = pending["questions"]
+        params: dict = {"threadId": thread_id, "turnId": turn_id}
+        if questions:
+            params.update(questions=questions, allowCancel=True)
+            return "item/tool/requestUserInput", params
+        tool = request.get("toolCall", {})
+        options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
+        decisions = {"allow_once": "accept", "allow_always": "acceptForSession", "reject_once": "decline"}
+        params.update(
+            reason=tool.get("title", "Kimi tool request"),
+            command=json.dumps(cls._bounded(tool.get("rawInput", tool.get("content", {}))), indent=2),
+            availableDecisions=list(dict.fromkeys(decisions[o["kind"]] for o in options if o.get("kind") in decisions)) + ["cancel"],
+        )
+        return "item/commandExecution/requestApproval", params
+
+    def attach_channel(self, thread_id, channel, pid, *, returncode=None):
+        """Rebind a surviving Kimi ACP channel during CoordinatorProjection.load()."""
+        projection = getattr(self.store, "provider_projection", None)
+        if not thread_id:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, None, channel, pid, provider="kimi", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT * FROM kimi_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            prompt_row = None
+            if row is not None:
+                native_id = row["native_session_id"] or row["native_id"]
+                prompt_row = db.execute(
+                    "SELECT started FROM native_prompt_initialization WHERE provider='kimi' AND thread_id=? AND native_id=?",
+                    (thread_id, native_id),
+                ).fetchone()
+        if row is None:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, thread_id, channel, pid, provider="kimi", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        native_id = row["native_session_id"] or row["native_id"]
+        cwd = row["cwd"]
+        saved_options = json.loads(row["options_json"]) if row["options_json"] else {"cwd": cwd, "permission_mode": "default", "yolo": False}
+        saved_settings = tuple(saved_options.pop("_settings", [saved_options.get("model"), saved_options.get("effort")]))
+        saved_capabilities = saved_options.pop("_capabilities", {"loadSession": True})
+        effective_permission = saved_options.pop("_effective_permission", saved_options.get("permission_mode", "default"))
+        active_turn_id = row["turn_id"]
+        active_request_id = row["request_id"]
+        approvals = json.loads(row["pending_approvals_json"]) if row["pending_approvals_json"] else {}
+        saved_history = read_history(self.store, thread_id) if active_turn_id else None
+
+        generation = object()
+        connection = self.connection_factory.attach(
+            self.store,
+            lambda message, tid=thread_id, gen=generation: self._message(tid, gen, message),
+            thread_id,
+            channel,
+            pid,
+            provider="kimi",
+            returncode=returncode,
+        )
+        with self.lock:
+            self.generations[thread_id] = generation
+            self.connections[thread_id] = connection
+            self.native[thread_id] = native_id
+            self.options[thread_id] = dict(saved_options)
+            self.settings[thread_id] = saved_settings
+            self.capabilities[thread_id] = saved_capabilities
+            self.effective_permissions[thread_id] = effective_permission
+            if prompt_row is not None and not prompt_row[0]:
+                self.initial_prompt.pending[thread_id] = native_id
+            else:
+                self.initial_prompt.pending.pop(thread_id, None)
+
+            if active_turn_id:
+                existing_turn = next(
+                    (
+                        copy.deepcopy(t)
+                        for t in (saved_history or {}).get("turns", [])
+                        if t.get("id") == active_turn_id
+                    ),
+                    None,
+                )
+                if existing_turn is None:
+                    existing_turn = {"id": active_turn_id, "status": "inProgress", "items": []}
+                else:
+                    existing_turn["status"] = "inProgress"
+                self.turns[thread_id] = existing_turn
+                self.turn_events[active_turn_id] = threading.Event()
+                self.journals[thread_id] = PromptJournal(native_id, cwd)
+                if active_request_id:
+                    self.active_request_ids[thread_id] = active_request_id
+                    connection.bind_pending_request(
+                        active_request_id,
+                        on_response=lambda outcome, tid=thread_id, t_id=active_turn_id: self._prompt_done(tid, t_id, outcome),
+                    )
+
+            for key, entry in approvals.items():
+                self.requests[key] = entry
+
+        sessions = getattr(projection, "sessions", None) if projection is not None else None
+        if sessions is not None:
+            with sessions.lock:
+                sessions.loaded.add(thread_id)
+                sessions.loaded_clients[thread_id] = "kimi"
+                if active_turn_id:
+                    sessions.active[thread_id] = active_turn_id
+                existing_ids = {r.get("id") for r in sessions.requests.values()}
+                for key, entry in approvals.items():
+                    if key not in existing_ids:
+                        method, params = self._approval_display(thread_id, active_turn_id, entry)
+                        ui_key = str(uuid.uuid4())
+                        sessions.requests[ui_key] = {
+                            "id": key,
+                            "method": method,
+                            "params": params,
+                            "key": ui_key,
+                            "received_at": self.store.clock(),
+                        }
+        return connection
+
     def _capture_usage(self, thread_id):
-        try:
-            usage = backfill_usage(self.store, thread_id)
-            self._emit("thread/usage/updated", thread_id, usage=usage)
-        except Exception:
-            # Telemetry must never fail a provider turn or close its transport.
-            logging.getLogger(__name__).warning("Could not capture Kimi usage")
+        def record_usage():
+            try:
+                usage = backfill_usage(self.store, thread_id)
+                self._emit("thread/usage/updated", thread_id, usage=usage)
+            except Exception:
+                # Telemetry must never fail a provider turn or close its transport.
+                logging.getLogger(__name__).warning("Could not capture Kimi usage")
+
+        run_or_capture_write(record_usage, required=False)
 
     def _context_usage(self, thread_id, update):
         if any(type(update.get(key)) is not int or update[key] < 0 for key in ("used", "size")):
             return
-        try:
-            self.store.usage.record_context(thread_id, provider="kimi", native_id=self.native[thread_id],
-                used=update.get("used"), limit=update.get("size"))
-            self._emit("thread/usage/updated", thread_id,
-                usage=self.store.usage.summary(thread_id, provider="kimi"))
-        except Exception:
-            logging.getLogger(__name__).warning("Could not capture Kimi context usage")
+        native_id = self.native.get(thread_id)
+        if not native_id:
+            return
+
+        def record_context():
+            try:
+                self.store.usage.record_context(
+                    thread_id,
+                    provider="kimi",
+                    native_id=native_id,
+                    used=update.get("used"),
+                    limit=update.get("size"),
+                )
+                self._emit(
+                    "thread/usage/updated",
+                    thread_id,
+                    usage=self.store.usage.summary(thread_id, provider="kimi"),
+                )
+            except Exception:
+                logging.getLogger(__name__).warning("Could not capture Kimi context usage")
+
+        run_or_capture_write(record_context, required=False)
 
     def _history(self, thread_id, *, include_turns=True):
         if not include_turns:
@@ -188,15 +402,30 @@ class KimiRPC:
             raise CoordinationError("Kimi did not return updated session settings. Update Kimi Code CLI.")
         return result
 
+    def _options_match(self, thread_id, options) -> bool:
+        saved = self.options.get(thread_id)
+        if saved is None:
+            return False
+        resolved_model, resolved_effort = self.settings.get(thread_id, (None, None))
+        return {
+            **saved,
+            "model": saved.get("model") or resolved_model,
+            "effort": saved.get("effort") or resolved_effort,
+        } == {
+            **options,
+            "model": options.get("model") or resolved_model,
+            "effort": options.get("effort") or resolved_effort,
+        }
+
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
-        if current and (current.process.poll() is not None or self.options.get(thread_id) != options):
+        if current and (current.process.poll() is not None or not self._options_match(thread_id, options)):
             self._shutdown(thread_id)
             current = None
         if current:
             return current
         with self.store._connection() as db:
-            row = db.execute("SELECT native_id, cwd FROM kimi_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            row = db.execute("SELECT native_id, native_session_id, cwd FROM kimi_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
         if row and row["cwd"] != options["cwd"]:
             raise CoordinationError("Kimi sessions keep their original workspace. Start a new session in the new directory.")
         generation = object()
@@ -209,8 +438,10 @@ class KimiRPC:
             self.capabilities[thread_id] = initialized["agentCapabilities"]
             params = {"cwd": options["cwd"], "mcpServers": []}
             method = "session/new"
-            if row:
-                self.native[thread_id] = row["native_id"]
+            saved_native = (row["native_session_id"] or row["native_id"]) if row else None
+            collector = None
+            if saved_native:
+                self.native[thread_id] = saved_native
                 caps = self.capabilities[thread_id]
                 if "resume" in caps.get("sessionCapabilities", {}):
                     method = "session/resume"
@@ -218,16 +449,34 @@ class KimiRPC:
                     method = "session/load"
                 else:
                     raise CoordinationError("This Kimi runtime cannot resume saved sessions. Update Kimi Code CLI.")
-                params["sessionId"] = row["native_id"]
-            session = connection.request(method, params)
-            native_id = row["native_id"] if row else session.get("sessionId")
+                params["sessionId"] = saved_native
+                collector = ACPReplayCollector(thread_id, provider="kimi", unknown_empty_tool_result=False)
+                self._replay_collectors[thread_id] = collector
+            try:
+                session = connection.request(method, params)
+            finally:
+                self._replay_collectors.pop(thread_id, None)
+            native_id = saved_native if saved_native else session.get("sessionId")
             if not isinstance(native_id, str) or not native_id:
                 raise CoordinationError("Kimi did not return a native session identity.")
             self.native[thread_id] = native_id
             # Persist before setting changes so retries never replace a native conversation.
             with self.store._connection() as db:
-                db.execute("INSERT OR REPLACE INTO kimi_sessions VALUES (?, ?, ?)", (thread_id, native_id, options["cwd"]))
-                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
+                db.execute(
+                    """INSERT INTO kimi_sessions (thread_id, native_id, cwd, channel, native_session_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        cwd = excluded.cwd,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id""",
+                    (thread_id, native_id, options["cwd"], getattr(connection, "channel", None), native_id),
+                )
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=saved_native is not None)
+            if collector is not None:
+                replayed_turns = collector.finalize()
+                if reconcile_replayed_history(self.store, self.on_event, thread_id, replayed_turns):
+                    self.initial_prompt.confirm(thread_id)
             if options.get("model"):
                 session = self._select(connection, native_id, session, "model", options["model"])
             if options.get("effort"):
@@ -241,7 +490,8 @@ class KimiRPC:
             self.effective_permissions[thread_id] = mode
             self.settings[thread_id] = current_settings(session)
             self.options[thread_id] = dict(options)
-            if row:
+            self._persist_session_state(thread_id)
+            if saved_native:
                 self._capture_usage(thread_id)
             return connection
         except Exception:
@@ -315,44 +565,66 @@ class KimiRPC:
             self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
             prompt = []
-            if thread_id in self.initial_prompt.pending:
+            initial = thread_id in self.initial_prompt.pending
+            changes = self.store.threads.observe_context(thread_id, initial=initial)
+            if initial:
                 prompt.append({"type": "text", "text": coordination_bootstrap(self.store, thread_id)})
+            elif changes:
+                prompt.append({"type": "text", "text": "Updated coordination context: " + json.dumps(changes, sort_keys=True)})
             for part in params["input"]:
                 if part["type"] == "text":
                     prompt.append({"type": "text", "text": part["text"]})
                 elif part["type"] == "image":
-                    if not self.capabilities[thread_id].get("promptCapabilities", {}).get("image"):
+                    if not self.capabilities.get(thread_id, {}).get("promptCapabilities", {}).get("image"):
                         raise CoordinationError("This Kimi runtime does not support image input.")
                     header, data = part["url"].split(",", 1)
                     prompt.append({"type": "image", "mimeType": header[5:].split(";")[0], "data": data})
             turn = {"id": str(uuid.uuid4()), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
-            self.turns[thread_id] = turn
+            request_id = str(uuid.uuid4())
+            with self.lock:
+                self.turns[thread_id] = turn
+                self.turn_events[turn["id"]] = threading.Event()
+                self.active_request_ids[thread_id] = request_id
+            self._persist_session_state(thread_id)
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
                 self.journals[thread_id] = PromptJournal(self.native[thread_id], self.options[thread_id]["cwd"])
-                future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-                future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
+                submit_kwargs = {"request_id": request_id} if accepts_keyword(connection.submit, "request_id") else {}
+                use_on_response = accepts_keyword(connection.submit, "on_response")
+                if use_on_response:
+                    submit_kwargs["on_response"] = lambda outcome, tid=thread_id, t_id=turn["id"]: self._prompt_done(tid, t_id, outcome)
+                future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt}, **submit_kwargs)
+                if not use_on_response:
+                    future.add_done_callback(lambda result: self._prompt_done(thread_id, turn["id"], result))
             except Exception as exc:
                 self._finish(thread_id, "failed", str(exc))
                 raise
             return {"turn": copy.deepcopy(turn)}
         if method == "turn/interrupt":
-            turn = self.turns.get(thread_id)
-            if not turn or turn["id"] != params["turnId"]:
-                raise CoordinationError("The active Kimi turn changed or finished.")
-            if params.get("runtimeUpdate"):
-                # Requests register under this lock: an update never withdraws one.
-                with self.lock:
-                    if any(value["thread"] == thread_id for value in self.requests.values()):
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params["turnId"]:
+                    raise CoordinationError("The active Kimi turn changed or finished.")
+                pending_approval = any(value["thread"] == thread_id for value in self.requests.values())
+                if params.get("runtimeUpdate"):
+                    if pending_approval:
                         raise CoordinationError("Kimi is waiting for an approval or answer; the update did not stop this turn.")
                     self.update_stopping.add(thread_id)
-            self._finish(thread_id, "interrupted")
-            connection = self.connections.get(thread_id)
-            try:
-                if connection:
-                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
-            finally:
+                turn_id = turn["id"]
+                turn_event = self.turn_events.setdefault(turn_id, threading.Event())
+                connection = self.connections.get(thread_id)
+                native_id = self.native.get(thread_id)
+            settled = False
+            if connection is not None and native_id is not None:
+                try:
+                    connection.write({"method": "session/cancel", "params": {"sessionId": native_id}})
+                except CoordinationError:
+                    pass
+                if isinstance(connection, ACPConnection) and not pending_approval:
+                    settled = turn_event.wait(timeout=2.0)
+            if not settled:
+                self._finish(thread_id, "interrupted", expected_turn_id=turn_id)
                 self._shutdown(thread_id)
             return {}
         raise CoordinationError(f"Kimi does not support {method}.")
@@ -368,7 +640,7 @@ class KimiRPC:
 
         try:
             reason = future.result().get("stopReason", "end_turn")
-            self.initial_prompt.confirm(thread_id)
+            run_or_capture_write(lambda: self.initial_prompt.confirm(thread_id), required=True)
             error = journal.failure() if journal else None
             if error:
                 finish("failed", error)
@@ -395,6 +667,10 @@ class KimiRPC:
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
+            turn_event = self.turn_events.pop(turn["id"], None)
+            if turn_event is not None:
+                turn_event.set()
+            self.active_request_ids.pop(thread_id, None)
             self.journals.pop(thread_id, None)
             turn["status"] = status
             for item in turn["items"]:
@@ -408,7 +684,8 @@ class KimiRPC:
             self.completed[thread_id] = copy.deepcopy(turn)
             self.requests = {key: value for key, value in self.requests.items() if value["thread"] != thread_id}
         if len(turn["items"]) > 1:
-            self.initial_prompt.confirm(thread_id)
+            run_or_capture_write(lambda: self.initial_prompt.confirm(thread_id), required=True)
+        self._persist_session_state(thread_id)
         self._capture_usage(thread_id)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
@@ -446,10 +723,14 @@ class KimiRPC:
             return
         if kind == "config_option_update":
             self.settings[thread_id] = current_settings(update)
+        collector = self._replay_collectors.get(thread_id)
+        if collector is not None and thread_id not in self.turns:
+            collector.observe(update)
+            return
         with self.lock:
             turn = self.turns.get(thread_id)
             if not turn:
-                return  # Resume history must not duplicate Ribbon Field's display mirror.
+                return  # Resume history outside session/load must not duplicate Ribbon Field's display mirror.
             if kind in {"agent_message_chunk", "agent_thought_chunk"}:
                 content = update.get("content", {})
                 if content.get("type") != "text":
@@ -531,6 +812,7 @@ class KimiRPC:
                 raise CoordinationError("This Kimi turn is stopping for a backend update.")
             self.requests[key] = {"thread": thread_id, "id": message["id"], "request": request,
                                   "elicitation": elicitation, "questions": questions}
+        self._persist_session_state(thread_id)
         self.on_event({"id": key, "method": "item/tool/requestUserInput" if questions else "item/commandExecution/requestApproval", "params": params})
 
     def write(self, message):
@@ -564,22 +846,33 @@ class KimiRPC:
         else:
             reply = {"outcome": {"outcome": "selected", "optionId": selected} if selected else {"outcome": "cancelled"}}
         self.connections[pending["thread"]].write({"id": pending["id"], "result": reply})
-        self.requests.pop(message["id"], None)
+        with self.lock:
+            self.requests.pop(message["id"], None)
+        self._persist_session_state(pending["thread"])
 
     def _shutdown(self, thread_id):
         self.generations.pop(thread_id, None)
         connection = self.connections.pop(thread_id, None)
+        handover = transport_handover_active(self.store)
         if connection:
-            if "close" in self.capabilities.get(thread_id, {}).get("sessionCapabilities", {}) and thread_id in self.native:
+            if not handover and "close" in self.capabilities.get(thread_id, {}).get("sessionCapabilities", {}) and thread_id in self.native:
                 try:
                     connection.request("session/close", {"sessionId": self.native[thread_id]}, timeout=3)
                 except CoordinationError:
                     pass
             connection.close()
-            self._capture_usage(thread_id)
+            if not handover:
+                self._persist_session_state(thread_id)
+                self._capture_usage(thread_id)
 
     def close(self):
         self.closed = True
+        handover = transport_handover_active(self.store)
         for thread_id in list(self.connections):
-            self._finish(thread_id, "interrupted")
-            self._shutdown(thread_id)
+            if handover:
+                connection = self.connections.pop(thread_id, None)
+                if connection is not None:
+                    connection.close()
+            else:
+                self._finish(thread_id, "interrupted")
+                self._shutdown(thread_id)

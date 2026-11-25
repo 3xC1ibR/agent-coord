@@ -181,3 +181,30 @@ class HookIsolationTests(unittest.TestCase):
         with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "claude", "AGENT_COORD_SESSION_ID": "claude"}):
             output = handle(self.event("UserPromptSubmit", session_id="claude", agent_type="reviewer"), self.store)
         self.assertIn("Parent inbox work", output["hookSpecificOutput"]["additionalContext"])
+
+    def test_unregistered_parent_child_pre_tool_use_checks_peer_sessions(self):
+        self.store.end_session("sender")
+        with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "claude", "AGENT_COORD_SESSION_ID": "unregistered-parent"}):
+            allowed = handle(self.event("PreToolUse", session_id="child-subagent", tool_name="Write",
+                                        tool_input={"path": "main.py"}), self.store)
+            self.assertEqual(allowed, {})
+        with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "antigravity", "AGENT_COORD_SESSION_ID": "unregistered-ag"}):
+            ag_allowed = handle_antigravity(
+                {"sessionId": "child-ag", "cwd": str(self.root),
+                 "toolCall": {"name": "write_to_file", "args": {"TargetFile": "main.py"}}},
+                self.store,
+            )
+            self.assertEqual(ag_allowed["decision"], "allow")
+        self.store.register(session_id="active-peer", client="codex", cwd=str(self.root))
+        self.store.begin_work(session_id="active-peer", scopes=["peer/**"])
+        with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "claude", "AGENT_COORD_SESSION_ID": "unregistered-parent"}):
+            denied = handle(self.event("PreToolUse", session_id="child-subagent", tool_name="Write",
+                                       tool_input={"path": "main.py"}), self.store)
+            self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        with patch.dict(os.environ, {"AGENT_COORD_CLIENT": "antigravity", "AGENT_COORD_SESSION_ID": "unregistered-ag"}):
+            ag_denied = handle_antigravity(
+                {"sessionId": "child-ag", "cwd": str(self.root),
+                 "toolCall": {"name": "write_to_file", "args": {"TargetFile": "main.py"}}},
+                self.store,
+            )
+            self.assertEqual(ag_denied["decision"], "deny")

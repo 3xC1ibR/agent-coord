@@ -263,10 +263,15 @@ def handle(
     owner, child = _hook_identity(coordination, payload)
     if child:
         if event == "PreToolUse" and payload.get("tool_name") in WRITE_TOOLS:
+            from .hook_reads import find_session, unregistered_write_reason
             with coordination.reading():
-                session = coordination.get_session(owner)
-                paths, outside = _extract_paths(payload, session["cwd"])
-                reason = check_write(coordination, owner, paths, has_outside=outside, record=False)
+                session = find_session(coordination, owner)
+                cwd = session["cwd"] if session else find_repository_root(str(payload.get("cwd") or caller_directory()))
+                paths, outside = _extract_paths(payload, cwd)
+                if session:
+                    reason = check_write(coordination, owner, paths, has_outside=outside, record=False)
+                else:
+                    reason = unregistered_write_reason(coordination, cwd) if paths or not outside else None
             return _deny(event, reason) if reason else {}
         return {}
     native_id = payload.get("session_id") or owner
@@ -437,6 +442,8 @@ ANTIGRAVITY_WRITE_TOOLS = {
 
 def handle_antigravity(payload, store=None, *, record=True):
     """Translate Google's vetoable PreToolUse hook, never ACP notifications."""
+    from .hook_reads import find_session, unregistered_write_reason
+
     coordination = store or CoordinationStore()
     session_id = caller_environment().get("AGENT_COORD_SESSION_ID")
     if not session_id:
@@ -449,12 +456,17 @@ def handle_antigravity(payload, store=None, *, record=True):
     # Validate before the sole-writer fast path; malformed native inputs must fail closed.
     if not isinstance(target, str) or not target.strip():
         raise CoordinationError("Antigravity write hook has no TargetFile.")
-    session = coordination.get_session(session_id)
+    _, child = _hook_identity(coordination, payload)
+    record = record and not child
+    session = find_session(coordination, session_id) if not record else coordination.get_session(session_id)
+    if session is None:
+        cwd = find_repository_root(str(payload.get("cwd") or caller_directory()))
+        paths, has_outside = _extract_paths({"tool_input": {"path": target}}, cwd)
+        reason = unregistered_write_reason(coordination, cwd) if paths or not has_outside else None
+        return {"decision": "deny", "reason": reason} if reason else {"decision": "allow"}
     if session["client"] != "antigravity":
         raise CoordinationError("Antigravity hook identity belongs to another provider.")
     paths, has_outside = _extract_paths({"tool_input": {"path": target}}, session["cwd"])
-    _, child = _hook_identity(coordination, payload)
-    record = record and not child
     reason = check_write(coordination, session_id, paths, has_outside=has_outside, record=record)
     if record:
         _record_tool(coordination, session_id, session["cwd"], call["name"], {"tool_input": {"path": target}})
@@ -462,9 +474,27 @@ def handle_antigravity(payload, store=None, *, record=True):
     return {"decision": "deny", "reason": reason} if reason else {"decision": "allow"}
 
 
+def _validate_antigravity_input(payload):
+    session_id = caller_environment().get("AGENT_COORD_SESSION_ID")
+    if not session_id:
+        raise CoordinationError("Antigravity hook has no Ribbon Field session identity.")
+    call = payload.get("toolCall")
+    if not isinstance(call, dict) or call.get("name") not in ANTIGRAVITY_WRITE_TOOLS:
+        raise CoordinationError("Antigravity write hook received an unknown tool.")
+    args = call.get("args")
+    target = args.get("TargetFile") if isinstance(args, dict) else None
+    if not isinstance(target, str) or not target.strip():
+        raise CoordinationError("Antigravity write hook has no TargetFile.")
+
+
 def _read_only_pre_tool(payload, database):
     from .browser_persistence import database_busy
     from .hook_reads import hook_snapshot
+
+    if _client() == "antigravity":
+        _validate_antigravity_input(payload)
+    if not database.exists():
+        return {"decision": "allow"} if _client() == "antigravity" else {}
 
     try:
         with hook_snapshot(database) as store:
@@ -495,54 +525,57 @@ def _read_only_pre_tool(payload, database):
     return {"decision": "allow"} if _client() == "antigravity" else {}
 
 
-def _run_hook(payload):
-    from .browser_persistence import database_busy
-    from .runtime_requests import RuntimeRequestUnavailable, run_local_or_forward
+def _run_hook(payload, *, pre_tool_fast_path=False):
+    from .entrypoint import close_http_errors, is_transient_runtime_error
+    from .runtime_requests import run_local_or_forward
 
     native = _client() == "antigravity"
     pre_tool = native or payload.get("hook_event_name") == "PreToolUse"
     database = default_database_path()
 
+    if pre_tool:
+        # Evaluate PreToolUse directly against state.sqlite3?mode=ro without
+        # coordinator HTTP roundtrips or database writes by default.
+        return _read_only_pre_tool(payload, database)
+
     def local():
-        if pre_tool and database.exists():
-            discovery = database.parent / ("." + database.name + ".runtime") / "discovery.json"
-            if discovery.exists():
-                # A stopped or changing runtime may briefly release the owner
-                # lock. Do not register, migrate, or deliver in its place.
-                return _read_only_pre_tool(payload, database)
-            # An exclusively locked standalone database must not enter schema
-            # initialization and retry migrations before a tool can proceed.
-            from .hook_reads import hook_snapshot
-            with hook_snapshot(database) as snapshot:
-                snapshot.connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
         store = CoordinationStore(database)
-        if pre_tool:
-            with store.connection_timeout(250):
-                return handle_antigravity(payload, store) if native else handle(payload, store)
         return handle(payload, store)
 
     try:
-        return run_local_or_forward("hook", {"input": payload}, local, database,
-                                    timeout=1 if pre_tool else 45)
-    except (RuntimeRequestUnavailable, sqlite3.OperationalError) as error:
-        if not pre_tool or (isinstance(error, sqlite3.OperationalError) and not database_busy(error)):
-            raise
-        return _read_only_pre_tool(payload, database)
+        return run_local_or_forward("hook", {"input": payload}, local, database, timeout=45)
+    except Exception as error:
+        close_http_errors(error)
+        if is_transient_runtime_error(error):
+            event_name = str(payload.get("hook_event_name") or "Hook")
+            print(
+                f"Agent Coord {event_name}: coordinator unavailable during restart; continuing ({error}).",
+                file=sys.stderr,
+            )
+            return {}
+        raise
 
 
-def main(*, unavailable=None) -> int:
-    payload: Any = None
+def main(*, unavailable=None, payload=None, payload_error=None, pre_tool_fast_path=False) -> int:
     try:
-        payload = json.load(sys.stdin)
+        if payload_error is not None:
+            raise payload_error
+        if payload is None:
+            payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise CoordinationError("Hook input must be a JSON object.")
         if unavailable is not None:
-            if _client() != "antigravity" and payload.get("hook_event_name") != "PreToolUse":
-                print(json.dumps({"error": str(unavailable)}), file=sys.stderr)
-                return 2
-            result = _read_only_pre_tool(payload, default_database_path())
+            if _client() == "antigravity" or payload.get("hook_event_name") == "PreToolUse":
+                result = _read_only_pre_tool(payload, default_database_path())
+            else:
+                event_name = str(payload.get("hook_event_name") or "Hook")
+                print(
+                    f"Agent Coord {event_name}: coordinator unavailable during restart; continuing ({unavailable}).",
+                    file=sys.stderr,
+                )
+                result = {}
         else:
-            result = _run_hook(payload)
+            result = _run_hook(payload, pre_tool_fast_path=pre_tool_fast_path)
     except Exception as exc:  # noqa: BLE001 -- Hooks must return JSON, not a traceback.
         event = "PreToolUse"
         tool_name = None

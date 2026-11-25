@@ -135,7 +135,7 @@ class MuseUsageTests(unittest.TestCase):
 
     def test_msp_backfill_replay_uses_native_mapping_without_starting_host(self):
         with self.store._connection() as db:
-            db.execute("INSERT INTO muse_sessions VALUES ('thread','native',?)", (str(self.root),))
+            db.execute("INSERT INTO muse_sessions (thread_id, native_id, cwd) VALUES ('thread','native',?)", (str(self.root),))
         event = {"method": "session/tokenUsage", "params": self.params()}
         path = self.write([event, event])
         for _ in range(2):
@@ -175,7 +175,7 @@ class MuseUsageTests(unittest.TestCase):
     def test_default_native_path_discovery_is_scoped_to_own_session(self):
         native = str(uuid.uuid4())
         with self.store._connection() as db:
-            db.execute("INSERT INTO muse_sessions VALUES ('thread',?,?)", (native, str(self.root)))
+            db.execute("INSERT INTO muse_sessions (thread_id, native_id, cwd) VALUES ('thread',?,?)", (native, str(self.root)))
         data = self.root / "data"
         folder = data / "muse/sessions/2026/10/20" / native
         folder.mkdir(parents=True)

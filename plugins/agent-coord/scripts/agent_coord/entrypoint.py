@@ -1,18 +1,97 @@
 """Run coordination clients with the code owned by the active desktop runtime."""
 from __future__ import annotations
 
+import http.client
 import importlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
+import tempfile
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from . import desktop_runtime as runtime
 
 
 MODULES = {"cli": "cli", "hook": "hook", "mcp": "checkpoint_mcp"}
+TRANSIENT_HTTP_STATUS_CODES = frozenset({500, 502, 503, 504})
+TRANSIENT_RUNTIME_MESSAGES = (
+    "Runtime discovery identity does not match the live instance.",
+    "A different Ribbon Field runtime owns this database.",
+    "Runtime maintenance is pausing",
+    "The runtime owner is unavailable.",
+)
+
+
+def close_http_errors(error: BaseException | None) -> None:
+    """Close any wrapped urllib HTTPError response sockets to prevent ResourceWarnings."""
+    visited = set()
+    current = error
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, HTTPError):
+            try:
+                current.close()
+            except Exception:
+                pass
+        current = current.__cause__ or current.__context__
+
+
+def is_transient_runtime_error(error: BaseException) -> bool:
+    """Identify coordinator restart, handover, HTTP 5xx, or transient lock states."""
+    from .browser_persistence import database_busy
+    from .runtime_requests import RuntimeRequestUnavailable
+
+    close_http_errors(error)
+    if isinstance(error, RuntimeRequestUnavailable):
+        return True
+    if isinstance(error, sqlite3.OperationalError) and database_busy(error):
+        return True
+    if isinstance(error, HTTPError):
+        return error.code in TRANSIENT_HTTP_STATUS_CODES
+    if isinstance(error, URLError):
+        reason = error.reason
+        if isinstance(reason, HTTPError):
+            return reason.code in TRANSIENT_HTTP_STATUS_CODES
+        return isinstance(reason, (ConnectionError, TimeoutError, OSError))
+    if isinstance(error, (ConnectionError, TimeoutError, http.client.HTTPException)):
+        return True
+
+    message = str(error)
+    if any(message.startswith(prefix) for prefix in TRANSIENT_RUNTIME_MESSAGES):
+        if isinstance(error, runtime.RuntimeOwnerUnavailableError):
+            cause = error.__cause__ or error.__context__
+            if cause is None:
+                return True
+            return is_transient_runtime_error(cause)
+        return True
+    return False
+
+
+def _validate_local_discovery_metadata(database: Path) -> None:
+    """Verify on-disk discovery.json structure without HTTP roundtrips."""
+    directory = database.parent / ("." + database.name + ".runtime")
+    if not directory.exists():
+        return
+    directory = runtime.runtime_directory(database)
+    if runtime.owner_available(directory):
+        return
+    path = directory / "discovery.json"
+    try:
+        if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
+            raise RuntimeError("Runtime discovery permissions are unsafe.")
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return  # Transiently absent while a restarting owner publishes discovery.
+    if not isinstance(record, dict):
+        raise RuntimeError("Runtime discovery metadata must be a JSON object.")
+    if record.get("database") != str(database.resolve()):
+        raise RuntimeError("Runtime discovery refers to another database.")
+    for required in ("instance", "control_url", "control_token"):
+        if not isinstance(record.get(required), str) or not record[required]:
+            raise RuntimeError(f"Runtime discovery is missing {required}.")
 
 
 def client_database(kind, argv):
@@ -34,7 +113,7 @@ def client_database(kind, argv):
     return database.resolve(), remaining
 
 
-def route_to_owner(kind, argv):
+def route_to_owner(kind, argv, *, buffered_stdin: str | None = None):
     module = MODULES[kind]
     database, remaining = client_database(kind, argv)
     # Installation must retain this updated launcher, not pin an old payload.
@@ -55,10 +134,10 @@ def route_to_owner(kind, argv):
         # runtime may publish discovery. Neither has submitted this request.
         if runtime.owner_available(directory):
             return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
             raise runtime.RuntimeOwnerUnavailableError("The runtime owner is unavailable. Try again shortly.")
-        time.sleep(min(.05, remaining))
+        time.sleep(min(.05, remaining_time))
     payload = Path(record["payload"]).resolve()
     if payload.parent != directory / "payloads" or not payload.is_dir():
         raise RuntimeError("The runtime owner did not identify a retained payload.")
@@ -69,6 +148,12 @@ def route_to_owner(kind, argv):
     if Path(__file__).resolve().parent == backend / "agent_coord":
         return
     python = runtime.payload_command(payload)[0]
+    if buffered_stdin is not None:
+        with tempfile.TemporaryFile() as stream:
+            stream.write(buffered_stdin.encode("utf-8"))
+            stream.flush()
+            stream.seek(0)
+            os.dup2(stream.fileno(), 0)
     # Older retained payloads have the MCP module but no MCP executable. Invoke
     # main directly, which also avoids recursively dispatching through wrappers.
     # Isolated Python prevents a caller's PYTHONPATH from mixing runtime copies;
@@ -79,21 +164,45 @@ def route_to_owner(kind, argv):
 
 
 def main(kind):
+    if kind == "hook":
+        from .hook import main as hook_main
+
+        raw_stdin = sys.stdin.read()
+        try:
+            payload = json.loads(raw_stdin)
+        except ValueError as exc:
+            return hook_main(payload_error=exc)
+        if not isinstance(payload, dict):
+            return hook_main(payload=payload)
+        is_pre_tool = (
+            os.environ.get("AGENT_COORD_CLIENT") == "antigravity"
+            or payload.get("hook_event_name") == "PreToolUse"
+        )
+        if is_pre_tool:
+            # Evaluate PreToolUse directly against state.sqlite3?mode=ro without
+            # execv into payload python and without HTTP roundtrips to the coordinator.
+            database, _ = client_database("hook", sys.argv[1:])
+            try:
+                _validate_local_discovery_metadata(database)
+            except Exception as exc:
+                close_http_errors(exc)
+                print(json.dumps({"error": str(exc)}), file=sys.stderr)
+                return 2
+            return hook_main(payload=payload, pre_tool_fast_path=True)
+        try:
+            route_to_owner("hook", sys.argv[1:], buffered_stdin=raw_stdin)
+        except Exception as exc:
+            close_http_errors(exc)
+            if is_transient_runtime_error(exc):
+                return hook_main(payload=payload, unavailable=exc)
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        return hook_main(payload=payload)
+
     try:
         route_to_owner(kind, sys.argv[1:])
-    except runtime.RuntimeOwnerUnavailableError as exc:
-        # An absent listener or a missing discovery record during restart is
-        # recoverable for PreToolUse. Authentication and malformed metadata
-        # remain errors, and no unauthenticated payload is loaded.
-        cause = exc.__context__
-        if isinstance(cause, URLError):
-            cause = cause.reason
-        if kind == "hook" and (cause is None or isinstance(cause, (ConnectionError, TimeoutError))):
-            from .hook import main as hook_main
-            return hook_main(unavailable=exc)
-        print(json.dumps({"error": str(exc)}), file=sys.stderr)
-        return 2
-    except Exception as exc:  # Malformed owner metadata must also block write hooks.
+    except Exception as exc:
+        close_http_errors(exc)
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 2
     return importlib.import_module("agent_coord." + MODULES[kind]).main()

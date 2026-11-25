@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from stat import S_ISREG
 import re
 import shutil
 import subprocess
@@ -24,6 +23,15 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins/agent-coord"
 VERSION = re.compile(r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+codex\.[0-9]+)?")
+SNAPSHOT_EXCLUDED_PREFIX = ("scripts", "agent_coord", "web", "vendor", "openui")
+
+
+def _excluded_from_codex_snapshot(relative: Path) -> bool:
+    return (
+        "__pycache__" in relative.parts
+        or relative.suffix == ".pyc"
+        or relative.parts[:len(SNAPSHOT_EXCLUDED_PREFIX)] == SNAPSHOT_EXCLUDED_PREFIX
+    )
 
 
 def read_object(path: Path) -> dict:
@@ -100,10 +108,14 @@ def cachebuster(plugin: Path, *, stamp: str | None = None) -> str:
 
 def verify(plugin: Path, installed: Path) -> int:
     count = 0
+    codex_snapshot = (installed / ".agent-coord-development.json").is_file()
     for source in sorted(plugin.rglob("*")):
         if not source.is_file() or "__pycache__" in source.parts or source.suffix == ".pyc":
             continue
-        target = installed / source.relative_to(plugin)
+        relative = source.relative_to(plugin)
+        if codex_snapshot and _excluded_from_codex_snapshot(relative):
+            continue
+        target = installed / relative
         if not target.is_file() or source.read_bytes() != target.read_bytes():
             raise ValueError(f"Installed cache does not match source: {target}")
         count += 1
@@ -183,18 +195,26 @@ def _exchange_paths(left: Path, right: Path) -> None:
 def _snapshot_digest(plugin: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(plugin.rglob("*")):
-        if "__pycache__" in path.parts or path.suffix == ".pyc" or path.name == ".agent-coord-development.json":
+        relative = path.relative_to(plugin)
+        if _excluded_from_codex_snapshot(relative) or path.name == ".agent-coord-development.json":
             continue
         if path.is_symlink():
             raise ValueError(f"Unsupported link in Codex snapshot: {path}")
         if path.is_file():
-            digest.update(json.dumps([str(path.relative_to(plugin)), path.stat().st_mode & 0o777]).encode())
+            digest.update(json.dumps([str(relative), path.stat().st_mode & 0o777]).encode())
             digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
 
 
 def _copy_codex_snapshot(source: Path, target: Path) -> None:
-    shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    def ignore(directory: str, entries: list[str]) -> set[str]:
+        ignored = {name for name in entries if name == "__pycache__" or name.endswith(".pyc")}
+        relative_dir = Path(directory).relative_to(source)
+        if relative_dir.parts == SNAPSHOT_EXCLUDED_PREFIX[:-1] and SNAPSHOT_EXCLUDED_PREFIX[-1] in entries:
+            ignored.add(SNAPSHOT_EXCLUDED_PREFIX[-1])
+        return ignored
+
+    shutil.copytree(source, target, ignore=ignore)
     _snapshot_digest(target)
 
 
@@ -236,33 +256,22 @@ def _repair_codex_links(cache: Path, current: Path, retained: Path, plugin: Path
     return repaired
 
 
-def _prune_cached_versions(cache: Path, retained: Path) -> dict:
-    """Share immutable file data without introducing unsupported cache links."""
-    shared_bytes = 0
-    identical = {}
-    # Include retained originals, but never move or delete their pinned paths.
-    versions = [p for root in (retained, cache) if root.is_dir() for p in sorted(root.iterdir())
-                if VERSION.fullmatch(p.name) and p.is_dir() and not p.is_symlink()]
-    with tempfile.TemporaryDirectory(dir=cache) as scratch:
-        link = Path(scratch, "file")
-        for version in versions:
-            for directory, directories, files in os.walk(version):
-                directories[:] = [name for name in directories if name != "__pycache__"
-                                  and not Path(directory, name).is_symlink()]
-                for name in files:
-                    path = Path(directory, name)
-                    status = path.lstat()
-                    if not S_ISREG(status.st_mode) or name.endswith(".pyc"):
-                        continue
-                    key = (status.st_size, status.st_mode, status.st_uid, status.st_gid, status.st_mtime_ns,
-                           hashlib.sha256(path.read_bytes()).digest())
-                    original = identical.setdefault(key, path)
-                    if original == path or original.samefile(path):
-                        continue
-                    os.link(original, link)
-                    os.replace(link, path)
-                    shared_bytes += status.st_size
-    return {"deduplicatedBytes": shared_bytes}
+def _prune_cached_versions(*caches: Path, active_version: str) -> dict:
+    """Remove superseded version directories in plugin caches, retaining only active_version."""
+    pruned_directories = 0
+    for cache in caches:
+        if not cache.is_dir():
+            continue
+        for entry in sorted(cache.iterdir()):
+            if entry.name == active_version or not VERSION.fullmatch(entry.name):
+                continue
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink(missing_ok=True)
+                pruned_directories += 1
+            elif entry.is_dir():
+                shutil.rmtree(entry)
+                pruned_directories += 1
+    return {"prunedDirectories": pruned_directories}
 
 
 def _publish_codex_snapshot(plugin: Path, target: Path) -> None:
@@ -385,7 +394,9 @@ def dev_link(plugin: Path, *, prune=False, codex_home=None, claude_home=None, sh
         result = {"current": str(current), "version": version, "codex": str(codex), "claude": str(claude),
                   "repairedCodexDirectories": repaired}
         if prune:
-            result.update(_prune_cached_versions(codex_cache, share / "retained" / marketplace))
+            result.update(_prune_cached_versions(
+                codex_cache, claude_cache, share / "retained" / marketplace, active_version=version
+            ))
         return result
 
 
@@ -396,7 +407,7 @@ def main() -> None:
     commands.add_parser("validate")
     commands.add_parser("cachebuster")
     development = commands.add_parser("dev-link", help="Use one checkout for local Codex and Claude development")
-    development.add_argument("--prune", action="store_true", help="Compact old Codex versions, preserving pinned paths")
+    development.add_argument("--prune", action="store_true", help="Remove superseded plugin cache version directories")
     install = commands.add_parser("install-codex")
     install.add_argument("marketplace")
     marketplace = commands.add_parser("marketplace-name")

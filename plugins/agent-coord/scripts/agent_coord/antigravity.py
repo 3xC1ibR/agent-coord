@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -21,7 +22,14 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .acp import ACPConnection
+from .acp import (
+    ACPConnection,
+    ACPReplayCollector,
+    accepts_keyword,
+    reconcile_replayed_history,
+    run_or_capture_write,
+    transport_handover_active,
+)
 from .antigravity_setup import model_catalog, provider_directory, resolve_runtime
 from .antigravity_skills import prepare_skills
 from .native_prompt import NativePromptState
@@ -34,6 +42,19 @@ from .permission_modes import acp_modes, acp_current_mode, legacy_mode, validate
 AUTH_PREFIX = "Open the following link to authenticate the ACP server: "
 BROWSER_MARKER = "RIBBON_FIELD_AUTH_URL="
 SIGN_IN = "Sign in to Antigravity with agent-coord antigravity login on this machine, then try again."
+
+
+class _ProcessScratchDirectory:
+    """Scratch directory for an ACP process that survives coordinator handover."""
+
+    def __init__(self, path: Path, store):
+        self.path = Path(path)
+        self.name = str(self.path)
+        self.store = store
+
+    def cleanup(self) -> None:
+        if not transport_handover_active(self.store):
+            shutil.rmtree(self.path, ignore_errors=True)
 
 
 def ensure_coordination_hooks(profile):
@@ -86,6 +107,7 @@ class AntigravityConnection(ACPConnection):
     def __init__(self, store, callback, options, *, command=None):
         self.callback, self.options = callback, options
         self.auth_urls = set()
+        self.on_auth_failure = options.get("on_auth_failure")
         root = provider_directory(store)
         profile = root / "profile"
         acp = profile / "antigravity-acp"
@@ -112,13 +134,32 @@ class AntigravityConnection(ACPConnection):
         helper = 'print("' + BROWSER_MARKER + '"+__import__("sys").argv[1],file=__import__("sys").stderr)'
         env.update(GEMINI_HOME=str(profile), AGY_ACP_FORCE_FILE_STORAGE="1", PYTHONUNBUFFERED="1",
                    ANTIGRAVITY_HARNESS_PATH=str(harness), BROWSER=shlex.join([sys.executable, "-c", helper]) + " %s")
-        self.temporary = tempfile.TemporaryDirectory(prefix="process-", dir=root)
+        scratch_path = Path(tempfile.mkdtemp(prefix="process-", dir=root))
+        self.temporary = _ProcessScratchDirectory(scratch_path, store)
         env.update({key: self.temporary.name for key in ("TMPDIR", "TMP", "TEMP")})
         try:
-            super().__init__(callback, command=command, cwd=options["cwd"], env=env)
+            super().__init__(
+                callback,
+                command=command,
+                cwd=options["cwd"],
+                env=env,
+                store=store,
+                provider="antigravity",
+                thread_id=options.get("threadId"),
+            )
         except Exception:
-            self.temporary.cleanup()
+            shutil.rmtree(scratch_path, ignore_errors=True)
             raise
+
+    def _init_attached(self, *, options=None, on_auth_failure=None, scratch_dir=None, **kwargs):
+        self.options = dict(options or {})
+        self.auth_urls = set()
+        self.on_auth_failure = on_auth_failure
+        self.temporary = (
+            _ProcessScratchDirectory(Path(scratch_dir), self.store)
+            if scratch_dir
+            else None
+        )
 
     def initialize(self):
         result = self.request("initialize", {"protocolVersion": 1,
@@ -137,9 +178,15 @@ class AntigravityConnection(ACPConnection):
         url = line[len(prefix):].strip()
         parsed = urlparse(url)
         if len(url) > 16384 or parsed.scheme != "https" or parsed.netloc != "accounts.google.com" or any(c.isspace() for c in url):
-            self._fail(CoordinationError("Antigravity returned an invalid Google sign-in URL."))
+            error = CoordinationError("Antigravity returned an invalid Google sign-in URL.")
+            self._fail(error)
+            if self.on_auth_failure is not None:
+                self.on_auth_failure(error)
         elif not self.options.get("authorize"):
-            self._fail(CoordinationError(SIGN_IN))
+            error = CoordinationError(SIGN_IN)
+            self._fail(error)
+            if self.on_auth_failure is not None:
+                self.on_auth_failure(error)
         elif url not in self.auth_urls:
             self.auth_urls.add(url)
             self.options["authorize"](url)
@@ -152,7 +199,8 @@ class AntigravityConnection(ACPConnection):
         try:
             super().close()
         finally:
-            self.temporary.cleanup()
+            if self.temporary is not None:
+                self.temporary.cleanup()
 
 
 class AntigravityRPC:
@@ -173,27 +221,272 @@ class AntigravityRPC:
         self.last_activity = {}
         self.prompt_locks = {}
         self.skill_contexts = {}
+        self.active_request_ids = {}
+        self.prompt_futures = {}
+        self.turn_events = {}
+        self._replay_collectors = {}
         # Turns a backend update is stopping; their late requests are refused.
         self.update_stopping = set()
         with store._connection() as db:
             self.initial_prompt = NativePromptState(store, "antigravity", db)
             db.execute("CREATE TABLE IF NOT EXISTS antigravity_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(antigravity_sessions)")}
+            for column in ("channel", "native_session_id", "turn_id", "request_id", "options_json", "pending_approvals_json"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE antigravity_sessions ADD COLUMN {column} TEXT")
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
 
+    def _auth_failed(self, thread_id, error):
+        if not thread_id:
+            return
+        self._finish(
+            thread_id,
+            "failed",
+            str(error),
+            termination={"origin": "runtime", "reason": "authorization_required", "execution": "unknown"},
+        )
+
+    def _persist_session_state(self, thread_id: str) -> None:
+        with self.lock:
+            native_id = self.native.get(thread_id)
+            if not native_id:
+                return
+            connection = self.connections.get(thread_id)
+            channel = getattr(connection, "channel", None)
+            scratch_dir = getattr(getattr(connection, "temporary", None), "name", None)
+            turn = self.turns.get(thread_id)
+            turn_id = turn["id"] if turn else None
+            request_id = self.active_request_ids.get(thread_id) if turn_id else None
+            options_data = {
+                **(self.options.get(thread_id) or {}),
+                "_resolved_model": self.resolved_models.get(thread_id),
+                "_effective_permission": self.effective_permissions.get(thread_id),
+                "_scratch_dir": scratch_dir,
+            }
+            approvals_data = {
+                key: {"request_id": req_id, "request": req}
+                for key, (tid, req_id, req) in self.requests.items()
+                if tid == thread_id
+            }
+        options_json = json.dumps(options_data, sort_keys=True)
+        approvals_json = json.dumps(approvals_data, sort_keys=True)
+
+        def write_row():
+            with self.store.database_operation("antigravity.session_state"), self.store._connection() as db:
+                db.execute(
+                    """INSERT INTO antigravity_sessions (
+                        thread_id, native_id, channel, native_session_id,
+                        turn_id, request_id, options_json, pending_approvals_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id,
+                        turn_id = excluded.turn_id,
+                        request_id = excluded.request_id,
+                        options_json = excluded.options_json,
+                        pending_approvals_json = excluded.pending_approvals_json""",
+                    (thread_id, native_id, channel, native_id, turn_id, request_id, options_json, approvals_json),
+                )
+
+        run_or_capture_write(write_row, required=True)
+
+    @classmethod
+    def _approval_display(cls, thread_id: str, turn_id: str | None, request: dict) -> tuple[str, dict]:
+        tool = request.get("toolCall", {})
+        options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
+        question = str(tool.get("toolCallId", "")).startswith("interaction_")
+        params: dict = {"threadId": thread_id, "turnId": turn_id}
+        if question and options:
+            method = "item/tool/requestUserInput"
+            params["questions"] = [{
+                "id": tool["toolCallId"],
+                "question": tool.get("title", "Choose an option"),
+                "allowCustomAnswer": False,
+                "options": [{"value": o["optionId"], "label": o.get("name", o["optionId"])} for o in options],
+            }]
+        else:
+            method = "item/commandExecution/requestApproval"
+            decisions = {"allow_once": "accept", "allow_always": "acceptForSession", "reject_once": "decline"}
+            params.update(
+                reason=tool.get("title", "Antigravity tool request"),
+                command=json.dumps(cls._bounded(tool.get("rawInput", tool.get("content", {}))), indent=2),
+                availableDecisions=(
+                    [decisions[o["kind"]] for o in options if o.get("kind") in decisions]
+                    if not question
+                    else []
+                ) + ["cancel"],
+            )
+        return method, params
+
+    def attach_channel(self, thread_id, channel, pid, *, returncode=None):
+        """Rebind a surviving Antigravity ACP channel during CoordinatorProjection.load()."""
+        projection = getattr(self.store, "provider_projection", None)
+        if not thread_id:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, None, channel, pid, provider="antigravity", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT * FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            prompt_row = None
+            if row is not None:
+                native_id = row["native_session_id"] or row["native_id"]
+                prompt_row = db.execute(
+                    "SELECT started FROM native_prompt_initialization WHERE provider='antigravity' AND thread_id=? AND native_id=?",
+                    (thread_id, native_id),
+                ).fetchone()
+                browser_row = (
+                    db.execute("SELECT cwd, model, permission_mode, yolo FROM browser_sessions WHERE thread_id=?", (thread_id,)).fetchone()
+                    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_sessions'").fetchone()
+                    else None
+                )
+        if row is None:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, thread_id, channel, pid, provider="antigravity", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        native_id = row["native_session_id"] or row["native_id"]
+        saved_options = json.loads(row["options_json"]) if row["options_json"] else {}
+        resolved_model = saved_options.pop("_resolved_model", None)
+        effective_permission = saved_options.pop("_effective_permission", None)
+        scratch_dir = saved_options.pop("_scratch_dir", None)
+        if not saved_options and browser_row is not None:
+            mode = browser_row["permission_mode"] or legacy_mode("antigravity", bool(browser_row["yolo"]))
+            saved_options = {
+                "cwd": browser_row["cwd"],
+                "model": browser_row["model"],
+                "permission_mode": mode,
+                "yolo": mode == "yolo",
+            }
+        active_turn_id = row["turn_id"]
+        active_request_id = row["request_id"]
+        approvals = json.loads(row["pending_approvals_json"]) if row["pending_approvals_json"] else {}
+        saved_history = read_history(self.store, thread_id) if active_turn_id else None
+
+        connection = None
+
+        def on_message(message):
+            if connection is not None and self.connections.get(thread_id) is connection:
+                self._message(thread_id, message)
+
+        connection = self.connection_factory.attach(
+            self.store,
+            on_message,
+            thread_id,
+            channel,
+            pid,
+            provider="antigravity",
+            returncode=returncode,
+            options=saved_options,
+            on_auth_failure=lambda error: self._auth_failed(thread_id, error),
+            scratch_dir=scratch_dir,
+        )
+
+        with self.lock:
+            self.connections[thread_id] = connection
+            self.native[thread_id] = native_id
+            if saved_options:
+                self.options[thread_id] = dict(saved_options)
+            if resolved_model is not None:
+                self.resolved_models[thread_id] = resolved_model
+            if effective_permission is not None:
+                self.effective_permissions[thread_id] = effective_permission
+            elif saved_options.get("permission_mode"):
+                self.effective_permissions[thread_id] = saved_options["permission_mode"]
+            if prompt_row is not None and not prompt_row[0]:
+                self.initial_prompt.pending[thread_id] = native_id
+            else:
+                self.initial_prompt.pending.pop(thread_id, None)
+
+            if active_turn_id:
+                existing_turn = next(
+                    (
+                        copy.deepcopy(t)
+                        for t in (saved_history or {}).get("turns", [])
+                        if t.get("id") == active_turn_id
+                    ),
+                    None,
+                )
+                if existing_turn is None:
+                    existing_turn = {"id": active_turn_id, "status": "inProgress", "items": []}
+                else:
+                    existing_turn["status"] = "inProgress"
+                    existing_turn.pop("termination", None)
+                self.turns[thread_id] = existing_turn
+                self.turn_events[active_turn_id] = threading.Event()
+                self.delivery_turns[thread_id] = {"id": active_turn_id, "batch": None, "accepted": True}
+                if active_request_id:
+                    self.active_request_ids[thread_id] = active_request_id
+                    future = connection.bind_pending_request(
+                        active_request_id,
+                        on_response=lambda outcome, tid=thread_id, t_id=active_turn_id: self._prompt_done(tid, t_id, outcome),
+                    )
+                    self.prompt_futures[thread_id] = future
+
+            for key, entry in approvals.items():
+                self.requests[key] = (thread_id, entry["request_id"], entry["request"])
+
+        sessions = getattr(projection, "sessions", None) if projection is not None else None
+        if sessions is not None:
+            with sessions.lock:
+                sessions.loaded.add(thread_id)
+                sessions.loaded_clients[thread_id] = "antigravity"
+                if active_turn_id:
+                    sessions.active[thread_id] = active_turn_id
+                existing_ids = {r.get("id") for r in sessions.requests.values()}
+                for key, entry in approvals.items():
+                    if key not in existing_ids:
+                        method, params = self._approval_display(thread_id, active_turn_id, entry["request"])
+                        ui_key = str(uuid.uuid4())
+                        sessions.requests[ui_key] = {
+                            "id": key,
+                            "method": method,
+                            "params": params,
+                            "key": ui_key,
+                            "received_at": self.store.clock(),
+                        }
+        return connection
+
     def _context_usage(self, thread_id, update):
         if any(type(update.get(key)) is not int or update[key] < 0 for key in ("used", "size")):
             return
-        try:
-            self.store.usage.record_unavailable(thread_id, provider="antigravity", native_id=self.native[thread_id],
-                note="Antigravity ACP reports context occupancy; cumulative token consumption is unsupported")
-            self.store.usage.record_context(thread_id, provider="antigravity", native_id=self.native[thread_id],
-                used=update.get("used"), limit=update.get("size"))
-            self._emit("thread/usage/updated", thread_id,
-                usage=self.store.usage.summary(thread_id, provider="antigravity"))
-        except Exception:
-            logging.getLogger(__name__).warning("Could not capture Antigravity context usage")
+        native_id = self.native.get(thread_id)
+        if not native_id:
+            return
+
+        def record_usage():
+            try:
+                self.store.usage.record_unavailable(
+                    thread_id,
+                    provider="antigravity",
+                    native_id=native_id,
+                    note="Antigravity ACP reports context occupancy; cumulative token consumption is unsupported",
+                )
+                self.store.usage.record_context(
+                    thread_id,
+                    provider="antigravity",
+                    native_id=native_id,
+                    used=update.get("used"),
+                    limit=update.get("size"),
+                )
+                self._emit(
+                    "thread/usage/updated",
+                    thread_id,
+                    usage=self.store.usage.summary(thread_id, provider="antigravity"),
+                )
+            except Exception:
+                logging.getLogger(__name__).warning("Could not capture Antigravity context usage")
+
+        run_or_capture_write(record_usage, required=False)
 
     def _history(self, thread_id, *, include_turns=True):
         if not include_turns:
@@ -271,16 +564,26 @@ class AntigravityRPC:
     def permission_state(self, thread_id):
         return self.effective_permissions.get(thread_id) if thread_id in self.connections else None
 
+    def _options_match(self, thread_id, options) -> bool:
+        saved = self.options.get(thread_id)
+        if saved is None:
+            return False
+        resolved = self.resolved_models.get(thread_id)
+        return {**saved, "model": saved.get("model") or resolved} == {
+            **options,
+            "model": options.get("model") or resolved,
+        }
+
     def _connection(self, thread_id, options):
         current = self.connections.get(thread_id)
-        if current and (current.closed or current.process.poll() is not None or self.options.get(thread_id) != options):
+        if current and (current.closed or current.process.poll() is not None or not self._options_match(thread_id, options)):
             self.connections.pop(thread_id, None)
             current.close()
             current = None
         if current:
             return current
         with self.store._connection() as db:
-            row = db.execute("SELECT native_id FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            row = db.execute("SELECT native_id, native_session_id FROM antigravity_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
         connection = None
 
         def on_message(message):
@@ -289,15 +592,21 @@ class AntigravityRPC:
             if connection is not None and self.connections.get(thread_id) is connection:
                 self._message(thread_id, message)
 
-        connection = self.connection_factory(self.store, on_message, {**options, "threadId": thread_id})
+        connection = self.connection_factory(
+            self.store,
+            on_message,
+            {**options, "threadId": thread_id, "on_auth_failure": lambda error: self._auth_failed(thread_id, error)},
+        )
         self.connections[thread_id] = connection
         try:
             initialized = connection.initialize()
             connection.request("authenticate", {"methodId": "oauth-personal"})
             params = {"cwd": options["cwd"], "mcpServers": []}
             method = "session/new"
-            if row:
-                self.native[thread_id] = row[0]
+            saved_native = (row["native_session_id"] or row["native_id"]) if row else None
+            collector = None
+            if saved_native:
+                self.native[thread_id] = saved_native
                 caps = initialized["agentCapabilities"]
                 if "resume" in caps.get("sessionCapabilities", {}):
                     method = "session/resume"
@@ -305,16 +614,33 @@ class AntigravityRPC:
                     method = "session/load"
                 else:
                     raise CoordinationError("This Antigravity runtime cannot resume saved sessions. Update it before continuing.")
-                params["sessionId"] = row[0]
-            session = connection.request(method, params)
-            native_id = row[0] if row else session["sessionId"]
+                params["sessionId"] = saved_native
+                collector = ACPReplayCollector(thread_id, provider="antigravity", unknown_empty_tool_result=True)
+                self._replay_collectors[thread_id] = collector
+            try:
+                session = connection.request(method, params)
+            finally:
+                self._replay_collectors.pop(thread_id, None)
+            native_id = saved_native if saved_native else session["sessionId"]
             # Save identity before settings requests; a failed selection must
             # never silently create a replacement native conversation.
             with self.store._connection() as db:
-                db.execute("INSERT OR REPLACE INTO antigravity_sessions VALUES (?, ?)", (thread_id, native_id))
-                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
+                db.execute(
+                    """INSERT INTO antigravity_sessions (thread_id, native_id, channel, native_session_id)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id""",
+                    (thread_id, native_id, getattr(connection, "channel", None), native_id),
+                )
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=saved_native is not None)
             self.native[thread_id] = native_id
-            if row:
+            if collector is not None:
+                replayed_turns = collector.finalize()
+                if reconcile_replayed_history(self.store, self.on_event, thread_id, replayed_turns):
+                    self.initial_prompt.confirm(thread_id)
+            if saved_native:
                 try:
                     self.store.usage.record_unavailable(thread_id, provider="antigravity", native_id=native_id,
                         note="Antigravity ACP reports context occupancy; cumulative token consumption is unsupported")
@@ -343,6 +669,7 @@ class AntigravityRPC:
                 connection.request("session/set_mode", {"sessionId": native_id, "modeId": mode})
             self.effective_permissions[thread_id] = mode
             self.options[thread_id] = dict(options)
+            self._persist_session_state(thread_id)
             if thread_id in self.initial_prompt.pending:
                 self.skill_contexts[thread_id] = prepare_skills(self.store, options["cwd"])
             return connection
@@ -397,6 +724,7 @@ class AntigravityRPC:
                 connection = self.connections.pop(thread_id, None)
                 if connection:
                     connection.close()
+                self._persist_session_state(thread_id)
             return {}
         if method == "turn/steer":
             raise CoordinationError("Antigravity does not support steering. Queue the message or stop the turn first.")
@@ -404,12 +732,15 @@ class AntigravityRPC:
             if thread_id in self.turns:
                 raise CoordinationError("An Antigravity turn is already running.")
             self.update_stopping.discard(thread_id)
-            connection = self._connection(thread_id, self._options(params))
+            options = self._options(params)
+            connection = self._connection(thread_id, options)
             prompt = []
             initial = thread_id in self.initial_prompt.pending
             changes = self.store.threads.observe_context(thread_id, initial=initial)
             if initial:
-                skills = self.skill_contexts[thread_id]
+                skills = self.skill_contexts.get(thread_id)
+                if skills is None:
+                    skills = self.skill_contexts[thread_id] = prepare_skills(self.store, options["cwd"])
                 prompt.append({"type": "text", "text": coordination_bootstrap(
                     self.store, thread_id, skill_path=skills.coordination_skill) + "\n\n" + skills.instructions})
             elif changes:
@@ -427,8 +758,10 @@ class AntigravityRPC:
                 allow_consent=not params.get("_coordination_delivery", False))
             if notice:
                 prompt.insert(0, {"type": "text", "text": notice})
-            self.turns[thread_id] = turn
-            self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
+            with self.lock:
+                self.turns[thread_id] = turn
+                self.turn_events[turn["id"]] = threading.Event()
+                self.delivery_turns[thread_id] = {"id": turn["id"], "batch": None, "accepted": False}
             self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
             try:
                 self._submit_prompt(thread_id, turn["id"], connection, prompt, supplied=params.get('_coordination_delivery', False))
@@ -438,25 +771,42 @@ class AntigravityRPC:
                 raise
             return {"turn": copy.deepcopy(turn)}
         if method == "turn/interrupt":
-            turn = self.turns.get(thread_id)
-            if not turn or turn["id"] != params["turnId"]:
-                raise CoordinationError("The active Antigravity turn changed or finished.")
-            if params.get("runtimeUpdate"):
-                # Requests register under this lock: an update never withdraws one.
-                with self.lock:
-                    if any(value[0] == thread_id for value in self.requests.values()):
+            origin, reason = ("runtime", "backend_update") if params.get("runtimeUpdate") else ("user", "turn_interrupt")
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params["turnId"]:
+                    raise CoordinationError("The active Antigravity turn changed or finished.")
+                pending_approval = any(value[0] == thread_id for value in self.requests.values())
+                if params.get("runtimeUpdate"):
+                    if pending_approval:
                         raise CoordinationError("Antigravity is waiting for an approval or answer; the update did not stop this turn.")
                     self.update_stopping.add(thread_id)
-            # A backend update stops the turn itself; it is not the user's Stop.
-            origin, reason = ("runtime", "backend_update") if params.get("runtimeUpdate") else ("user", "turn_interrupt")
-            self._finish(thread_id, "interrupted",
-                         termination={"origin": origin, "reason": reason, "execution": "unknown"})
-            connection = self.connections.pop(thread_id, None)
-            if connection:
+                turn_id = turn["id"]
+                turn_event = self.turn_events.setdefault(turn_id, threading.Event())
+                state = self.delivery_turns.get(thread_id)
+                if state is not None:
+                    state["interrupt_termination"] = {"origin": origin, "reason": reason}
+                    if not params.get("runtimeUpdate"):
+                        state["user_cancel_requested"] = True
+                connection = self.connections.get(thread_id)
+                native_id = self.native.get(thread_id)
+            settled = False
+            if connection is not None and native_id is not None:
                 try:
-                    connection.write({"method": "session/cancel", "params": {"sessionId": self.native[thread_id]}})
-                finally:
+                    connection.write({"method": "session/cancel", "params": {"sessionId": native_id}})
+                except CoordinationError:
+                    pass
+                if isinstance(connection, ACPConnection) and not pending_approval:
+                    settled = turn_event.wait(timeout=2.0)
+            if not settled:
+                self._finish(thread_id, "interrupted", expected_turn_id=turn_id,
+                             termination={"origin": origin, "reason": reason, "execution": "unknown"})
+                with self.lock:
+                    if self.connections.get(thread_id) is connection:
+                        self.connections.pop(thread_id, None)
+                if connection is not None:
                     connection.close()
+                self._persist_session_state(thread_id)
             return {}
         raise CoordinationError(f"Antigravity does not support {method}.")
 
@@ -468,7 +818,7 @@ class AntigravityRPC:
                          termination={"origin": origin, "reason": reason, "execution": execution})
         try:
             result = future.result()
-            self.initial_prompt.confirm(thread_id)
+            run_or_capture_write(lambda: self.initial_prompt.confirm(thread_id), required=True)
             reason = result.get("stopReason", "end_turn")
             error = self._runtime_failure(thread_id)
             if error:
@@ -483,10 +833,15 @@ class AntigravityRPC:
                                  if item.get("type") == "mcpToolCall"), default=-1)
                 answered = any(item.get("type") == "agentMessage" and item.get("text", "").strip()
                                for item in items[last_tool + 1:])
-                user_cancelled = self.delivery_turns.get(thread_id, {}).get("user_cancel_requested", False)
+                delivery_state = self.delivery_turns.get(thread_id) or {}
+                interrupt_termination = delivery_state.get("interrupt_termination")
+                user_cancelled = delivery_state.get("user_cancel_requested", False)
                 execution = "unknown" if any(i.get("type") == "mcpToolCall" and
                     i.get("status") in {"inProgress", "unknown"} for i in items) else "ended"
-            if reason in {"cancelled", "canceled"}:
+            if interrupt_termination is not None:
+                finish("interrupted", reason=interrupt_termination["reason"],
+                       origin=interrupt_termination["origin"], execution="unknown")
+            elif reason in {"cancelled", "canceled"}:
                 finish("interrupted", reason=reason, origin="user" if user_cancelled else "provider")
             elif reason in {"max_tokens", "max_turn_requests"}:
                 finish("failed", "Antigravity reached " + reason.replace("_", " ") +
@@ -503,7 +858,13 @@ class AntigravityRPC:
                 self._confirm_delivery(thread_id)
                 finish("completed", reason=reason, execution=execution)
         except Exception as exc:
-            finish("failed", str(exc), origin="runtime", reason="prompt_error")
+            with self.lock:
+                interrupt_termination = (self.delivery_turns.get(thread_id) or {}).get("interrupt_termination")
+            if interrupt_termination is not None:
+                finish("interrupted", reason=interrupt_termination["reason"],
+                       origin=interrupt_termination["origin"], execution="unknown")
+            else:
+                finish("failed", str(exc), origin="runtime", reason="prompt_error")
 
     def _runtime_failure(self, thread_id):
         # ACP 1.3.0 emits these runtime diagnostics as assistant text followed
@@ -523,20 +884,37 @@ class AntigravityRPC:
         batch = None if supplied else self.delivery.prepare(thread_id, turn_id)
         if batch:
             prompt = [{"type": "text", "text": batch["text"]}, *prompt]
+        request_id = str(uuid.uuid4())
         with self.lock:
             state = self.delivery_turns.get(thread_id)
             if self.closed or not state or state["id"] != turn_id:
                 return  # Stop won before submission.
             self.delivery.attempted(turn_id, batch, provider_turn_id=turn_id)
             state.update(batch=batch, accepted=False)
-            future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt})
-        future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
+            self.active_request_ids[thread_id] = request_id
+        self._persist_session_state(thread_id)
+        submit_kwargs = {"request_id": request_id} if accepts_keyword(connection.submit, "request_id") else {}
+        use_on_response = accepts_keyword(connection.submit, "on_response")
+        if use_on_response:
+            submit_kwargs["on_response"] = lambda outcome, tid=thread_id, t_id=turn_id: self._prompt_done(tid, t_id, outcome)
+        future = connection.submit("session/prompt", {"sessionId": self.native[thread_id], "prompt": prompt}, **submit_kwargs)
+        with self.lock:
+            self.prompt_futures[thread_id] = future
+        if not use_on_response:
+            future.add_done_callback(lambda result: self._prompt_done(thread_id, turn_id, result))
 
     def _confirm_delivery(self, thread_id):
-        state = self.delivery_turns.get(thread_id)
-        if state and not state["accepted"]:
-            self.delivery.submitted(thread_id, state["id"], state["batch"])
+        with self.lock:
+            state = self.delivery_turns.get(thread_id)
+            if not state or state["accepted"]:
+                return
+            turn_id, batch = state["id"], state["batch"]
             state["accepted"] = True
+        if batch:
+            run_or_capture_write(
+                lambda: self.delivery.submitted(thread_id, turn_id, batch),
+                required=True,
+            )
 
     # ACP has no steering operation or safe in-prompt delivery boundary.
     # Peer messages remain durable while native work runs. BrowserInboxWake
@@ -550,9 +928,12 @@ class AntigravityRPC:
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
+            turn_event = self.turn_events.pop(turn["id"], None)
+            if turn_event is not None:
+                turn_event.set()
+            self.active_request_ids.pop(thread_id, None)
+            self.prompt_futures.pop(thread_id, None)
             state = self.delivery_turns.pop(thread_id, None)
-            if state and status != "completed":
-                self.delivery.failed(turn["id"], state["batch"], error or "The turn stopped before delivery was confirmed.")
             turn["status"] = status
             turn["termination"] = termination or {"origin": "runtime", "reason": "unknown", "execution": "unknown"}
             self._unconfirmed_tools(turn,
@@ -568,10 +949,17 @@ class AntigravityRPC:
             # send resumes the saved native session in a fresh process. Never
             # replay a failed prompt automatically: its tools may have run.
             connection = self.connections.pop(thread_id, None) if status == "failed" else None
+        if state and status != "completed" and state.get("batch"):
+            failure_reason = error or "The turn stopped before delivery was confirmed."
+            run_or_capture_write(
+                lambda: self.delivery.failed(turn["id"], state["batch"], failure_reason),
+                required=True,
+            )
         if len(turn["items"]) > 1:
-            self.initial_prompt.confirm(thread_id)
+            run_or_capture_write(lambda: self.initial_prompt.confirm(thread_id), required=True)
         if connection:
             connection.close()
+        self._persist_session_state(thread_id)
         self.conversation_sync.finish(thread_id, turn)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
@@ -601,6 +989,10 @@ class AntigravityRPC:
         if kind == "usage_update":
             self._context_usage(thread_id, update)
             return
+        collector = self._replay_collectors.get(thread_id)
+        if collector is not None and thread_id not in self.turns:
+            collector.observe(update)
+            return
         state = self.delivery_turns.get(thread_id)
         if state:
             self._confirm_delivery(thread_id)
@@ -610,18 +1002,22 @@ class AntigravityRPC:
                 # provider output. Throttle failed attempts too, so contention
                 # cannot make every streamed chunk wait on the same DB lock.
                 self.last_activity[thread_id] = now
-                try:
-                    self.store.touch(thread_id)
-                except (sqlite3.Error, CoordinationError):
-                    logging.getLogger(__name__).warning(
-                        "Could not refresh Antigravity activity for %s; continuing provider stream",
-                        thread_id, exc_info=True)
+
+                def touch_activity():
+                    try:
+                        self.store.touch(thread_id)
+                    except (sqlite3.Error, CoordinationError):
+                        logging.getLogger(__name__).warning(
+                            "Could not refresh Antigravity activity for %s; continuing provider stream",
+                            thread_id, exc_info=True)
+
+                run_or_capture_write(touch_activity, required=False)
         if kind == "config_option_update":
             self.catalog = model_catalog(update)
         with self.lock:
             turn = self.turns.get(thread_id)
             if not turn:
-                return  # Native replay on resume must not duplicate display history.
+                return  # Native replay outside session/load must not duplicate display history.
             if kind in {"agent_message_chunk", "agent_thought_chunk"}:
                 content = update.get("content", {})
                 if content.get("type") != "text":
@@ -677,12 +1073,10 @@ class AntigravityRPC:
 
     def _permission(self, thread_id, message):
         request = message["params"]
-        tool = request.get("toolCall", {})
-        options = [o for o in request.get("options", []) if isinstance(o.get("optionId"), str) and o["optionId"]]
-        question = str(tool.get("toolCallId", "")).startswith("interaction_")
         key = f"antigravity:{thread_id}:{message['id']}"
         with self.lock:
             stopping = thread_id in self.update_stopping
+            turn_id = self.turns[thread_id]["id"]
             if not stopping:
                 self.requests[key] = (thread_id, message["id"], request)
         if stopping:
@@ -694,17 +1088,8 @@ class AntigravityRPC:
             except CoordinationError:
                 pass  # The provider is already stopping with its turn.
             return
-        params = {"threadId": thread_id, "turnId": self.turns[thread_id]["id"]}
-        if question and options:
-            method = "item/tool/requestUserInput"
-            params["questions"] = [{"id": tool["toolCallId"], "question": tool.get("title", "Choose an option"),
-                "allowCustomAnswer": False, "options": [{"value": o["optionId"], "label": o.get("name", o["optionId"])} for o in options]}]
-        else:
-            method = "item/commandExecution/requestApproval"
-            decisions = {"allow_once": "accept", "allow_always": "acceptForSession", "reject_once": "decline"}
-            params.update(reason=tool.get("title", "Antigravity tool request"),
-                          command=json.dumps(self._bounded(tool.get("rawInput", tool.get("content", {}))), indent=2),
-                          availableDecisions=([decisions[o["kind"]] for o in options if o.get("kind") in decisions] if not question else []) + ["cancel"])
+        self._persist_session_state(thread_id)
+        method, params = self._approval_display(thread_id, turn_id, request)
         self.on_event({"id": key, "method": method, "params": params})
 
     def write(self, message):
@@ -732,13 +1117,17 @@ class AntigravityRPC:
                 if state:
                     state["user_cancel_requested"] = True
         self.connections[thread_id].write({"id": request_id, "result": {"outcome": outcome}})
-        self.requests.pop(message["id"], None)
+        with self.lock:
+            self.requests.pop(message["id"], None)
+        self._persist_session_state(thread_id)
 
     def close(self):
         self.closed = True
-        for thread_id in list(self.turns):
-            self._finish(thread_id, "interrupted",
-                         termination={"origin": "runtime", "reason": "runtime_closed", "execution": "unknown"})
+        handover = transport_handover_active(self.store)
+        if not handover:
+            for thread_id in list(self.turns):
+                self._finish(thread_id, "interrupted",
+                             termination={"origin": "runtime", "reason": "runtime_closed", "execution": "unknown"})
         for thread_id, connection in list(self.connections.items()):
             connection.close()
         self.connections.clear()

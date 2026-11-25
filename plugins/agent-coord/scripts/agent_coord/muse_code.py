@@ -15,11 +15,19 @@ from pathlib import Path
 import queue
 import re
 import shlex
+import shutil
 import threading
 import time
 import uuid
 
-from .acp import ACPConnection
+from .acp import (
+    ACPConnection,
+    accepts_keyword,
+    reconcile_replayed_history,
+    run_or_capture_write,
+    strip_coordination_preamble,
+    transport_handover_active,
+)
 from .native_prompt import NativePromptState
 from .context import client_environment, coordination_bootstrap
 from .muse_setup import SCHEMA_FINGERPRINT, TESTED_VERSION, host_config, resolve_runtime
@@ -32,6 +40,171 @@ def command_id():
     """MSP commands require UUIDv7, including on Python versions before 3.14."""
     value = (int(time.time() * 1000) << 80) | (uuid.uuid4().int & ((1 << 76) - 1)) | (7 << 76)
     return str(uuid.UUID(int=(value & ~(3 << 62)) | (2 << 62)))
+
+
+class _MuseReplayCollector:
+    """Reconstruct completed turns from Muse session/resume, view/page, or replay streams."""
+
+    def __init__(self, thread_id: str, item_converter):
+        self.thread_id = thread_id
+        self.item_converter = item_converter
+        self._turn_order: list[str] = []
+        self._turns: dict[str, dict] = {}
+        self._native_items: dict[str, dict] = {}
+
+    def _ensure_turn(self, turn_id: str) -> dict:
+        turn = self._turns.get(turn_id)
+        if turn is None:
+            turn = {"id": turn_id, "status": "inProgress", "items": []}
+            self._turns[turn_id] = turn
+            self._turn_order.append(turn_id)
+        return turn
+
+    @staticmethod
+    def _convert_user_item(native: dict) -> dict | None:
+        content: list[dict] = []
+        raw_inputs = native.get("input") or native.get("content")
+        if isinstance(raw_inputs, list):
+            for part in raw_inputs:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    raw_text = part.get("text", "")
+                    cleaned = strip_coordination_preamble(raw_text)
+                    if cleaned:
+                        content.append({"type": "text", "text": cleaned})
+                elif part.get("type") == "image":
+                    url = part.get("url")
+                    if not isinstance(url, str) or not url:
+                        media_type = part.get("mediaType") or part.get("mimeType") or "image/png"
+                        data = part.get("base64Data") or part.get("data") or ""
+                        if data:
+                            url = f"data:{media_type};base64,{data}"
+                    if url:
+                        content.append({"type": "image", "url": url})
+        elif isinstance(native.get("text"), str):
+            cleaned = strip_coordination_preamble(native["text"])
+            if cleaned:
+                content.append({"type": "text", "text": cleaned})
+        if not content:
+            return None
+        return {
+            "id": native.get("itemId") or str(uuid.uuid4()),
+            "type": "userMessage",
+            "content": content,
+        }
+
+    def observe_native_item(self, native: dict, *, fallback_turn_id: str | None = None) -> None:
+        if not isinstance(native, dict) or not native.get("itemId"):
+            return
+        turn_id = native.get("turnId") or fallback_turn_id
+        if not isinstance(turn_id, str) or not turn_id:
+            return
+        turn = self._ensure_turn(turn_id)
+        previous = self._native_items.get(native["itemId"])
+        if previous is not None and native.get("revision", 0) < previous.get("revision", 0):
+            return
+        stored = copy.deepcopy(native)
+        stored["turnId"] = turn_id
+        self._native_items[stored["itemId"]] = stored
+        if stored.get("kind") == "userMessage":
+            converted = self._convert_user_item(stored)
+            if converted is None:
+                return
+        else:
+            converted = self.item_converter(stored)
+        existing_index = next(
+            (idx for idx, old in enumerate(turn["items"]) if old.get("id") == converted["id"]),
+            None,
+        )
+        if existing_index is None:
+            turn["items"].append(converted)
+        else:
+            turn["items"][existing_index] = converted
+
+    def observe_event(self, message: dict) -> None:
+        if not isinstance(message, dict):
+            return
+        method = message.get("method")
+        params = message.get("params") or {}
+        if method == "turn/started":
+            turn_id = params.get("turnId")
+            if isinstance(turn_id, str) and turn_id:
+                self._ensure_turn(turn_id)
+        elif method in {"item/started", "item/updated", "item/completed"}:
+            self.observe_native_item(params.get("item") or {}, fallback_turn_id=params.get("turnId"))
+        elif method == "item/delta":
+            native = self._native_items.get(params.get("itemId"))
+            if not native:
+                return
+            field = params.get("field", "text")
+            if field == "output":
+                field = "visibleOutput"
+            if field in {"text", "visibleOutput", "args"}:
+                native[field] = native.get(field, "") + params.get("delta", "")
+            elif re.fullmatch(r"summary\.\d+", field):
+                index = int(field.split(".")[1])
+                if index <= 100:
+                    summary = native.setdefault("summary", [])
+                    while len(summary) <= index:
+                        summary.append("")
+                    summary[index] += params.get("delta", "")
+            self.observe_native_item(native, fallback_turn_id=native.get("turnId"))
+        elif method == "turn/completed":
+            turn_id = params.get("turnId")
+            if not isinstance(turn_id, str) or not turn_id:
+                return
+            turn = self._ensure_turn(turn_id)
+            status = {
+                "completed": "completed",
+                "failed": "failed",
+                "cancelled": "interrupted",
+            }.get(params.get("terminal"), "completed")
+            turn["status"] = status
+            error = (params.get("error") or {}).get("message") or params.get("reason")
+            if error and status == "failed":
+                turn["error"] = {"message": str(error)}
+
+    def observe_resume_result(self, result: dict) -> None:
+        if not isinstance(result, dict):
+            return
+        history = result.get("history") or {}
+        for event in history.get("events") or []:
+            self.observe_event(event)
+        for item in history.get("items") or []:
+            self.observe_native_item(item)
+        session = result.get("session") or {}
+        for turn_record in session.get("turns") or []:
+            if not isinstance(turn_record, dict):
+                continue
+            turn_id = turn_record.get("turnId") or turn_record.get("id")
+            if not isinstance(turn_id, str) or not turn_id:
+                continue
+            for item in turn_record.get("items") or []:
+                self.observe_native_item(item, fallback_turn_id=turn_id)
+            terminal = turn_record.get("terminal") or turn_record.get("status")
+            if terminal in {"completed", "failed", "cancelled", "interrupted"} and turn_id in self._turns:
+                self._turns[turn_id]["status"] = (
+                    "interrupted" if terminal in {"cancelled", "interrupted"} else terminal
+                )
+
+    def finalize(self) -> list[dict]:
+        completed_turns: list[dict] = []
+        for turn_id in self._turn_order:
+            turn = self._turns[turn_id]
+            if turn["status"] not in {"completed", "failed", "interrupted"}:
+                continue
+            has_response = any(item.get("type") != "userMessage" for item in turn["items"])
+            if not has_response:
+                continue
+            finalized = copy.deepcopy(turn)
+            for item in finalized["items"]:
+                if item.get("status") == "inProgress":
+                    if finalized["status"] == "completed" and item.get("nativeKind") == "workflow":
+                        continue
+                    item["status"] = "completed" if finalized["status"] == "completed" else finalized["status"]
+            completed_turns.append(finalized)
+        return completed_turns
 
 
 class MuseConnection(ACPConnection):
@@ -47,20 +220,50 @@ class MuseConnection(ACPConnection):
         env = client_environment(env, store.database_path, "muse", session_id=options.get("threadId"))
         # Starting a conversation should not trigger a shared runtime update.
         env["MUSE_NO_AUTO_UPDATE"] = "1"
-        self.configuration = host_config(store, options["threadId"]) if options.get("threadId") else None
-        if self.configuration:
-            env["XDG_CONFIG_HOME"] = self.configuration.name
-        self.notifications = queue.Queue()
+        projection = getattr(store, "provider_projection", None) if store is not None else None
+        self.configuration = None
+        self.persistent_config = None
+        self.notifications = None
         self.dispatcher = None
-        try:
-            super().__init__(self.notifications.put, command=command, cwd=options["cwd"], env=env)
-        except Exception:
-            if self.configuration:
-                self.configuration.cleanup()
-            raise
+
+        if options.get("threadId"):
+            if projection is not None:
+                # Copy the overlay outside TemporaryDirectory so coordinator exit
+                # during handover does not delete the surviving host's XDG_CONFIG_HOME.
+                config_root = store.database_path.parent / "providers/muse/host-configs"
+                config_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                target_dir = config_root / f"{options['threadId']}-{uuid.uuid4().hex[:8]}"
+                with host_config(store, options["threadId"]) as temp_config:
+                    shutil.copytree(temp_config, target_dir, symlinks=True)
+                self.persistent_config = target_dir
+                env["XDG_CONFIG_HOME"] = str(target_dir)
+            else:
+                self.configuration = host_config(store, options["threadId"])
+                env["XDG_CONFIG_HOME"] = self.configuration.name
+
+        if projection is not None:
+            try:
+                super().__init__(
+                    callback,
+                    command=command,
+                    cwd=options["cwd"],
+                    env=env,
+                    store=store,
+                    provider="muse",
+                    thread_id=options.get("threadId"),
+                )
+            except Exception:
+                if self.persistent_config is not None:
+                    shutil.rmtree(self.persistent_config, ignore_errors=True)
+                raise
+            return
+
+        notifications: queue.Queue = queue.Queue()
+        self.notifications = notifications
+
         def dispatch():
             while True:
-                message = self.notifications.get()
+                message = notifications.get()
                 if message is None:
                     return
                 try:
@@ -69,9 +272,24 @@ class MuseConnection(ACPConnection):
                     self.errors.append(str(exc)[-1000:])
                     callback({"method": "disconnected", "params": {"error": f"Invalid Muse event: {exc}"}})
                     return
-        # Responses must keep draining while the UI lock is held by answer().
+
+        # Start dispatcher BEFORE opening pipes so early frames never queue to an unstarted consumer.
         self.dispatcher = threading.Thread(target=dispatch, daemon=True)
         self.dispatcher.start()
+        try:
+            super().__init__(notifications.put, command=command, cwd=options["cwd"], env=env)
+        except Exception:
+            notifications.put(None)
+            self.dispatcher.join(timeout=3)
+            if self.configuration:
+                self.configuration.cleanup()
+            raise
+
+    def _init_attached(self, *, config_dir=None, **kwargs):
+        self.configuration = None
+        self.persistent_config = Path(config_dir) if config_dir else None
+        self.notifications = None
+        self.dispatcher = None
 
     def initialize(self):
         result = self.request("initialize", {"clientInfo": {"name": "ribbon_field", "version": "0.1.0"},
@@ -94,12 +312,16 @@ class MuseConnection(ACPConnection):
     def close(self):
         if self.closed:
             return
+        handover = transport_handover_active(self.store)
         super().close()
-        self.notifications.put(None)
+        if self.notifications is not None:
+            self.notifications.put(None)
         if self.dispatcher and self.dispatcher is not threading.current_thread():
             self.dispatcher.join(timeout=3)
-        if self.configuration:
+        if self.configuration and not handover:
             self.configuration.cleanup()
+        if self.persistent_config is not None and not handover:
+            shutil.rmtree(self.persistent_config, ignore_errors=True)
 
 
 class MuseRPC:
@@ -110,6 +332,9 @@ class MuseRPC:
         self.seen = {}
         self.ready, self.terminal_turns, self.background_turns = set(), {}, {}
         self.request_history, self.answered, self.settled = {}, set(), set()
+        self.active_request_ids = {}
+        self.turn_events = {}
+        self._replay_collectors = {}
         # Turns a backend update is stopping; their late requests are not shown.
         self.update_stopping = set()
         self.lock, self.catalog_lock = threading.RLock(), threading.Lock()
@@ -118,10 +343,290 @@ class MuseRPC:
         with store._connection() as db:
             self.initial_prompt = NativePromptState(store, "muse", db)
             db.execute("CREATE TABLE IF NOT EXISTS muse_sessions (thread_id TEXT PRIMARY KEY, native_id TEXT NOT NULL, cwd TEXT NOT NULL)")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(muse_sessions)")}
+            for column in (
+                "channel",
+                "native_session_id",
+                "turn_id",
+                "request_id",
+                "options_json",
+                "pending_approvals_json",
+                "background_turns_json",
+            ):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE muse_sessions ADD COLUMN {column} TEXT")
         self.usage = MuseUsage(store, on_event)
 
     def _emit(self, method, thread_id, **params):
         self.on_event({"method": method, "params": {"threadId": thread_id, **params}})
+
+    def _persist_session_state(self, thread_id: str) -> None:
+        with self.lock:
+            native_id = self.native.get(thread_id)
+            options = dict(self.options.get(thread_id) or {})
+            cwd = options.get("cwd")
+            if not native_id or not cwd:
+                return
+            connection = self.connections.get(thread_id)
+            channel = getattr(connection, "channel", None)
+            config_dir = getattr(connection, "persistent_config", None)
+            turn = self.turns.get(thread_id)
+            turn_id = turn["id"] if turn else None
+            request_id = self.active_request_ids.get(thread_id) if turn_id else None
+            options_payload = {
+                **options,
+                "_settings": list(self.settings.get(thread_id, (options.get("model"), options.get("effort")))),
+                "_config_dir": str(config_dir) if config_dir else None,
+                "_items": copy.deepcopy(self.items.get(thread_id) or {}),
+            }
+            approvals_payload = {
+                "requests": {
+                    key: copy.deepcopy(value)
+                    for key, value in self.requests.items()
+                    if value["thread"] == thread_id
+                },
+                "history": {
+                    native_req_id: copy.deepcopy(req_params)
+                    for (tid, native_req_id), req_params in self.request_history.items()
+                    if tid == thread_id
+                },
+                "settled": [native_req_id for tid, native_req_id in self.settled if tid == thread_id],
+                "answered": [
+                    [native_req_id, stage_index]
+                    for tid, native_req_id, stage_index in self.answered
+                    if tid == thread_id
+                ],
+            }
+            background_payload = copy.deepcopy(self.background_turns.get(thread_id) or {})
+        options_json = json.dumps(options_payload, sort_keys=True)
+        approvals_json = json.dumps(approvals_payload, sort_keys=True)
+        background_json = json.dumps(background_payload, sort_keys=True)
+
+        def write_row():
+            with self.store.database_operation("muse.session_state"), self.store._connection() as db:
+                db.execute(
+                    """INSERT INTO muse_sessions (
+                        thread_id, native_id, cwd, channel, native_session_id,
+                        turn_id, request_id, options_json, pending_approvals_json, background_turns_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        cwd = excluded.cwd,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id,
+                        turn_id = excluded.turn_id,
+                        request_id = excluded.request_id,
+                        options_json = excluded.options_json,
+                        pending_approvals_json = excluded.pending_approvals_json,
+                        background_turns_json = excluded.background_turns_json""",
+                    (
+                        thread_id,
+                        native_id,
+                        cwd,
+                        channel,
+                        native_id,
+                        turn_id,
+                        request_id,
+                        options_json,
+                        approvals_json,
+                        background_json,
+                    ),
+                )
+
+        run_or_capture_write(write_row, required=True)
+
+    @staticmethod
+    def _approval_display(thread_id: str, turn_id: str | None, pending: dict) -> tuple[str, dict]:
+        params = pending["request"]
+        question = pending["question"]
+        choices = pending["choices"]
+        display: dict = {"threadId": thread_id, "turnId": turn_id}
+        if question:
+            display.update(
+                allowCancel=True,
+                questions=[
+                    {
+                        **q,
+                        "allowCustomAnswer": q.get("selection", {}).get("mode") != "multiple",
+                        "multiSelect": q.get("selection", {}).get("mode") == "multiple",
+                    }
+                    for q in params["questions"]
+                ],
+            )
+            return "item/tool/requestUserInput", display
+        reason = params.get("toolName", "Muse tool request")
+        args = params.get("rawArgs", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        if isinstance(args, dict) and args.get("sandbox_permissions") == "require_escalated":
+            reason = "Run outside the workspace sandbox"
+            justification = args.get("justification")
+            if isinstance(justification, str) and justification.strip():
+                reason += ": " + justification.strip()
+        display.update(
+            reason=reason,
+            command=params.get("subject", {}).get("command") or params.get("rawArgs", ""),
+            availableDecisions=list(choices) + ([] if "cancel" in choices else ["cancel"]),
+        )
+        return "item/commandExecution/requestApproval", display
+
+    def attach_channel(self, thread_id, channel, pid, *, returncode=None):
+        """Rebind a surviving Muse MSP channel during CoordinatorProjection.load()."""
+        projection = getattr(self.store, "provider_projection", None)
+        if not thread_id:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, None, channel, pid, provider="muse", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT * FROM muse_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            prompt_row = None
+            if row is not None:
+                native_id = row["native_session_id"] or row["native_id"]
+                prompt_row = db.execute(
+                    "SELECT started FROM native_prompt_initialization WHERE provider='muse' AND thread_id=? AND native_id=?",
+                    (thread_id, native_id),
+                ).fetchone()
+        if row is None:
+            attached = self.connection_factory.attach(
+                self.store, lambda _: None, thread_id, channel, pid, provider="muse", returncode=returncode
+            )
+            if returncode is None and projection is not None:
+                projection.close_channel(channel)
+            return attached
+
+        native_id = row["native_session_id"] or row["native_id"]
+        cwd = row["cwd"]
+        saved_options = json.loads(row["options_json"]) if row["options_json"] else {"cwd": cwd, "permission_mode": ":ask-me", "yolo": False}
+        saved_settings = tuple(saved_options.pop("_settings", [saved_options.get("model"), saved_options.get("effort")]))
+        config_dir = saved_options.pop("_config_dir", None)
+        saved_items = saved_options.pop("_items", {})
+        active_turn_id = row["turn_id"]
+        active_request_id = row["request_id"]
+        raw_approvals = json.loads(row["pending_approvals_json"]) if row["pending_approvals_json"] else {}
+        if "requests" in raw_approvals or "history" in raw_approvals:
+            approvals = raw_approvals.get("requests") or {}
+            req_history = raw_approvals.get("history") or {}
+            settled_ids = raw_approvals.get("settled") or []
+            answered_entries = raw_approvals.get("answered") or []
+        else:
+            approvals = raw_approvals
+            req_history, settled_ids, answered_entries = {}, [], []
+        background = json.loads(row["background_turns_json"]) if row["background_turns_json"] else {}
+        saved_history = read_history(self.store, thread_id) or {"id": thread_id, "turns": []}
+
+        generation = object()
+        connection = self.connection_factory.attach(
+            self.store,
+            lambda message, tid=thread_id, gen=generation: self._message(tid, gen, message),
+            thread_id,
+            channel,
+            pid,
+            provider="muse",
+            returncode=returncode,
+            config_dir=config_dir,
+        )
+
+        with self.lock:
+            self.generations[thread_id] = generation
+            self.connections[thread_id] = connection
+            self.native[thread_id] = native_id
+            self.options[thread_id] = dict(saved_options)
+            self.settings[thread_id] = saved_settings
+            self.seen[thread_id] = set()
+            self.items[thread_id] = dict(saved_items)
+            self.terminal_turns[thread_id] = {
+                t["id"] for t in saved_history.get("turns", []) if t.get("status") != "inProgress"
+            }
+            self.ready.add(thread_id)
+            if prompt_row is not None and not prompt_row[0]:
+                self.initial_prompt.pending[thread_id] = native_id
+            else:
+                self.initial_prompt.pending.pop(thread_id, None)
+
+            # Restore background workflow turns from persisted state and history.
+            for hist_turn in saved_history.get("turns", []):
+                if hist_turn.get("status") == "completed" and any(
+                    item.get("nativeKind") == "workflow" and item.get("status") == "inProgress"
+                    for item in hist_turn.get("items", [])
+                ):
+                    background.setdefault(hist_turn["id"], copy.deepcopy(hist_turn))
+            if background:
+                self.background_turns[thread_id] = background
+
+            if active_turn_id:
+                existing_turn = next(
+                    (
+                        copy.deepcopy(t)
+                        for t in saved_history.get("turns", [])
+                        if t.get("id") == active_turn_id
+                    ),
+                    None,
+                )
+                if existing_turn is None:
+                    existing_turn = {"id": active_turn_id, "status": "inProgress", "items": []}
+                else:
+                    existing_turn["status"] = "inProgress"
+                self.turns[thread_id] = existing_turn
+                self.turn_events[active_turn_id] = threading.Event()
+                if active_request_id:
+                    self.active_request_ids[thread_id] = active_request_id
+                    connection.bind_pending_request(
+                        active_request_id,
+                        on_response=lambda outcome, tid=thread_id, t_id=active_turn_id: self._rebound_turn_start_done(tid, t_id, outcome),
+                    )
+
+            for native_req_id, req_params in req_history.items():
+                self.request_history[(thread_id, native_req_id)] = req_params
+            for native_req_id in settled_ids:
+                self.settled.add((thread_id, native_req_id))
+            for native_req_id, stage_index in answered_entries:
+                self.answered.add((thread_id, native_req_id, stage_index))
+            for key, entry in approvals.items():
+                self.requests[key] = entry
+                self.request_history.setdefault((thread_id, entry["native_id"]), copy.deepcopy(entry["request"]))
+
+        sessions = getattr(projection, "sessions", None) if projection is not None else None
+        if sessions is not None:
+            with sessions.lock:
+                sessions.loaded.add(thread_id)
+                sessions.loaded_clients[thread_id] = "muse"
+                if active_turn_id:
+                    sessions.active[thread_id] = active_turn_id
+                existing_ids = {r.get("id") for r in sessions.requests.values()}
+                for key, entry in approvals.items():
+                    if key not in existing_ids:
+                        method, params = self._approval_display(thread_id, active_turn_id, entry)
+                        ui_key = str(uuid.uuid4())
+                        sessions.requests[ui_key] = {
+                            "id": key,
+                            "method": method,
+                            "params": params,
+                            "key": ui_key,
+                            "received_at": self.store.clock(),
+                        }
+        return connection
+
+    def _rebound_turn_start_done(self, thread_id: str, turn_id: str, future) -> None:
+        with self.lock:
+            if self.turns.get(thread_id, {}).get("id") != turn_id:
+                return
+            self.active_request_ids.pop(thread_id, None)
+        try:
+            result = future.result()
+            if result.get("turnId") != turn_id or result.get("disposition") not in {"started", "queued"}:
+                raise CoordinationError("Muse did not start the expected turn. Review the native session before retrying.")
+            run_or_capture_write(lambda: self.initial_prompt.confirm(thread_id), required=True)
+            self._persist_session_state(thread_id)
+        except Exception as exc:
+            self._shutdown(thread_id)
+            self._finish(thread_id, "failed", str(exc))
 
     def _history(self, thread_id, *, include_turns=True):
         if not include_turns:
@@ -198,8 +703,9 @@ class MuseRPC:
         return self.options.get(thread_id, {}).get("permission_mode") if thread_id in self.connections else None
 
     @staticmethod
-    def _command(connection, method, **params):
-        return connection.request(method, {"commandId": command_id(), **params})
+    def _command(connection, method, *, timeout=60, **params):
+        kwargs = {"timeout": timeout} if accepts_keyword(connection.request, "timeout") else {}
+        return connection.request(method, {"commandId": command_id(), **params}, **kwargs)
 
     @staticmethod
     def _input(parts):
@@ -220,28 +726,55 @@ class MuseRPC:
         if current:
             return current
         with self.store._connection() as db:
-            row = db.execute("SELECT native_id, cwd FROM muse_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
+            row = db.execute("SELECT native_id, native_session_id, cwd FROM muse_sessions WHERE thread_id = ?", (thread_id,)).fetchone()
         if row and row["cwd"] != options["cwd"]:
             raise CoordinationError("Muse sessions keep their original workspace. Start a new session in the new directory.")
+        saved_native = (row["native_session_id"] or row["native_id"]) if row else None
         generation = object()
         self.generations[thread_id] = generation
         connection = self.connection_factory(self.store,
             lambda message: self._message(thread_id, generation, message), {**options, "threadId": thread_id})
         self.connections[thread_id] = connection
-        self.native[thread_id] = row["native_id"] if row else thread_id
+        self.native[thread_id] = saved_native if saved_native else thread_id
         self.seen[thread_id] = set()
         self.items[thread_id] = {}
         history = read_history(self.store, thread_id) or {}
-        self.terminal_turns[thread_id] = {t["id"] for t in history.get("turns", [])
+        saved_turns = history.get("turns", [])
+        self.terminal_turns[thread_id] = {t["id"] for t in saved_turns
                                           if t.get("status") != "inProgress"}
         profile = options["permission_mode"]
         try:
             connection.initialize()
-            if row:
-                result = self._command(connection, "session/resume", sessionId=row["native_id"],
-                                       excludeItems=True, permissionProfile=profile)
+            collector = None
+            if saved_native:
+                collector = _MuseReplayCollector(thread_id, self._item)
+                self._replay_collectors[thread_id] = collector
+                try:
+                    result = self._command(connection, "session/resume", sessionId=saved_native,
+                                           excludeItems=False, permissionProfile=profile)
+                finally:
+                    self._replay_collectors.pop(thread_id, None)
                 if result["session"].get("activeTurnId"):
                     raise CoordinationError("Muse reports an existing active turn. Stop it in Muse before resuming here.")
+                collector.observe_resume_result(result)
+                session_meta = result.get("session") or {}
+                history_meta = result.get("history") or {}
+                if (
+                    history_meta.get("mode") == "none"
+                    and isinstance(session_meta.get("turnCount"), int)
+                    and session_meta["turnCount"] > len(saved_turns)
+                ):
+                    cursor = None
+                    for _ in range(32):
+                        page_params = {"sessionId": saved_native, "direction": "forward", "limit": 200}
+                        if cursor:
+                            page_params["cursor"] = cursor
+                        page = connection.request("view/page", page_params)
+                        for event in page.get("events") or []:
+                            collector.observe_event(event)
+                        cursor = page.get("nextCursor")
+                        if not cursor:
+                            break
             else:
                 params = {"sessionId": thread_id, "workspaceRoot": options["cwd"],
                           "workspaceRoots": list(dict.fromkeys([options["cwd"], str(self.store.database_path.parent)])),
@@ -256,17 +789,35 @@ class MuseRPC:
             self.usage.snapshot(thread_id, native_id, result)
             # Preserve the native identity even when a subsequent setting fails.
             with self.store._connection() as db:
-                db.execute("INSERT OR REPLACE INTO muse_sessions VALUES (?, ?, ?)", (thread_id, native_id, options["cwd"]))
-                self.initial_prompt.bind(db, thread_id, native_id, resumed=row is not None)
+                db.execute(
+                    """INSERT INTO muse_sessions (thread_id, native_id, cwd, channel, native_session_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(thread_id) DO UPDATE SET
+                        native_id = excluded.native_id,
+                        cwd = excluded.cwd,
+                        channel = excluded.channel,
+                        native_session_id = excluded.native_session_id""",
+                    (thread_id, native_id, options["cwd"], getattr(connection, "channel", None), native_id),
+                )
+                self.initial_prompt.bind(db, thread_id, native_id, resumed=saved_native is not None)
             # Approval mode alone does not change the filesystem/network policy.
             # Prove the native profile was committed before admitting any turn.
             state = session.get("permissionState") or {}
             if not state.get("profileId"):
-                snapshot = self._command(connection, "session/read", sessionId=native_id)["session"]
+                read_result = self._command(connection, "session/read", sessionId=native_id)
+                if collector is not None:
+                    collector.observe_resume_result(read_result)
+                snapshot = read_result["session"]
                 state = snapshot.get("permissionState") or {}
             if state.get("profileId") != profile:
                 raise CoordinationError(f"Muse did not apply the requested {profile} permission profile; no turn was started.")
-            if row:
+            if collector is not None:
+                replayed_turns = collector.finalize()
+                if replayed_turns:
+                    self.terminal_turns[thread_id].update(t["id"] for t in replayed_turns)
+                    if reconcile_replayed_history(self.store, self.on_event, thread_id, replayed_turns):
+                        self.initial_prompt.confirm(thread_id)
+            if saved_native:
                 if options.get("model") and options["model"] != session.get("modelId"):
                     self._command(connection, "session/setModel", sessionId=native_id, model={"modelId": options["model"]})
             if options.get("effort"):
@@ -276,6 +827,7 @@ class MuseRPC:
             self.terminal_turns[thread_id].update(t["turnId"] for t in session.get("turns", [])
                 if t.get("terminal") and t.get("turnId"))
             self.ready.add(thread_id)
+            self._persist_session_state(thread_id)
             return connection
         except Exception:
             self._shutdown(thread_id)
@@ -356,7 +908,9 @@ class MuseRPC:
             self.update_stopping.discard(thread_id)
             connection = self._connection(thread_id, self._options(params))
             inputs = self._input(params["input"])
-            if thread_id in self.initial_prompt.pending:
+            initial = thread_id in self.initial_prompt.pending
+            changes = self.store.threads.observe_context(thread_id, initial=initial)
+            if initial:
                 # Explicit identity also works in native tools that sanitize their environment.
                 command = shlex.join(["env", f"AGENT_COORD_SESSION_ID={thread_id}", f"AGENT_COORD_DB={self.store.database_path}", "agent-coord"])
                 context = coordination_bootstrap(self.store, thread_id, command=command)
@@ -366,16 +920,35 @@ class MuseRPC:
                                 "outside this workspace. An ordinary sandboxed-command approval does not grant "
                                 "that filesystem access.")
                 inputs.insert(0, {"type": "text", "text": context})
+            elif changes:
+                inputs.insert(0, {"type": "text", "text": "Updated coordination context: " + json.dumps(changes, sort_keys=True)})
             turn = {"id": command_id(), "status": "inProgress", "items": [
                 {"id": str(uuid.uuid4()), "type": "userMessage", "content": params["input"]}]}
-            if not self._start_turn(thread_id, turn):
+            request_id = str(uuid.uuid4())
+            if not self._start_turn(thread_id, turn, request_id=request_id):
                 raise CoordinationError("Muse started another turn. Your message was not sent; send it again to steer that turn.")
             try:
-                result = connection.request("turn/start", {"commandId": turn["id"], "sessionId": self.native[thread_id],
-                    "input": inputs, "displayText": "\n".join(p.get("text", "[Image]") for p in params["input"])})
+                turn_params = {
+                    "commandId": turn["id"],
+                    "sessionId": self.native[thread_id],
+                    "input": inputs,
+                    "displayText": "\n".join(p.get("text", "[Image]") for p in params["input"]),
+                }
+                if hasattr(connection, "submit") and accepts_keyword(connection.submit, "request_id"):
+                    future = connection.submit("turn/start", turn_params, request_id=request_id)
+                    try:
+                        result = future.result(timeout=60)
+                    finally:
+                        with connection.lock:
+                            connection.pending.pop(request_id, None)
+                else:
+                    result = connection.request("turn/start", turn_params)
+                with self.lock:
+                    self.active_request_ids.pop(thread_id, None)
                 if result.get("turnId") != turn["id"] or result.get("disposition") not in {"started", "queued"}:
                     raise CoordinationError("Muse did not start the expected turn. Review the native session before retrying.")
                 self.initial_prompt.confirm(thread_id)
+                self._persist_session_state(thread_id)
             except Exception as exc:
                 self._shutdown(thread_id)
                 self._finish(thread_id, "failed", str(exc))
@@ -383,24 +956,35 @@ class MuseRPC:
             model, effort = self.settings[thread_id]
             return {"turn": copy.deepcopy(turn), "model": model, "reasoningEffort": effort}
         if method == "turn/interrupt":
-            turn = self.turns.get(thread_id)
-            if not turn or turn["id"] != params["turnId"]:
-                raise CoordinationError("The active Muse turn changed or finished.")
-            if params.get("runtimeUpdate"):
-                # Requests register under this lock: an update never withdraws one.
-                with self.lock:
-                    if any(value["thread"] == thread_id for value in self.requests.values()):
+            with self.lock:
+                turn = self.turns.get(thread_id)
+                if not turn or turn["id"] != params["turnId"]:
+                    raise CoordinationError("The active Muse turn changed or finished.")
+                pending_approval = any(value["thread"] == thread_id for value in self.requests.values())
+                if params.get("runtimeUpdate"):
+                    if pending_approval:
                         raise CoordinationError("Muse is waiting for an approval or answer; the update did not stop this turn.")
                     self.update_stopping.add(thread_id)
-            try:
-                self._command(self.connections[thread_id], "turn/interrupt", sessionId=self.native[thread_id], turnId=turn["id"])
-            finally:
-                self._shutdown(thread_id)
+                turn_id = turn["id"]
+                turn_event = self.turn_events.setdefault(turn_id, threading.Event())
+                connection = self.connections.get(thread_id)
+                native_id = self.native.get(thread_id)
+            settled = False
+            deadline = time.monotonic() + 2.0
+            if connection is not None and native_id is not None:
+                try:
+                    self._command(connection, "turn/interrupt", timeout=2.0, sessionId=native_id, turnId=turn_id)
+                except CoordinationError:
+                    pass
+                if isinstance(connection, ACPConnection) and not pending_approval:
+                    settled = turn_event.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if not settled:
                 self._finish(thread_id, "interrupted")
+                self._shutdown(thread_id)
             return {}
         raise CoordinationError(f"Muse does not support {method}.")
 
-    def _start_turn(self, thread_id, turn):
+    def _start_turn(self, thread_id, turn, *, request_id=None):
         with self.lock:
             if thread_id not in self.ready or thread_id in self.turns:
                 return False
@@ -410,6 +994,10 @@ class MuseRPC:
             self.items[thread_id] = {key: item for key, item in self.items.get(thread_id, {}).items()
                                      if item.get("turnId") in background}
             self.turns[thread_id] = turn
+            self.turn_events[turn["id"]] = threading.Event()
+            if request_id is not None:
+                self.active_request_ids[thread_id] = request_id
+        self._persist_session_state(thread_id)
         self._emit("turn/started", thread_id, turn=copy.deepcopy(turn))
         return True
 
@@ -432,6 +1020,10 @@ class MuseRPC:
             turn = self.turns.pop(thread_id, None)
             if not turn:
                 return
+            turn_event = self.turn_events.pop(turn["id"], None)
+            if turn_event is not None:
+                turn_event.set()
+            self.active_request_ids.pop(thread_id, None)
             turn["status"] = status
             for item in turn["items"]:
                 if item.get("status") == "inProgress":
@@ -445,6 +1037,7 @@ class MuseRPC:
             if any(i.get("nativeKind") == "workflow" and i.get("status") == "inProgress" for i in turn["items"]):
                 self.background_turns.setdefault(thread_id, {})[turn["id"]] = self.completed[thread_id]
             self.requests = {k: v for k, v in self.requests.items() if v["thread"] != thread_id}
+        self._persist_session_state(thread_id)
         self._emit("turn/completed", thread_id, turn=copy.deepcopy(turn))
 
     @staticmethod
@@ -492,7 +1085,12 @@ class MuseRPC:
             return
         # Retain native generation/identity checks, but do not drop telemetry
         # merely because it belongs to replay or an already-finished UI turn.
-        self.usage.capture(thread_id, self.native[thread_id], method, params)
+        native_id = self.native[thread_id]
+        run_or_capture_write(lambda: self.usage.capture(thread_id, native_id, method, params), required=False)
+        collector = self._replay_collectors.get(thread_id)
+        if collector is not None and thread_id not in self.ready:
+            collector.observe_event({"method": method, "params": params})
+            return
         if method == "session/closed":
             self._shutdown(thread_id)
             self._finish(thread_id, "failed", "Muse unloaded the session. Send again to resume.")
@@ -514,7 +1112,7 @@ class MuseRPC:
             return
         if method == "turn/started":
             identity = params.get("turnId")
-            if isinstance(identity, str) and identity:
+            if isinstance(identity, str) and identity and thread_id in self.ready:
                 self._start_turn(thread_id, {"id": identity, "status": "inProgress", "items": []})
             return
         if method in {"item/started", "item/updated", "item/completed", "item/delta"}:
@@ -536,11 +1134,13 @@ class MuseRPC:
         elif method in {"approval/requested", "approval/updated", "userInput/requested"}:
             self._permission(thread_id, method, params)
         elif method in {"approval/resolved", "userInput/settled"}:
-            native_id = params.get("approvalId") or params.get("userInputId")
-            self.settled.add((thread_id, native_id))
-            self._resolve(thread_id, native_id)
+            native_req = params.get("approvalId") or params.get("userInputId")
+            self.settled.add((thread_id, native_req))
+            self._resolve(thread_id, native_req)
+            self._persist_session_state(thread_id)
 
     def _update_item(self, thread_id, method, params):
+        persist_needed = False
         with self.lock:
             items = self.items[thread_id]
             native = (items.get(params.get("itemId")) if method == "item/delta"
@@ -575,12 +1175,15 @@ class MuseRPC:
                     return
                 native["turnId"] = identity
                 items[native["itemId"]] = native
+                persist_needed = native.get("kind") == "workflow" or method == "item/started"
             item = self._item(native)
             index = next((i for i, old in enumerate(turn["items"]) if old["id"] == item["id"]), None)
             if index is None:
                 turn["items"].append(item)
             else:
                 turn["items"][index] = item
+        if persist_needed:
+            self._persist_session_state(thread_id)
         self._emit("item/completed" if item["status"] != "inProgress" else "item/started", thread_id,
                    turnId=turn["id"], item=copy.deepcopy(item))
 
@@ -609,43 +1212,29 @@ class MuseRPC:
             resolved = params["change"].get("requirementId")
             if not resolved or resolved == requirement:
                 self._resolve(thread_id, native_id)
+                self._persist_session_state(thread_id)
                 return
             # The snapshot already offers the next stage. Native requests can
             # reuse the approval's opening cursor across all requirements.
         self._resolve(thread_id, native_id)
         key = f"muse:{thread_id}:{native_id}:{uuid.uuid4()}"
-        display = {"threadId": thread_id, "turnId": self.turns[thread_id]["id"]}
         choices = {}
-        if question:
-            display.update(allowCancel=True, questions=[{**q, "allowCustomAnswer": q.get("selection", {}).get("mode") != "multiple",
-                "multiSelect": q.get("selection", {}).get("mode") == "multiple"} for q in params["questions"]])
-        else:
+        if not question:
             decisions = {"approved": "accept", "approvedForSession": "acceptForSession", "denied": "decline", "abort": "cancel"}
             for choice in params.get("availableChoices", []):
                 decision = decisions.get(choice.get("decision"))
                 if decision and choice.get("scope") in {"once", "session"}:
                     choices.setdefault(decision, choice["choiceId"])
-            reason = params.get("toolName", "Muse tool request")
-            args = params.get("rawArgs", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except ValueError:
-                    args = {}
-            if isinstance(args, dict) and args.get("sandbox_permissions") == "require_escalated":
-                reason = "Run outside the workspace sandbox"
-                justification = args.get("justification")
-                if isinstance(justification, str) and justification.strip():
-                    reason += ": " + justification.strip()
-            display.update(reason=reason,
-                command=params.get("subject", {}).get("command") or params.get("rawArgs", ""),
-                availableDecisions=list(choices) + ([] if "cancel" in choices else ["cancel"]))
+        entry = {"thread": thread_id, "native_id": native_id, "request": copy.deepcopy(params),
+                 "question": question, "choices": choices}
         with self.lock:
             if thread_id in self.update_stopping:
                 return  # The native interrupt settles this request with its turn.
-            self.requests[key] = {"thread": thread_id, "native_id": native_id, "request": copy.deepcopy(params),
-                                  "question": question, "choices": choices}
-        self.on_event({"id": key, "method": "item/tool/requestUserInput" if question else "item/commandExecution/requestApproval", "params": display})
+            turn_id = self.turns[thread_id]["id"]
+            self.requests[key] = entry
+        self._persist_session_state(thread_id)
+        display_method, display = self._approval_display(thread_id, turn_id, entry)
+        self.on_event({"id": key, "method": display_method, "params": display})
 
     def write(self, message):
         pending = self.requests.get(message.get("id"))
@@ -690,26 +1279,34 @@ class MuseRPC:
             params.update(approvalId=pending["native_id"], requirementId=request["currentRequirementId"], choiceId=choice)
         receipt = self._command(self.connections[thread_id], method, **params)
         identity = (thread_id, pending["native_id"])
-        if pending["question"] or receipt.get("terminal"):
-            self.settled.add(identity)
-        else:
-            self.answered.add((*identity, request["currentRequirementId"]["sourceIndex"]))
-        self.requests.pop(message["id"], None)
+        with self.lock:
+            if pending["question"] or receipt.get("terminal"):
+                self.settled.add(identity)
+            else:
+                self.answered.add((*identity, request["currentRequirementId"]["sourceIndex"]))
+            self.requests.pop(message["id"], None)
+        self._persist_session_state(thread_id)
 
     def _shutdown(self, thread_id):
+        handover = transport_handover_active(self.store)
         self.ready.discard(thread_id)
         self.generations.pop(thread_id, None)
         connection = self.connections.pop(thread_id, None)
         if connection:
             connection.close()
+        if handover:
+            return
         for turn in self.background_turns.get(thread_id, {}).values():
             for item in turn["items"]:
                 if item.get("status") == "inProgress":
                     item["status"] = "interrupted"
                     self._emit("item/completed", thread_id, turnId=turn["id"], item=copy.deepcopy(item))
+        self._persist_session_state(thread_id)
 
     def close(self):
         self.closed = True
+        handover = transport_handover_active(self.store)
         for thread_id in list(self.connections):
             self._shutdown(thread_id)
-            self._finish(thread_id, "interrupted")
+            if not handover:
+                self._finish(thread_id, "interrupted")
