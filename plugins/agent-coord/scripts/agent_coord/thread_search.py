@@ -321,8 +321,89 @@ def _connection_data_version(db) -> int:
             pass
 
 
-def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, int, int, int], rev_before: int) -> dict[str, tuple]:
+def _load_context_snapshot(
+    store,
+    db,
+    tables: set[str],
+    *,
+    owned: bool,
+    sig_before: tuple[int, int, int, int] | None,
+    rev_before: int,
+    unsafe_before: int,
+    dirty_seq_before: int,
+    pre_build_token: object | None,
+) -> dict[str, tuple]:
     writer = store._writer
+    if owned:
+        with writer.search_cache_lock:
+            cache = writer.search_cache
+            dirty_map = (
+                dict(writer.search_dirty_threads)
+                if cache is not None
+                and writer.search_dirty_threads is not None
+                and cache.get("unsafe_epoch") == writer.search_unsafe_epoch
+                else None
+            )
+            cached_rows = dict(cache["rows"]) if dirty_map is not None else None
+        if cached_rows is not None and dirty_map is not None:
+            if pre_build_token is not None:
+                with writer.search_cache_lock:
+                    if writer._search_build_token is pre_build_token:
+                        writer._search_build_token = None
+                        writer._search_build_dirty = None
+                        writer.search_build_cond.notify_all()
+            if dirty_map:
+                refreshed = _query_context_entries(db, tables, list(dirty_map))
+                for tid in dirty_map:
+                    if tid in refreshed:
+                        cached_rows[tid] = refreshed[tid]
+                    else:
+                        cached_rows.pop(tid, None)
+                with writer.search_cache_lock:
+                    if (
+                        writer.search_unsafe_epoch == unsafe_before
+                        and writer.search_cache is not None
+                        and writer.search_dirty_threads is not None
+                        and writer.search_cache.get("unsafe_epoch") == unsafe_before
+                    ):
+                        for tid, seq in dirty_map.items():
+                            if seq <= dirty_seq_before and writer.search_dirty_threads.get(tid) == seq:
+                                if tid in refreshed:
+                                    writer.search_cache["rows"][tid] = refreshed[tid]
+                                else:
+                                    writer.search_cache["rows"].pop(tid, None)
+                                writer.search_dirty_threads.pop(tid, None)
+            return cached_rows
+
+        try:
+            built = _query_context_entries(db, tables)
+        except BaseException:
+            if pre_build_token is not None:
+                with writer.search_cache_lock:
+                    if writer._search_build_token is pre_build_token:
+                        writer._search_build_token = None
+                        writer._search_build_dirty = None
+                        writer.search_build_cond.notify_all()
+            raise
+        if pre_build_token is not None:
+            with writer.search_cache_lock:
+                if (
+                    writer._search_build_token is pre_build_token
+                    and writer.search_unsafe_epoch == unsafe_before
+                    and writer._search_build_dirty is not None
+                ):
+                    writer.search_cache = {
+                        "sig": None,
+                        "unsafe_epoch": unsafe_before,
+                        "rows": dict(built),
+                    }
+                    writer.search_dirty_threads = dict(writer._search_build_dirty)
+                if writer._search_build_token is pre_build_token:
+                    writer._search_build_token = None
+                    writer._search_build_dirty = None
+                    writer.search_build_cond.notify_all()
+        return built
+
     cur_dv = _connection_data_version(db)
     last_dv = getattr(db, "_search_last_dv", None)
     last_rev = getattr(db, "_search_last_rev", None)
@@ -334,12 +415,13 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
             writer.search_dirty_threads = None
             writer.search_known_sigs.clear()
         cache = writer.search_cache
-        dirty = None if writer.search_dirty_threads is None else set(writer.search_dirty_threads)
+        dirty_map = None if writer.search_dirty_threads is None else dict(writer.search_dirty_threads)
         pinned_clean = sig_before == sig_after and writer.commit_revision == rev_before and not external_dv_jump
         sig_trusted = (
             not external_dv_jump
             and cache is not None
-            and dirty is not None
+            and dirty_map is not None
+            and cache.get("sig") is not None
             and (cache["sig"] == sig_after or sig_after in writer.search_known_sigs)
         )
         cached_rows = dict(cache["rows"]) if sig_trusted else None
@@ -347,7 +429,7 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
             build_token = object()
             writer._search_build_token = build_token
             writer._search_build_sig = sig_after
-            writer._search_build_dirty = set()
+            writer._search_build_dirty = {}
             writer.search_known_sigs.append(sig_after)
 
     def remember_conn_state() -> None:
@@ -357,10 +439,10 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
         except AttributeError:
             pass
 
-    if cached_rows is not None:
-        if dirty:
-            refreshed = _query_context_entries(db, tables, list(dirty))
-            for tid in dirty:
+    if cached_rows is not None and dirty_map is not None:
+        if dirty_map:
+            refreshed = _query_context_entries(db, tables, list(dirty_map))
+            for tid in dirty_map:
                 if tid in refreshed:
                     cached_rows[tid] = refreshed[tid]
                 else:
@@ -370,12 +452,14 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
                     if (
                         writer.commit_revision == rev_before
                         and writer.search_cache is not None
-                        and writer.search_cache["sig"] == sig_after
+                        and writer.search_cache.get("sig") == sig_after
                         and writer.search_dirty_threads is not None
                         and sqlite_commit_signature(store.database_path) == sig_after
                     ):
                         writer.search_cache["rows"] = dict(cached_rows)
-                        writer.search_dirty_threads -= dirty
+                        for tid, seq in dirty_map.items():
+                            if writer.search_dirty_threads.get(tid) == seq:
+                                writer.search_dirty_threads.pop(tid, None)
         remember_conn_state()
         return cached_rows
 
@@ -387,6 +471,7 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
                 if writer._search_build_token is build_token:
                     writer._search_build_token = None
                     writer._search_build_dirty = None
+                    writer.search_build_cond.notify_all()
         raise
 
     if build_token is not None:
@@ -397,11 +482,16 @@ def _load_context_snapshot(store, db, tables: set[str], sig_before: tuple[int, i
                 and writer._search_build_dirty is not None
                 and sqlite_commit_signature(store.database_path) == writer._search_build_sig
             ):
-                writer.search_cache = {"sig": writer._search_build_sig, "rows": dict(built)}
-                writer.search_dirty_threads = set(writer._search_build_dirty)
+                writer.search_cache = {
+                    "sig": writer._search_build_sig,
+                    "unsafe_epoch": writer.search_unsafe_epoch,
+                    "rows": dict(built),
+                }
+                writer.search_dirty_threads = dict(writer._search_build_dirty)
             if writer._search_build_token is build_token:
                 writer._search_build_token = None
                 writer._search_build_dirty = None
+                writer.search_build_cond.notify_all()
     remember_conn_state()
     return built
 
@@ -527,13 +617,43 @@ def search_threads(
             if "browser_sessions" in tables
             else "0"
         )
+        from .desktop_runtime import _OWNED_DATABASES
+        owned = store._database_identity in _OWNED_DATABASES
+        pre_build_token = None
         with store._writer.search_cache_lock:
+            if owned and store._writer.search_cache is None and store._writer._search_build_token is not None:
+                store._writer.search_build_cond.wait(timeout=0.15)
             rev_before = store._writer.commit_revision
-        sig_before = sqlite_commit_signature(store.database_path)
+            unsafe_before = store._writer.search_unsafe_epoch
+            dirty_seq_before = store._writer.search_dirty_seq
+            if (
+                owned
+                and (
+                    store._writer.search_cache is None
+                    or store._writer.search_dirty_threads is None
+                    or store._writer.search_cache.get("unsafe_epoch") != unsafe_before
+                )
+                and store._writer._search_build_token is None
+            ):
+                pre_build_token = object()
+                store._writer._search_build_token = pre_build_token
+                store._writer._search_build_epoch = unsafe_before
+                store._writer._search_build_dirty = {}
+        sig_before = None if owned else sqlite_commit_signature(store.database_path)
         db.execute("BEGIN")
         try:
             db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
-            all_entries = _load_context_snapshot(store, db, tables, sig_before, rev_before)
+            all_entries = _load_context_snapshot(
+                store,
+                db,
+                tables,
+                owned=owned,
+                sig_before=sig_before,
+                rev_before=rev_before,
+                unsafe_before=unsafe_before,
+                dirty_seq_before=dirty_seq_before,
+                pre_build_token=pre_build_token,
+            )
             if not has_scope_filter:
                 in_scope_entries = list(all_entries.values())
                 scope_ids = list(all_entries)
@@ -687,6 +807,12 @@ def search_threads(
             else:
                 decoded_rows = []
         finally:
+            if pre_build_token is not None and store._writer._search_build_token is pre_build_token:
+                with store._writer.search_cache_lock:
+                    if store._writer._search_build_token is pre_build_token:
+                        store._writer._search_build_token = None
+                        store._writer._search_build_dirty = None
+                        store._writer.search_build_cond.notify_all()
             db.rollback()
 
     _KEYS = (

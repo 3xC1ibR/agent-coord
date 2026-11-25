@@ -154,12 +154,16 @@ class DatabaseWriter:
         self.commit_condition = threading.Condition()
         self.commit_revision = 0
         self.search_cache_lock = threading.Lock()
+        self.search_build_cond = threading.Condition(self.search_cache_lock)
+        self.search_unsafe_epoch = 0
+        self.search_dirty_seq = 0
         self.search_cache: dict | None = None
-        self.search_dirty_threads: set[str] | None = None
+        self.search_dirty_threads: dict[str, int] | None = None
         self.search_known_sigs: deque[tuple[int, int, int, int]] = deque(maxlen=32)
         self._search_build_token: object | None = None
         self._search_build_sig: tuple[int, int, int, int] | None = None
-        self._search_build_dirty: set[str] | None = None
+        self._search_build_epoch: int | None = None
+        self._search_build_dirty: dict[str, int] | None = None
         self._scope_search_safe = False
         self._scope_search_threads: set[str] = set()
 
@@ -243,23 +247,34 @@ class DatabaseWriter:
             failed = True
             raise
         finally:
-            if not nested and self.database_path is not None and (self.search_cache is not None or self._search_build_token is not None):
-                with self.search_cache_lock:
-                    if failed or not self._scope_search_safe:
-                        self.search_dirty_threads = None
-                        self.search_known_sigs.clear()
-                        self._search_build_token = None
-                        self._search_build_dirty = None
-                    else:
-                        new_sig = sqlite_commit_signature(self.database_path)
-                        if self.search_cache is not None and self.search_dirty_threads is not None:
-                            self.search_dirty_threads.update(self._scope_search_threads)
-                            self.search_cache["sig"] = new_sig
-                            self.search_known_sigs.append(new_sig)
-                        if self._search_build_token is not None and self._search_build_dirty is not None:
-                            self._search_build_dirty.update(self._scope_search_threads)
-                            self._search_build_sig = new_sig
-                            self.search_known_sigs.append(new_sig)
+            if not nested and self.database_path is not None:
+                from .desktop_runtime import _OWNED_DATABASES
+                owned = str(self.database_path) in _OWNED_DATABASES
+                if failed or not self._scope_search_safe or self.search_cache is not None or self._search_build_token is not None:
+                    with self.search_cache_lock:
+                        if failed or not self._scope_search_safe:
+                            self.search_unsafe_epoch += 1
+                            self.search_dirty_threads = None
+                            self.search_known_sigs.clear()
+                            self._search_build_token = None
+                            self._search_build_dirty = None
+                            self.search_build_cond.notify_all()
+                        else:
+                            self.search_dirty_seq += 1
+                            seq = self.search_dirty_seq
+                            new_sig = None if owned else sqlite_commit_signature(self.database_path)
+                            if self.search_cache is not None and self.search_dirty_threads is not None:
+                                for tid in self._scope_search_threads:
+                                    self.search_dirty_threads[tid] = seq
+                                if new_sig is not None:
+                                    self.search_cache["sig"] = new_sig
+                                    self.search_known_sigs.append(new_sig)
+                            if self._search_build_token is not None and self._search_build_dirty is not None:
+                                for tid in self._scope_search_threads:
+                                    self._search_build_dirty[tid] = seq
+                                if new_sig is not None:
+                                    self._search_build_sig = new_sig
+                                    self.search_known_sigs.append(new_sig)
             with self.condition:
                 self.connections.remove(connection)
                 if not nested:

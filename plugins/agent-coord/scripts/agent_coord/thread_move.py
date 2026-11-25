@@ -35,6 +35,7 @@ def move_work_thread(sessions, thread_id, cwd, *, expected_settings=None):
             raise CoordinationError("This provider keeps its original workspace. Start a new conversation in the destination project.")
         # Refresh provider activity, rather than trusting only the saved flag.
         sessions.read(thread_id)
+        sessions._await_persistence(thread_id)
         with sessions.lock:
             if thread_id in sessions.active:
                 raise CoordinationError("Wait for the running turn to finish before moving this thread.")
