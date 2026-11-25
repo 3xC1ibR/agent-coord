@@ -14,6 +14,12 @@ from .attention import load_config
 from .dispatch_routing import route
 from .dispatch_snapshot import read_snapshot
 from .dispatch_evaluation import initialize_evaluation
+
+
+def refresh_messages(store, *, cwd=None):
+    """Compatibility hook; SearchStore indexes finalized turns asynchronously."""
+    del store, cwd
+    return None
 from .image_inputs import message_images
 from .store import CoordinationError
 from .thread_mentions import thread_mentions
@@ -67,7 +73,8 @@ class DispatchRuntime:
             }
 
     def settings(self, thread_id):
-        if thread_id not in self._configured_threads:
+        configured = getattr(self, "_configured_threads", None)
+        if configured is not None and thread_id not in configured:
             return {"enabled": False, "defaults": {}}
         with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM dispatch_settings WHERE thread_id=?", (thread_id,)).fetchone()
@@ -268,7 +275,9 @@ class DispatchRuntime:
         if body["askDispatcher"] or body["images"]:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
-            timings["index_refresh"] = 0.0
+            stage = time.perf_counter()
+            refresh_messages(self.store, cwd=item["cwd"])
+            timings["index_refresh"] = round((time.perf_counter() - stage) * 1000, 1)
             stage = time.perf_counter()
             snapshot = read_snapshot(self.store.database_path, cwd=item["cwd"])
             timings["snapshot"] = round((time.perf_counter() - stage) * 1000, 1)

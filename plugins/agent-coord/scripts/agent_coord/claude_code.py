@@ -565,6 +565,7 @@ class ClaudeRPC:
                 turn = self.turns.get(thread_id)
                 if not turn or turn["id"] != params.get("expectedTurnId"):
                     raise CoordinationError("The active Claude turn changed or finished. Your message was not sent.")
+                turn_id = turn["id"]
                 connection = self.connections.get(thread_id)
                 if not connection:
                     raise CoordinationError("Claude Code disconnected. Stop the turn and send again.")
@@ -572,13 +573,15 @@ class ClaudeRPC:
                 # Record before writing: the reader can deliver a result as
                 # soon as stdin is flushed. Roll back a rejected write.
                 turn["items"].append(user)
-                try:
-                    self._send_user(connection, thread_id, user)
-                except Exception:
-                    turn["items"].remove(user)
-                    raise
-                self._item(thread_id, user, completed=True)
-                return {"turnId": turn["id"]}
+            try:
+                self._send_user(connection, thread_id, user)
+            except Exception:
+                with self.lock:
+                    if user in turn["items"]:
+                        turn["items"].remove(user)
+                raise
+            self._item(thread_id, user, completed=True)
+            return {"turnId": turn_id}
         if method == "turn/start":
             if thread_id in self.turns:
                 raise CoordinationError("A Claude turn is already running.")

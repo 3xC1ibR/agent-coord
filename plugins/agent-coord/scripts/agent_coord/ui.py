@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from functools import lru_cache
@@ -322,6 +323,8 @@ def browser_content_policy(path, status, content_type, origin, authorized):
 class _NotificationBroadcaster:
     """Single shared in-process notification fan-out signaled on DatabaseWriter commits."""
 
+    MIN_INTERVAL_SECONDS = 1.0
+
     def __init__(self, store: CoordinationStore, sessions: BrowserSessions | None) -> None:
         self.store = store
         self.sessions = sessions
@@ -329,8 +332,11 @@ class _NotificationBroadcaster:
         self._condition = threading.Condition(self._lock)
         self._subscribers = 0
         self._generation = 0
+        self._cursor = 0
+        self._recent_completions: deque[tuple[int, dict[str, Any]]] = deque(maxlen=500)
         self._snapshot: dict[str, Any] | None = None
         self._error: sqlite3.OperationalError | None = None
+        self._force_poll = False
         self._stopped = False
         self._worker: threading.Thread | None = None
 
@@ -338,14 +344,23 @@ class _NotificationBroadcaster:
         if self.sessions is None or self.sessions.closed:
             return None, None
         try:
+            completions = self.sessions.completions_after(self._cursor)
             with self.store.reading(), self.store._connection() as db:
-                comp_seq = self.store.threads.completion_cursor()
                 msg_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]
                 send_seq = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
             snoozes = self.sessions.snooze_notifications()
             approvals = self.sessions.approval_notifications()
+            new_seq = completions["seq"]
+            new_events = completions.get("events") or []
+            with self._condition:
+                for item in new_events:
+                    item_id = item.get("id") if isinstance(item, dict) else None
+                    self._recent_completions.append((item_id if isinstance(item_id, int) else new_seq, item))
+                self._cursor = new_seq
+                history_items = list(self._recent_completions)
             return {
-                "completion_seq": comp_seq,
+                "completion_seq": new_seq,
+                "recent_completions": history_items,
                 "message_seq": msg_seq,
                 "send_seq": send_seq,
                 "snoozes": snoozes,
@@ -356,48 +371,56 @@ class _NotificationBroadcaster:
 
     def _run(self) -> None:
         writer = self.store._writer
-        observed_commit = -1
+        next_allowed = 0.0
         while True:
             with self._condition:
                 if self._stopped or self._subscribers <= 0 or self.sessions is None or self.sessions.closed:
                     self._worker = None
                     return
+                forced = self._force_poll
+                self._force_poll = False
+            if not forced:
+                delay = next_allowed - time.monotonic()
+                if delay > 0:
+                    with writer.commit_condition:
+                        if not self._force_poll:
+                            writer.commit_condition.wait(timeout=delay)
+                    continue
+            poll_started = time.monotonic()
             snap, err = self._poll_once()
+            next_allowed = poll_started + self.MIN_INTERVAL_SECONDS
             with self._condition:
                 self._snapshot = snap
                 self._error = err
                 self._generation += 1
                 self._condition.notify_all()
+            if self.sessions is not None and not self.sessions.closed:
+                with self.sessions.events_changed:
+                    self.sessions.events_changed.notify_all()
             with writer.commit_condition:
-                if writer.commit_revision == observed_commit and not self._stopped:
-                    writer.commit_condition.wait(timeout=1.0)
-                observed_commit = writer.commit_revision
+                remaining = max(0.0, next_allowed - time.monotonic())
+                if not self._stopped and not self._force_poll:
+                    writer.commit_condition.wait(timeout=max(remaining, 1.0))
 
-    def subscribe(self) -> tuple[int, dict[str, Any]]:
-        snap, err = self._poll_once()
-        if err is not None:
-            raise err
+    def subscribe(self) -> tuple[int, dict[str, Any] | None]:
         with self._condition:
             self._subscribers += 1
-            if snap is not None and self._snapshot is None:
-                self._snapshot = snap
-                self._generation += 1
+            self._force_poll = True
+            gen = self._generation
             if not self._stopped and (self._worker is None or not self._worker.is_alive()):
                 self._worker = threading.Thread(
                     target=self._run, name="rf-notification-broadcaster", daemon=True
                 )
                 self._worker.start()
-            return self._generation, self._snapshot or {
-                "completion_seq": 0,
-                "message_seq": 0,
-                "send_seq": 0,
-                "snoozes": [],
-                "approvals": [],
-            }
+        with self.store._writer.commit_condition:
+            self.store._writer.commit_condition.notify_all()
+        return gen, None
 
     def unsubscribe(self) -> None:
         with self._condition:
             self._subscribers = max(0, self._subscribers - 1)
+            if self._subscribers == 0:
+                self._snapshot = None
         with self.store._writer.commit_condition:
             self.store._writer.commit_condition.notify_all()
 
@@ -684,10 +707,11 @@ def _handler(
             )
 
         def _stream_events(self, sequence, completion_sequence):
-            message_sequence = message_cursor(store)
-            send_sequence, _ = message_sends(store)
+            with store.reading():
+                message_sequence = message_cursor(store)
+                send_sequence, _ = message_sends(store)
             seen_gen, initial_snap = broadcaster.subscribe()
-            first_pass = True
+            first_pass = initial_snap is not None
             try:
                 while not browser_sessions.closed:
                     batch = browser_sessions.events_after(sequence, timeout=1)
@@ -703,10 +727,16 @@ def _handler(
                     if snap is not None:
                         changes: list[dict] = []
                         if snap["completion_seq"] > completion_sequence:
-                            completions = browser_sessions.completions_after(completion_sequence)
-                            completion_sequence = completions["seq"]
-                            batch["completions"] = completions["events"]
-                            batch["completionSeq"] = completion_sequence
+                            recent = snap.get("recent_completions") or []
+                            if recent and completion_sequence >= recent[0][0] - 1:
+                                batch["completions"] = [ev for s, ev in recent if s > completion_sequence]
+                                completion_sequence = snap["completion_seq"]
+                                batch["completionSeq"] = completion_sequence
+                            else:
+                                completions = browser_sessions.completions_after(completion_sequence)
+                                completion_sequence = completions["seq"]
+                                batch["completions"] = completions["events"]
+                                batch["completionSeq"] = completion_sequence
                         if snap["message_seq"] > message_sequence:
                             message_sequence, msg_events = message_changes(
                                 store, message_sequence, browser_sessions.cwd
@@ -1697,8 +1727,9 @@ def make_ui_server(
     target_host = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     remote.restore(f"http://{target_host}:{bound_port}")
     try:
-        sessions.start_database_checkpoint()
-        sessions.start_search_index()
+        if not admission_paused:
+            sessions.start_database_checkpoint()
+            sessions.start_search_index()
         push.start()
         native.start()
         server.thread_control.start()

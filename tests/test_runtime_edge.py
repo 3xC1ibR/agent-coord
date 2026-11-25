@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -387,7 +388,23 @@ class LiveTripleUpgradeBenchmarkTests(unittest.TestCase):
             deadline = time.monotonic() + 5
             while not runtime.owner_available(directory) and time.monotonic() < deadline:
                 time.sleep(0.05)
+            for name in ("supervisor.json", "discovery.json", "runtime-edge/owner.json", "provider-transport/owner.json"):
+                info_path = directory / name
+                if info_path.exists():
+                    try:
+                        info = runtime.read_json(info_path)
+                        for key in ("pid", "coordinator_pid"):
+                            pid = info.get(key)
+                            if isinstance(pid, int) and pid > 1:
+                                try:
+                                    os.kill(pid, signal.SIGKILL)
+                                except OSError:
+                                    pass
+                    except (OSError, ValueError):
+                        pass
+            time.sleep(0.05)
         finally:
+            shutil.rmtree(self.temporary.name, ignore_errors=True)
             self.temporary.cleanup()
 
     def _bootstrap(self, resources_dir: Path, *, confirm: bool = False) -> dict:

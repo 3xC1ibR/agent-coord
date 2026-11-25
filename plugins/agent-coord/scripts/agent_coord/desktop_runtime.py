@@ -442,6 +442,8 @@ def busy_reasons(sessions):
             reasons.append("active turns")
         if sessions.requests:
             reasons.append("pending approvals or questions")
+    if hasattr(sessions, "muse") and sessions.muse.background_active():
+        reasons.append("Muse background workflows")
     with sessions.persistence.condition:
         if sessions.persistence.pending or sessions.persistence.draining:
             reasons.append("pending provider bookkeeping")
@@ -474,19 +476,19 @@ def uninterrupted_readiness(sessions):
     owns_provider = getattr(sessions.projection, "owns_provider", None)
     channels = getattr(sessions.projection, "channels", None)
     with sessions.lock:
-        for identity in sessions.active:
-            client = sessions.loaded_clients.get(identity, "codex")
-            if callable(owns_provider):
-                brokered = owns_provider(client, identity)
-            elif isinstance(channels, dict):
-                brokered = client in {"codex", "claude"} or any(
-                    entry.get("provider") == client and entry.get("thread_id") in (None, identity) and not entry.get("closed")
-                    for entry in channels.values()
-                )
-            else:
-                brokered = client in {"codex", "claude"}
-            if not brokered:
-                reasons.append("active unbrokered provider: " + client)
+        active_pairs = [(identity, sessions.loaded_clients.get(identity, "codex")) for identity in sessions.active]
+    for identity, client in active_pairs:
+        if callable(owns_provider):
+            brokered = owns_provider(client, identity)
+        elif isinstance(channels, dict):
+            brokered = client in {"codex", "claude"} or any(
+                entry.get("provider") == client and entry.get("thread_id") in (None, identity) and not entry.get("closed")
+                for entry in list(channels.values())
+            )
+        else:
+            brokered = client in {"codex", "claude"}
+        if not brokered:
+            reasons.append("active unbrokered provider: " + client)
     if sessions.projection.error:
         reasons.append("provider projection requires recovery")
     return reasons
@@ -995,6 +997,8 @@ class Runtime:
         sessions = self.server.browser_sessions
         if self.stopping.is_set() or self.maintenance or self.recovery_running:
             return
+        sessions.start_database_checkpoint()
+        sessions.start_search_index()
         self.ensure_supervisor()
         projection = getattr(sessions, "projection", None)
         if projection is not None and projection.worker is None:
@@ -1012,7 +1016,11 @@ class Runtime:
             if (not update or update["phase"] != "committed" or update["target"] != str(self.payload)
                     or update.get("cancelled") or self.stopping.is_set()):
                 raise RuntimeError("Candidate activation was not committed.")
+            _OWNED_DATABASES.add(str(Path(self.database).resolve()))
             self.trial = False
+            sessions = self.server.browser_sessions
+            sessions.start_database_checkpoint()
+            sessions.start_search_index()
             self.maintenance = bool(update.get("requires_review"))
             if self.maintenance:
                 self.hold_for_review()

@@ -177,15 +177,15 @@ def _readonly_state_connection(store):
 def _sync_unindexed_histories(store, db, tables: set[str], scope_ids: list[str]) -> tuple[set[str], set[str], dict[str, list[tuple]]]:
     """Ensure finalized turns in scope are indexed in search.sqlite3; return coverage & live in-progress hits."""
     search = store.search_store
-    if search._pending_tasks > 0:
-        search.flush(timeout=0.05)
+    tstore = store.transcripts
+    if search._pending_tasks > 0 and tstore._saved_threads is None:
+        search.flush(timeout=0.02)
     saved_ids: set[str] = set()
     partial_ids: set[str] = set()
     live_prose: dict[str, list[tuple]] = {}
     if not scope_ids:
         return saved_ids, partial_ids, live_prose
 
-    tstore = store.transcripts
     all_saved, all_partial = tstore.coverage_sets(db, tables, search)
     scope_set = set(scope_ids)
     saved_ids = all_saved & scope_set

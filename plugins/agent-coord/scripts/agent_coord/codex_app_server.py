@@ -3230,14 +3230,17 @@ class BrowserSessions:
 
     def answer(self, thread_id: str, key: str, body: dict) -> dict:
         self._record(thread_id)
+        rpc = self._rpc(thread_id)
         with self.lock:
             request = self.requests.get(key)
             if not request or request["params"].get("threadId") != thread_id:
                 raise CoordinationError("This request is no longer pending in this session.")
             method, params = request["method"], request["params"]
+            request_id = request["id"]
             decision = body.get("decision")
             if method != "item/tool/requestUserInput" and not isinstance(decision, str):
                 raise CoordinationError("Choose an approval decision.")
+            unsupported = False
             if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
                 allowed = params.get("availableDecisions") or ["accept", "acceptForSession", "decline", "cancel"]
                 if decision not in allowed or decision not in {"accept", "acceptForSession", "decline", "cancel"}:
@@ -3266,16 +3269,17 @@ class BrowserSessions:
             else:
                 if decision != "cancel":
                     raise CoordinationError("This request type is unsupported; cancel it to continue.")
-                self._rpc(thread_id).write({"id": request["id"], "error": {"code": -32601, "message": "Request not supported by Ribbon Field UI."}})
-                self.requests.pop(key)
-                self.execution.capture(thread_id)
-                self._publish("browser/requests", {"threadId": thread_id})
-                return {}
-            self._rpc(thread_id).write({"id": request["id"], "result": result})
+                unsupported = True
+                result = None
+        if unsupported:
+            rpc.write({"id": request_id, "error": {"code": -32601, "message": "Request not supported by Ribbon Field UI."}})
+        else:
+            rpc.write({"id": request_id, "result": result})
+        with self.lock:
             self.requests.pop(key, None)
-            self.execution.capture(thread_id)
-            self._publish("browser/requests", {"threadId": thread_id})
-            return {}
+        self.execution.capture(thread_id)
+        self._publish("browser/requests", {"threadId": thread_id})
+        return {}
 
     def close(self) -> None:
         with self.changed:

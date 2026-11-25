@@ -86,7 +86,7 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         "full_offset",
         "full_length",
     }
-    if not required <= columns:
+    if not required <= columns or "digest" in columns or "item_count" in columns:
         db.execute("DROP TABLE thread_turns")
         db.executescript(THREAD_TURNS_SCHEMA)
         return
@@ -1088,6 +1088,8 @@ _LEGACY_PREFIXES = (
     "conversation_substring_",
     "conversation_context_",
     "conversation_routing_",
+    "search_publication_",
+    "snapshot_cache_",
 )
 _LEGACY_EXACT_OBJECTS = frozenset(
     {
@@ -1097,7 +1099,10 @@ _LEGACY_EXACT_OBJECTS = frozenset(
         "coordinator_projection_payloads",
         "transcript_migration_verification",
         "transcript_generations",
+        "transcript_legacy_revisions",
         "transcript_storage_control",
+        "storage_retirement_generation",
+        "snapshot_cache_revisions",
         "search_publications",
     }
 )
@@ -1172,13 +1177,35 @@ def migrate_database(
                 db.execute("PRAGMA journal_mode = WAL")
                 db.execute("PRAGMA synchronous = NORMAL")
                 db.execute("PRAGMA busy_timeout = 30000")
-                with db:
-                    ensure_schema(db)
 
                 tables = {
                     row[0]
                     for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
                 }
+
+                # Capture any Build-105 transitional generation + offset metadata BEFORE ensure_schema
+                # replaces an incompatible thread_turns table.
+                legacy_generations: list[tuple[str, str, int, int]] = []
+                legacy_turn_spans: dict[str, list[tuple[int, int, int]]] = {}
+                if "transcript_generations" in tables:
+                    gen_cols = {r[1] for r in db.execute("PRAGMA table_info(transcript_generations)")}
+                    if {"thread_id", "metadata", "turn_count", "item_count"} <= gen_cols:
+                        legacy_generations = [
+                            (str(r[0]), str(r[1] or "{}"), int(r[2] or 0), int(r[3] or 0))
+                            for r in db.execute(
+                                "SELECT thread_id, metadata, turn_count, item_count FROM transcript_generations ORDER BY thread_id"
+                            ).fetchall()
+                        ]
+                if "thread_turns" in tables:
+                    tt_cols = {r[1] for r in db.execute("PRAGMA table_info(thread_turns)")}
+                    if "digest" in tt_cols and {"thread_id", "turn_seq", "full_offset", "full_length"} <= tt_cols:
+                        for r in db.execute(
+                            "SELECT thread_id, turn_seq, full_offset, full_length FROM thread_turns ORDER BY thread_id, turn_seq ASC"
+                        ):
+                            legacy_turn_spans.setdefault(str(r[0]), []).append((int(r[1]), int(r[2]), int(r[3])))
+
+                with db:
+                    ensure_schema(db)
 
                 # 1. Recover any legacy flat <db>.transcripts directories if present.
                 legacy_flat_dir = Path(str(path) + ".transcripts")
@@ -1241,41 +1268,94 @@ def migrate_database(
                             threads_migrated += 1
 
                     if legacy_flat_dir.exists() and legacy_flat_dir.is_dir():
-                        for entry in sorted(legacy_flat_dir.iterdir()):
-                            if not entry.is_dir():
-                                continue
-                            full_candidate = (
-                                entry / "turns.full.jsonl"
-                                if (entry / "turns.full.jsonl").exists()
-                                else entry / "turns.jsonl"
-                            )
-                            meta_candidate = entry / "meta.json"
-                            if not full_candidate.exists() and not meta_candidate.exists():
-                                continue
-                            meta_obj = {}
-                            if meta_candidate.exists():
+                        if legacy_generations:
+                            for tid, metadata_raw, expected_turns, expected_items in legacy_generations:
+                                if not tid or tstore.has_thread(tid, db=db):
+                                    continue
                                 try:
-                                    meta_obj = json.loads(meta_candidate.read_text(encoding="utf-8"))
-                                except (OSError, ValueError):
+                                    meta_obj = json.loads(metadata_raw)
+                                except ValueError:
                                     meta_obj = {}
-                            tid = (meta_obj.get("id") if isinstance(meta_obj, dict) else None) or entry.name
-                            if not tid or tstore.has_thread(tid, db=db):
-                                continue
-                            recovered_turns = []
-                            if full_candidate.exists():
-                                for line in full_candidate.read_bytes().splitlines():
-                                    if line.strip():
-                                        recovered_turns.append(json.loads(line.decode("utf-8", "surrogatepass")))
-                            recovered_history = {**(meta_obj if isinstance(meta_obj, dict) else {}), "id": tid, "turns": recovered_turns}
-                            with db:
-                                plan = tstore.prepare_turns_write(tid, recovered_history)
-                                tstore.commit_turns_index(db, plan)
-                            tstore.finalize_turns_commit(plan)
-                            restored = tstore.read_full_history(tid)
-                            if restored is None or len(restored.get("turns", [])) != len(recovered_turns):
-                                raise RuntimeError(f"Flat transcript verification failed for {tid}")
-                            threads_migrated += 1
-                            turns_migrated += len(recovered_turns)
+                                digest_dir = legacy_flat_dir / hashlib.sha256(
+                                    tid.encode("utf-8", "surrogatepass")
+                                ).hexdigest()
+                                full_candidate = digest_dir / "turns.full.jsonl"
+                                recovered_turns = []
+                                spans = legacy_turn_spans.get(tid) or []
+                                if spans and full_candidate.exists():
+                                    fd = os.open(full_candidate, os.O_RDONLY)
+                                    try:
+                                        for _, full_off, full_len in spans:
+                                            raw_line = _pread_exact(fd, full_len, full_off)
+                                            recovered_turns.append(json.loads(raw_line.decode("utf-8", "surrogatepass")))
+                                    finally:
+                                        os.close(fd)
+                                elif full_candidate.exists():
+                                    for line in full_candidate.read_bytes().splitlines():
+                                        if line.strip():
+                                            recovered_turns.append(json.loads(line.decode("utf-8", "surrogatepass")))
+                                if expected_turns and len(recovered_turns) != expected_turns:
+                                    raise RuntimeError(
+                                        f"Transitional transcript turn count mismatch for {tid}: "
+                                        f"{len(recovered_turns)} != {expected_turns}"
+                                    )
+                                actual_items = sum(len(t.get("items") or []) for t in recovered_turns if isinstance(t, dict))
+                                if expected_items and actual_items != expected_items:
+                                    raise RuntimeError(
+                                        f"Transitional transcript item count mismatch for {tid}: "
+                                        f"{actual_items} != {expected_items}"
+                                    )
+                                recovered_history = {
+                                    **(meta_obj if isinstance(meta_obj, dict) else {}),
+                                    "id": tid,
+                                    "turns": recovered_turns,
+                                }
+                                with db:
+                                    plan = tstore.prepare_turns_write(tid, recovered_history)
+                                    tstore.commit_turns_index(db, plan)
+                                tstore.finalize_turns_commit(plan)
+                                restored = tstore.read_full_history(tid)
+                                if restored is None or len(restored.get("turns", [])) != len(recovered_turns):
+                                    raise RuntimeError(f"Flat transcript verification failed for {tid}")
+                                threads_migrated += 1
+                                turns_migrated += len(recovered_turns)
+                                items_verified += actual_items
+                        else:
+                            for entry in sorted(legacy_flat_dir.iterdir()):
+                                if not entry.is_dir():
+                                    continue
+                                full_candidate = (
+                                    entry / "turns.full.jsonl"
+                                    if (entry / "turns.full.jsonl").exists()
+                                    else entry / "turns.jsonl"
+                                )
+                                meta_candidate = entry / "meta.json"
+                                if not full_candidate.exists() and not meta_candidate.exists():
+                                    continue
+                                meta_obj = {}
+                                if meta_candidate.exists():
+                                    try:
+                                        meta_obj = json.loads(meta_candidate.read_text(encoding="utf-8"))
+                                    except (OSError, ValueError):
+                                        meta_obj = {}
+                                tid = (meta_obj.get("id") if isinstance(meta_obj, dict) else None) or entry.name
+                                if not tid or tstore.has_thread(tid, db=db):
+                                    continue
+                                recovered_turns = []
+                                if full_candidate.exists():
+                                    for line in full_candidate.read_bytes().splitlines():
+                                        if line.strip():
+                                            recovered_turns.append(json.loads(line.decode("utf-8", "surrogatepass")))
+                                recovered_history = {**(meta_obj if isinstance(meta_obj, dict) else {}), "id": tid, "turns": recovered_turns}
+                                with db:
+                                    plan = tstore.prepare_turns_write(tid, recovered_history)
+                                    tstore.commit_turns_index(db, plan)
+                                tstore.finalize_turns_commit(plan)
+                                restored = tstore.read_full_history(tid)
+                                if restored is None or len(restored.get("turns", [])) != len(recovered_turns):
+                                    raise RuntimeError(f"Flat transcript verification failed for {tid}")
+                                threads_migrated += 1
+                                turns_migrated += len(recovered_turns)
 
                     # 2. Backfill search.sqlite3 cleanly from turns.compact.jsonl + work_threads.
                     search_path = search_database_path(path)
@@ -1383,6 +1463,26 @@ def migrate_database(
 
                     if legacy_flat_dir.exists():
                         shutil.rmtree(legacy_flat_dir, ignore_errors=True)
+
+                    # Prune completed ephemeral read-only model/limit queries and closed-channel wire receipts.
+                    import time as _time
+                    with db:
+                        if "app_control_requests" in tables:
+                            db.execute(
+                                """DELETE FROM app_control_requests
+                                   WHERE operation IN ('models', 'provider-limits')
+                                     AND status IN ('completed', 'failed', 'cancelled')
+                                     AND updated_at < ?""",
+                                (_time.time() - 3600.0,),
+                            )
+                        if "coordinator_commands" in tables and "coordinator_channels" in tables:
+                            db.execute(
+                                """DELETE FROM coordinator_commands
+                                   WHERE outcome IN ('written', 'rejected')
+                                     AND channel NOT IN (
+                                         SELECT channel FROM coordinator_channels WHERE closed = 0
+                                     )"""
+                            )
 
                     # 4. VACUUM INTO '<db>.compacted' + atomic swap under exclusive lock.
                     compacted_path = Path(str(path) + ".compacted")

@@ -296,12 +296,16 @@ class _StoreCursor(sqlite3.Cursor):
                 self.connection._record_slow_phase(phase, duration, failed, error_code)
 
     def execute(self, sql, parameters=(), /):
+        if isinstance(sql, str) and not getattr(self.connection, "_applying_internal_pragma", False) and "pragma" in sql.lower():
+            self.connection._pragma_tainted = True
         return self._timed("statement.execute", super().execute, sql, parameters)
 
     def executemany(self, sql, parameters, /):
         return self._timed("statement.executemany", super().executemany, sql, parameters)
 
     def executescript(self, script, /):
+        if isinstance(script, str) and "pragma" in script.lower():
+            self.connection._pragma_tainted = True
         return self._timed("statement.executescript", super().executescript, script)
 
     def fetchall(self):
@@ -321,6 +325,8 @@ class _StoreConnection(sqlite3.Connection):
         self.settings: tuple[int, int] | None = None
         self._diagnostic_context = None
         self.automatic_checkpoint_pages = None
+        self._pragma_tainted: bool = False
+        self._applying_internal_pragma: bool = False
         self._cached_busy_timeout: int | None = None
         self._cached_query_only: int | None = None
 
@@ -777,6 +783,15 @@ class CoordinationStore:
         factory = getattr(self._connect, "__func__", self._connect)
         nested = holder is None or holder.in_use
         connection = None
+        def _internal_pragma(conn, sql_stmt: str):
+            if isinstance(conn, _StoreConnection):
+                conn._applying_internal_pragma = True
+                try:
+                    return conn.execute(sql_stmt)
+                finally:
+                    conn._applying_internal_pragma = False
+            return conn.execute(sql_stmt)
+
         timeout = getattr(self._connection_options, "timeout", None)
         if not nested:
             if holder.connection is not None and holder.factory() is factory:
@@ -785,9 +800,14 @@ class CoordinationStore:
                 try:
                     connection.row_factory = sqlite3.Row
                     target_timeout = connection.settings[0] if timeout is None else timeout
-                    if getattr(connection, "_cached_busy_timeout", None) != target_timeout:
-                        connection.execute(f"PRAGMA busy_timeout = {target_timeout}")
-                        connection._cached_busy_timeout = target_timeout
+                    tainted = getattr(connection, "_pragma_tainted", False)
+                    if tainted or getattr(connection, "_cached_busy_timeout", None) != target_timeout:
+                        _internal_pragma(connection, f"PRAGMA busy_timeout = {target_timeout}")
+                        if isinstance(connection, _StoreConnection):
+                            connection._cached_busy_timeout = target_timeout
+                    if tainted:
+                        if _internal_pragma(connection, "PRAGMA foreign_keys").fetchone()[0] != connection.settings[1]:
+                            _internal_pragma(connection, f"PRAGMA foreign_keys = {connection.settings[1]}")
                 except sqlite3.Error:
                     connection = None
             if connection is None:
@@ -799,27 +819,32 @@ class CoordinationStore:
                 # The initial writer may have created the database.
                 file_identity = self._database_file_identity()
             if not nested and isinstance(connection, _StoreConnection):
-                connection.settings = (connection.execute("PRAGMA busy_timeout").fetchone()[0],
-                                       connection.execute("PRAGMA foreign_keys").fetchone()[0])
+                connection.settings = (_internal_pragma(connection, "PRAGMA busy_timeout").fetchone()[0],
+                                       _internal_pragma(connection, "PRAGMA foreign_keys").fetchone()[0])
                 connection._cached_busy_timeout = connection.settings[0]
+                connection._pragma_tainted = False
             if timeout is not None:
-                connection.execute(f"PRAGMA busy_timeout = {timeout}")
+                _internal_pragma(connection, f"PRAGMA busy_timeout = {timeout}")
                 if isinstance(connection, _StoreConnection):
                     connection._cached_busy_timeout = timeout
+        elif nested and timeout is not None:
+            _internal_pragma(connection, f"PRAGMA busy_timeout = {timeout}")
         if not reading:
             from .database_checkpoint import automatic_checkpoint_pages
             pages = automatic_checkpoint_pages(self._database_identity)
             if getattr(connection, "automatic_checkpoint_pages", None) != pages:
-                connection.execute(f"PRAGMA wal_autocheckpoint = {pages}")
+                _internal_pragma(connection, f"PRAGMA wal_autocheckpoint = {pages}")
                 if isinstance(connection, _StoreConnection):
                     connection.automatic_checkpoint_pages = pages
         # This setter also expires statements on an unchanged connection.
         desired_query_only = int(reading)
-        if fresh or getattr(connection, "_cached_query_only", None) != desired_query_only:
-            if fresh or connection.execute("PRAGMA query_only").fetchone()[0] != desired_query_only:
-                connection.execute(f"PRAGMA query_only = {desired_query_only}")
+        if (fresh or getattr(connection, "_pragma_tainted", False)
+                or getattr(connection, "_cached_query_only", None) != desired_query_only):
+            if fresh or _internal_pragma(connection, "PRAGMA query_only").fetchone()[0] != desired_query_only:
+                _internal_pragma(connection, f"PRAGMA query_only = {desired_query_only}")
             if isinstance(connection, _StoreConnection):
                 connection._cached_query_only = desired_query_only
+                connection._pragma_tainted = False
         reusable = False
         if not nested:
             holder.in_use = True
@@ -829,7 +854,7 @@ class CoordinationStore:
             reusable = (not nested and isinstance(connection, _StoreConnection)
                         and connection.settings is not None and not connection.in_transaction
                         and file_identity is not None
-                        and (reading or file_identity == self._database_file_identity()))
+                        and file_identity == self._database_file_identity())
         finally:
             if not nested:
                 holder.in_use = False

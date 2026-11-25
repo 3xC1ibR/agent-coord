@@ -412,7 +412,7 @@ class CoordinatorProjection:
             events = deque((json.loads(item[0]) for item in rows), maxlen=1500)
             with self.sessions.events_changed:
                 self.sessions.events = events
-                self.sessions.sequence = events[-1]["seq"]
+                self.sessions.sequence = max(self.sessions.sequence, events[-1]["seq"])
         self.cursor = self.durable_cursor = row["cursor"]
         self._dirty_cursor = False
         self.recover_commands(operations={"open"})
@@ -1154,4 +1154,13 @@ class CoordinatorProjection:
                 raise TransportError("Provider projection did not reach its transaction boundary.")
         if self.error:
             raise TransportError("Provider projection is not healthy: " + self.error)
+        with self.sessions.events_changed:
+            tail_events = [
+                (event["seq"], json.dumps(event))
+                for event in self.sessions.events
+                if isinstance(event, dict) and isinstance(event.get("seq"), int)
+            ]
+        if tail_events:
+            with self._publication_lock:
+                self._pending_publications.extend(tail_events)
         self.checkpoint(inline=True)

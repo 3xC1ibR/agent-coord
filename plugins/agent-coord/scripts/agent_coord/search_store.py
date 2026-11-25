@@ -173,37 +173,58 @@ class SearchStore:
                 worker.start()
 
     def _run_writer(self) -> None:
-        while not self._stop.is_set():
-            task = self._queue.get()
-            if task is None:
-                break
-            batch = [task]
-            while len(batch) < 64:
+        writer_conn: sqlite3.Connection | None = None
+        writer_identity: tuple[int, int] | None = None
+        try:
+            while not self._stop.is_set():
+                task = self._queue.get()
+                if task is None:
+                    break
+                batch = [task]
+                while len(batch) < 64:
+                    try:
+                        nxt = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if nxt is None:
+                        self._stop.set()
+                        break
+                    batch.append(nxt)
                 try:
-                    nxt = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if nxt is None:
-                    self._stop.set()
-                    break
-                batch.append(nxt)
-            try:
-                if not self._stop.is_set() and self.state_database_path.exists():
-                    self._ensure_initialized()
-                    with self._write_lock, closing(sqlite3.connect(self.path, timeout=5.0)) as connection:
-                        connection.execute("PRAGMA journal_mode = WAL")
-                        connection.execute("PRAGMA synchronous = NORMAL")
-                        connection.execute("PRAGMA busy_timeout = 5000")
-                        with connection:
-                            for item in batch:
-                                self._apply_task(connection, item)
-            except (sqlite3.Error, OSError):
-                pass
-            finally:
-                with self._idle_condition:
-                    self._pending_tasks = max(0, self._pending_tasks - len(batch))
-                    if self._pending_tasks == 0:
-                        self._idle_condition.notify_all()
+                    if not self._stop.is_set() and self.state_database_path.exists():
+                        self._ensure_initialized()
+                        with self._write_lock:
+                            st = self.path.stat()
+                            cur_identity = (st.st_dev, st.st_ino)
+                            if writer_conn is None or writer_identity != cur_identity:
+                                if writer_conn is not None:
+                                    writer_conn.close()
+                                writer_conn = sqlite3.connect(self.path, timeout=5.0)
+                                writer_conn.execute("PRAGMA synchronous = NORMAL")
+                                writer_conn.execute("PRAGMA busy_timeout = 5000")
+                                writer_identity = cur_identity
+                            with writer_conn:
+                                for item in batch:
+                                    self._apply_task(writer_conn, item)
+                except (sqlite3.Error, OSError):
+                    if writer_conn is not None:
+                        try:
+                            writer_conn.close()
+                        except sqlite3.Error:
+                            pass
+                        writer_conn = None
+                        writer_identity = None
+                finally:
+                    with self._idle_condition:
+                        self._pending_tasks = max(0, self._pending_tasks - len(batch))
+                        if self._pending_tasks == 0:
+                            self._idle_condition.notify_all()
+        finally:
+            if writer_conn is not None:
+                try:
+                    writer_conn.close()
+                except sqlite3.Error:
+                    pass
 
     def _apply_task(self, db: sqlite3.Connection, task: tuple) -> None:
         kind = task[0]
@@ -442,12 +463,14 @@ class SearchStore:
         for short in short_terms:
             conditions.append("instr(f.body, ?) > 0")
             params.append(short)
+        allowed_filter: set[str] | None = None
         if thread_ids is not None:
-            ids_list = sorted(set(thread_ids))
-            if not ids_list:
+            allowed_filter = set(thread_ids)
+            if not allowed_filter:
                 return {}
-            conditions.append("f.thread_id IN (SELECT value FROM json_each(?))")
-            params.append(json.dumps(ids_list))
+            if len(allowed_filter) <= 64:
+                conditions.append("f.thread_id IN (SELECT value FROM json_each(?))")
+                params.append(json.dumps(sorted(allowed_filter)))
 
         rank_expr = "-bm25(search_fts, 0.0, 0.0, 1.0)" if fts_expr is not None else "1.0"
         sql = f"""
@@ -461,8 +484,11 @@ class SearchStore:
         grouped: dict[str, list[dict[str, Any]]] = {}
         with self._readonly_connection() as db:
             for row in db.execute(sql, params):
+                tid = row["thread_id"]
+                if allowed_filter is not None and tid not in allowed_filter:
+                    continue
                 role = "assistant" if row["is_assistant"] else "user"
-                grouped.setdefault(row["thread_id"], []).append(
+                grouped.setdefault(tid, []).append(
                     {
                         "turn_seq": row["turn_seq"],
                         "turn_id": row["turn_id"] or f"search-turn-{row['turn_seq']}",
