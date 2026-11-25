@@ -1,10 +1,15 @@
 """Keep display timing stable across streams, provider reads, and old histories."""
+from collections import OrderedDict
 import json
 import math
 import os
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+_TIMING_INDEX_LOCK = threading.Lock()
+_TIMING_INDEX_CACHE: OrderedDict[tuple[str, int, int], tuple[dict, dict, dict]] = OrderedDict()
 
 
 def seconds(value):
@@ -66,6 +71,60 @@ def _records(session_id, client):
         return
 
 
+def _timing_index(session_id, client):
+    try:
+        normalized = str(uuid.UUID(session_id))
+    except (ValueError, TypeError):
+        return {}, {}, {}
+    if client == 'claude':
+        root = Path(os.environ.get('CLAUDE_CONFIG_DIR', Path.home() / '.claude'))
+        paths = list((root / 'projects').glob(f'*/{normalized}.jsonl'))
+    else:
+        root = Path(os.environ.get('CODEX_HOME', Path.home() / '.codex'))
+        paths = [path for folder in ('sessions', 'archived_sessions')
+                 for path in (root / folder).glob(f'**/*-{normalized}.jsonl')]
+    if len(paths) != 1:
+        return {}, {}, {}
+    target = paths[0]
+    try:
+        st = target.stat()
+    except OSError:
+        return {}, {}, {}
+    cache_key = (str(target), st.st_mtime_ns, st.st_size)
+    with _TIMING_INDEX_LOCK:
+        cached = _TIMING_INDEX_CACHE.get(cache_key)
+        if cached is not None:
+            _TIMING_INDEX_CACHE.move_to_end(cache_key)
+            return cached
+    user_stamps, turn_stamps, tool_stamps = {}, {}, {}
+    for record in _records(session_id, client):
+        stamp = seconds(record.get('timestamp'))
+        if stamp is None:
+            continue
+        rtype = record.get('type')
+        if rtype == 'user' and record.get('uuid'):
+            user_stamps.setdefault(record['uuid'], stamp)
+        payload = record.get('payload')
+        if isinstance(payload, dict) and payload.get('turn_id'):
+            tid = payload['turn_id']
+            if rtype == 'event_msg' and payload.get('type') == 'task_started':
+                turn_stamps.setdefault(tid, seconds(payload.get('started_at')) or stamp)
+            elif rtype == 'turn_context':
+                turn_stamps.setdefault(tid, stamp)
+        message = record.get('message')
+        if rtype == 'assistant' and isinstance(message, dict):
+            for block in message.get('content', []):
+                if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id'):
+                    tool_stamps.setdefault(block['id'], stamp)
+    result = (user_stamps, turn_stamps, tool_stamps)
+    with _TIMING_INDEX_LOCK:
+        _TIMING_INDEX_CACHE[cache_key] = result
+        _TIMING_INDEX_CACHE.move_to_end(cache_key)
+        while len(_TIMING_INDEX_CACHE) > 64:
+            _TIMING_INDEX_CACHE.popitem(last=False)
+    return result
+
+
 def restore_timing(store, thread):
     """Recover legacy starts by exact turn/user IDs, never by guessing text."""
     turns = [turn for turn in thread.get('turns', []) if turn.get('id')]
@@ -77,29 +136,20 @@ def restore_timing(store, thread):
         session = db.execute('SELECT client FROM sessions WHERE session_id = ?', (session_id,)).fetchone()
         latest = db.execute('SELECT turn_id, turn_started_at FROM work_threads WHERE thread_id = ?', (session_id,)).fetchone()
         ends = dict(db.execute('SELECT turn_key, completed_at FROM turn_completions WHERE thread_id = ?', (session_id,)))
-    by_id = {turn['id']: turn for turn in turns}
-    users = {item['id']: turn for turn in turns for item in turn.get('items', []) if item.get('type') == 'userMessage' and item.get('id')}
-    items = {item['id']: item for turn in turns for item in turn.get('items', []) if item.get('id')}
-    for record in _records(session_id, session['client'] if session else 'codex'):
-        stamp = seconds(record.get('timestamp'))
-        if stamp is None:
-            continue
-        if record.get('type') == 'user' and record.get('uuid') in users:
-            turn = users[record['uuid']]
-            set_time(turn, 'startedAt', stamp)
-            set_time(items[record['uuid']], 'timelineAt', stamp)
-        payload = record.get('payload')
-        if isinstance(payload, dict) and payload.get('turn_id') in by_id:
-            turn = by_id[payload['turn_id']]
-            if record.get('type') == 'event_msg' and payload.get('type') == 'task_started':
-                set_time(turn, 'startedAt', seconds(payload.get('started_at')) or stamp)
-            elif record.get('type') == 'turn_context':
-                set_time(turn, 'startedAt', stamp)
-        message = record.get('message')
-        if record.get('type') == 'assistant' and isinstance(message, dict):
-            for block in message.get('content', []):
-                if isinstance(block, dict) and block.get('type') == 'tool_use' and block.get('id') in items:
-                    set_time(items[block['id']], 'timelineAt', stamp)
+    user_stamps, turn_stamps, tool_stamps = _timing_index(session_id, session['client'] if session else 'codex')
+    for turn in turns:
+        tid = turn['id']
+        if tid in turn_stamps:
+            set_time(turn, 'startedAt', turn_stamps[tid])
+        for item in turn.get('items', []):
+            iid = item.get('id')
+            if not iid:
+                continue
+            if item.get('type') == 'userMessage' and iid in user_stamps:
+                set_time(turn, 'startedAt', user_stamps[iid])
+                set_time(item, 'timelineAt', user_stamps[iid])
+            elif iid in tool_stamps:
+                set_time(item, 'timelineAt', tool_stamps[iid])
     for turn in turns:
         if latest and turn['id'] == latest['turn_id'] and latest['turn_started_at'] is not None:
             set_time(turn, 'startedAt', latest['turn_started_at'])

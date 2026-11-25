@@ -189,12 +189,29 @@ class AttentionStore:
 
     def claim(self, thread):
         key = self._key(thread)
-        now, token = self.store.clock(), str(uuid.uuid4())
+        settled = getattr(self, "_settled_keys", None)
+        if settled is None:
+            settled = self._settled_keys = set()
+        if key in settled:
+            return None
+        now = self.store.clock()
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT * FROM response_classification_cache WHERE " + self._WHERE, key).fetchone()
+        if row:
+            if row["status"] in {"classified", "uncertain"} or row["attempts"] >= len(RETRY_DELAYS):
+                settled.add(key)
+                return None
+            if row["lease_until"] > now or row["retry_at"] > now:
+                return None
+        token = str(uuid.uuid4())
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            now = self.store.clock()
             row = db.execute("SELECT * FROM response_classification_cache WHERE " + self._WHERE, key).fetchone()
             if row and (row["status"] in {"classified", "uncertain"} or row["lease_until"] > now
                         or row["retry_at"] > now or row["attempts"] >= len(RETRY_DELAYS)):
+                if row["status"] in {"classified", "uncertain"} or row["attempts"] >= len(RETRY_DELAYS):
+                    settled.add(key)
                 return None
             attempts = row["attempts"] + 1 if row else 1
             db.execute("""INSERT OR REPLACE INTO response_classification_cache

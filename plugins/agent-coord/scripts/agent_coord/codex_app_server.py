@@ -2731,7 +2731,7 @@ class BrowserSessions:
             and work_thread["turn_id"]
             and (work_thread["turn_active"] or not work_thread["turn_completion"])
         )
-        saved_window = thread is None and (recent or before_seq is not None) and not needs_outcome
+        saved_window = thread is None and (recent or before_seq is not None)
         if thread is None:
             thread = read_history(
                 self.store,
@@ -2752,7 +2752,18 @@ class BrowserSessions:
                 limit=limit,
                 synchronized=True,
             )
-        if not saved_window:
+        if saved_window and needs_outcome:
+            if any(turn.get("id") == work_thread["turn_id"] for turn in thread.get("turns", [])):
+                self._schedule_saved_completion(thread_id, thread, work_thread, revision)
+            else:
+                single = self.store.transcripts.read_turn_full(thread_id, work_thread["turn_id"])
+                if single is not None:
+                    self._schedule_saved_completion(thread_id, {"turns": [single]}, work_thread, revision)
+                elif not self.store.transcripts.has_thread(thread_id):
+                    full_fallback = read_history(self.store, thread_id)
+                    if isinstance(full_fallback, dict):
+                        self._schedule_saved_completion(thread_id, full_fallback, work_thread, revision)
+        elif not saved_window:
             if before_seq is None:
                 if omitted_turns and needs_outcome and not any(
                     turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]
