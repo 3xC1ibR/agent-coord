@@ -45,6 +45,7 @@ class OpenUITests(unittest.TestCase):
         server = make_ui_server(self.store, port=0, browser_sessions=sessions, remote_access=remote)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
+        self.addCleanup(sessions.close)
         self.addCleanup(worker.join, 2)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)

@@ -74,6 +74,7 @@ class InventoryTransferTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+        self.sessions.close()
 
     def get(self, path, headers=None):
         try:

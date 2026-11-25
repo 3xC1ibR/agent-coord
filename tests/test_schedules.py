@@ -767,7 +767,7 @@ class ScheduleHTTPTests(unittest.TestCase):
         self.server = make_ui_server(store, port=0, cwd=str(self.root), browser_sessions=sessions)
         worker = threading.Thread(target=self.server.serve_forever, daemon=True); worker.start()
         def close():
-            self.server.shutdown(); self.server.server_close(); worker.join(5)
+            self.server.shutdown(); self.server.server_close(); worker.join(5); sessions.close()
         self.addCleanup(close)
         self.url = "http://127.0.0.1:" + str(self.server.server_address[1])
         self.token = self.request("/api/browser/config")["token"]

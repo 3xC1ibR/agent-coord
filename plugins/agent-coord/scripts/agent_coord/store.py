@@ -446,14 +446,15 @@ class _IdleConnection:
     """One thread's reusable store connection, closed with the thread or store."""
 
     def __init__(self) -> None:
+        self.lock = threading.Lock()
         self.connection: _StoreConnection | None = None
         self.factory: Callable[[], Any] = lambda: None
         self.file_identity: tuple[int, int] | None = None
         self.in_use = False
         self.closer: weakref.finalize | None = None
 
-    def keep(self, connection: _StoreConnection, factory: Any, file_identity: tuple[int, int]) -> None:
-        self.discard()
+    def _keep_locked(self, connection: _StoreConnection, factory: Any, file_identity: tuple[int, int]) -> None:
+        self._discard_locked()
         # Weak, so a replaced factory cannot keep its store alive.
         self.factory = weakref.ref(factory)
         self.connection = connection
@@ -462,12 +463,25 @@ class _IdleConnection:
         # connection along with the store's reference cycle, and at exit.
         self.closer = weakref.finalize(self, connection.close)
 
-    def discard(self) -> None:
+    def keep(self, connection: _StoreConnection, factory: Any, file_identity: tuple[int, int]) -> None:
+        with self.lock:
+            self._keep_locked(connection, factory, file_identity)
+
+    def _discard_locked(self) -> None:
         if self.closer is not None:
             self.closer()
         self.connection, self.closer = None, None
         self.file_identity = None
         self.factory = lambda: None
+
+    def discard(self) -> None:
+        with self.lock:
+            self._discard_locked()
+
+    def discard_if_idle(self) -> None:
+        with self.lock:
+            if not self.in_use:
+                self._discard_locked()
 
 
 class CoordinationStore:
@@ -750,8 +764,7 @@ class CoordinationStore:
         with self._idle_registry_lock:
             holders = list(self._idle_holder_registry)
         for holder in holders:
-            if not holder.in_use:
-                holder.discard()
+            holder.discard_if_idle()
 
     @contextmanager
     def _ungated_connection(self, *, transaction=True):
@@ -772,8 +785,10 @@ class CoordinationStore:
             # obsolete writer. Never close an enclosing active transaction.
             for name in ("reader", "holder"):
                 cached = getattr(idle, name, None)
-                if cached is not None and not cached.in_use and cached.file_identity != file_identity:
-                    cached.discard()
+                if cached is not None:
+                    with cached.lock:
+                        if not cached.in_use and cached.file_identity != file_identity:
+                            cached._discard_locked()
         holder = None if idle is None else getattr(idle, slot, None)
         if idle is not None and holder is None:
             holder = _IdleConnection()
@@ -781,8 +796,19 @@ class CoordinationStore:
                 self._idle_holder_registry.add(holder)
             setattr(idle, slot, holder)
         factory = getattr(self._connect, "__func__", self._connect)
-        nested = holder is None or holder.in_use
         connection = None
+        checked_out = False
+        if holder is not None:
+            with holder.lock:
+                if not holder.in_use:
+                    holder.in_use = True
+                    checked_out = True
+                    if holder.connection is not None and holder.factory() is factory:
+                        connection = holder.connection
+                    else:
+                        holder._discard_locked()
+        nested = not checked_out
+
         def _internal_pragma(conn, sql_stmt: str):
             if isinstance(conn, _StoreConnection):
                 conn._applying_internal_pragma = True
@@ -792,10 +818,11 @@ class CoordinationStore:
                     conn._applying_internal_pragma = False
             return conn.execute(sql_stmt)
 
-        timeout = getattr(self._connection_options, "timeout", None)
-        if not nested:
-            if holder.connection is not None and holder.factory() is factory:
-                connection = holder.connection
+        reusable = False
+        fresh = False
+        try:
+            timeout = getattr(self._connection_options, "timeout", None)
+            if checked_out and connection is not None:
                 self._bind_connection_diagnostics(connection, reading)
                 try:
                     connection.row_factory = sqlite3.Row
@@ -810,45 +837,41 @@ class CoordinationStore:
                             _internal_pragma(connection, f"PRAGMA foreign_keys = {connection.settings[1]}")
                 except sqlite3.Error:
                     connection = None
-            if connection is None:
-                holder.discard()
-        fresh = connection is None
-        if fresh:
-            connection = self._connect()
-            if file_identity is None:
-                # The initial writer may have created the database.
-                file_identity = self._database_file_identity()
-            if not nested and isinstance(connection, _StoreConnection):
-                connection.settings = (_internal_pragma(connection, "PRAGMA busy_timeout").fetchone()[0],
-                                       _internal_pragma(connection, "PRAGMA foreign_keys").fetchone()[0])
-                connection._cached_busy_timeout = connection.settings[0]
-                connection._pragma_tainted = False
-            if timeout is not None:
+                    with holder.lock:
+                        holder._discard_locked()
+            fresh = connection is None
+            if fresh:
+                connection = self._connect()
+                if file_identity is None:
+                    # The initial writer may have created the database.
+                    file_identity = self._database_file_identity()
+                if not nested and isinstance(connection, _StoreConnection):
+                    connection.settings = (_internal_pragma(connection, "PRAGMA busy_timeout").fetchone()[0],
+                                           _internal_pragma(connection, "PRAGMA foreign_keys").fetchone()[0])
+                    connection._cached_busy_timeout = connection.settings[0]
+                    connection._pragma_tainted = False
+                if timeout is not None:
+                    _internal_pragma(connection, f"PRAGMA busy_timeout = {timeout}")
+                    if isinstance(connection, _StoreConnection):
+                        connection._cached_busy_timeout = timeout
+            elif nested and timeout is not None:
                 _internal_pragma(connection, f"PRAGMA busy_timeout = {timeout}")
+            if not reading:
+                from .database_checkpoint import automatic_checkpoint_pages
+                pages = automatic_checkpoint_pages(self._database_identity)
+                if getattr(connection, "automatic_checkpoint_pages", None) != pages:
+                    _internal_pragma(connection, f"PRAGMA wal_autocheckpoint = {pages}")
+                    if isinstance(connection, _StoreConnection):
+                        connection.automatic_checkpoint_pages = pages
+            # This setter also expires statements on an unchanged connection.
+            desired_query_only = int(reading)
+            if (fresh or getattr(connection, "_pragma_tainted", False)
+                    or getattr(connection, "_cached_query_only", None) != desired_query_only):
+                if fresh or _internal_pragma(connection, "PRAGMA query_only").fetchone()[0] != desired_query_only:
+                    _internal_pragma(connection, f"PRAGMA query_only = {desired_query_only}")
                 if isinstance(connection, _StoreConnection):
-                    connection._cached_busy_timeout = timeout
-        elif nested and timeout is not None:
-            _internal_pragma(connection, f"PRAGMA busy_timeout = {timeout}")
-        if not reading:
-            from .database_checkpoint import automatic_checkpoint_pages
-            pages = automatic_checkpoint_pages(self._database_identity)
-            if getattr(connection, "automatic_checkpoint_pages", None) != pages:
-                _internal_pragma(connection, f"PRAGMA wal_autocheckpoint = {pages}")
-                if isinstance(connection, _StoreConnection):
-                    connection.automatic_checkpoint_pages = pages
-        # This setter also expires statements on an unchanged connection.
-        desired_query_only = int(reading)
-        if (fresh or getattr(connection, "_pragma_tainted", False)
-                or getattr(connection, "_cached_query_only", None) != desired_query_only):
-            if fresh or _internal_pragma(connection, "PRAGMA query_only").fetchone()[0] != desired_query_only:
-                _internal_pragma(connection, f"PRAGMA query_only = {desired_query_only}")
-            if isinstance(connection, _StoreConnection):
-                connection._cached_query_only = desired_query_only
-                connection._pragma_tainted = False
-        reusable = False
-        if not nested:
-            holder.in_use = True
-        try:
+                    connection._cached_query_only = desired_query_only
+                    connection._pragma_tainted = False
             with (connection if transaction else nullcontext()):
                 yield connection
             reusable = (not nested and isinstance(connection, _StoreConnection)
@@ -856,21 +879,32 @@ class CoordinationStore:
                         and file_identity is not None
                         and file_identity == self._database_file_identity())
         finally:
-            if not nested:
-                holder.in_use = False
-            if reusable:
+            if reusable and connection is not None:
                 try:
                     if transaction:
                         connection.end_statements()
                     if fresh:
-                        if reusable:
-                            holder.keep(connection, factory, file_identity)
+                        with holder.lock:
+                            holder._keep_locked(connection, factory, file_identity)
+                            holder.in_use = False
+                            checked_out = False
                 except (sqlite3.Error, TypeError):
                     reusable = False
+            if reusable and checked_out:
+                with holder.lock:
+                    holder.in_use = False
+                    checked_out = False
             if not reusable:
-                if not nested and holder.connection is connection:
-                    holder.discard()
-                else:
+                if checked_out:
+                    try:
+                        if connection is not None and holder.connection is not connection:
+                            connection.close()
+                    finally:
+                        with holder.lock:
+                            if holder.connection is connection and connection is not None:
+                                holder._discard_locked()
+                            holder.in_use = False
+                elif connection is not None:
                     connection.close()
 
     def _database_file_identity(self):

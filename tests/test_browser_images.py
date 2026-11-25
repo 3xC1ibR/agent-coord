@@ -152,6 +152,7 @@ class BrowserImageHTTPTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+        self.sessions.close()
 
     def request(self, path, body=None, token=None):
         headers = {"Content-Type": "application/json", "X-Agent-Coord-Token": token or getattr(self, "token", "")}

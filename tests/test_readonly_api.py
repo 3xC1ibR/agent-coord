@@ -43,6 +43,7 @@ class ReadOnlyHTTPTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.worker.join(2)
+        self.sessions.close()
 
     def request(self, path, *, headers=None):
         request = urllib.request.Request(self.url + path, headers=headers or {})

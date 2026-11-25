@@ -668,6 +668,10 @@ def _handler(
                             self._browser_get(parsed)
                     else:
                         self._browser_get(parsed)
+                except BrowserBusyError as exc:
+                    status = (HTTPStatus.SERVICE_UNAVAILABLE if "Runtime maintenance is pausing new work" in str(exc)
+                              else HTTPStatus.CONFLICT)
+                    self._json(status, {"error": str(exc)})
                 except CoordinationError as exc:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 except sqlite3.OperationalError as exc:

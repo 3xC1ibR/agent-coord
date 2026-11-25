@@ -305,3 +305,4 @@ class MessageTimelineTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(2)
+            sessions.close()

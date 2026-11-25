@@ -158,7 +158,7 @@ class EdgeProxy:
                 except (OSError, http.client.HTTPException):
                     if time.monotonic() < deadline: time.sleep(min(0.005, 0.001 + attempt * 0.0005)); attempt += 1; continue
                     return self._reply_json(handler, 503, {"error": "Coordinator unavailable."})
-                if response.status == 503 and not route.get("paused"):
+                if response.status in {400, 409, 503} and not route.get("paused"):
                     error_body = response.read()
                     if b"Runtime maintenance is pausing new work" in error_body and time.monotonic() < deadline:
                         time.sleep(min(0.005, 0.001 + attempt * 0.0005)); attempt += 1; continue
