@@ -40,28 +40,30 @@ class Element {
   focus() { this.focused = true; }
 }
 
-function setup(mobile = true, pane = false) {
+function setup(mobile = true, pane = false, narrow = false) {
   const ids = ["mobile-thread-sheet", "mobile-chat-actions", "context-panel", "mobile-chat-back", "mobile-show-context",
     "mobile-sheet-back", "mobile-sheet-actions", "mobile-sheet-context", "mobile-sheet-info", "mobile-sheet-title",
-    "thread-context", "conversation", "mobile-chat-status", "composer-options", "send-work-mobile-chat", "fork-origin", "mobile-sheet-composer", "message", "jump-to-latest"];
+    "thread-context", "conversation", "mobile-chat-status", "composer-options", "send-work-mobile-chat", "fork-origin", "mobile-sheet-composer", "message", "jump-to-latest", "error", "timeline"];
   const elements = Object.fromEntries(ids.map(id => [id,new Element(id)]));
   const body = new Element("body"), header = new Element("header"), actions = new Element("actions"), info = new Element("info");
   body.append(header); header.append(actions); body.append(elements["context-panel"]); body.append(info);
   header.append(elements["mobile-chat-actions"]); body.append(elements["jump-to-latest"]);
+  body.append(elements.error); body.append(elements.conversation); elements.conversation.append(elements.timeline);
   elements["context-panel"].append(elements["thread-context"]);
   for (const id of ["mobile-sheet-actions","mobile-sheet-context","mobile-show-context","mobile-sheet-info"]) elements["mobile-thread-sheet"].append(elements[id]);
   for (const id of ["composer-options", "send-work-mobile-chat", "fork-origin"]) body.append(elements[id]);
   const doc = {body, getElementById: id => elements[id], createComment: () => new Element("marker"),
     querySelector: selector => selector === ".session-actions" ? actions : info};
   const media = {matches:mobile, addEventListener: (_, callback) => { media.change = callback; }};
+  const narrowHeader = {matches:narrow, addEventListener: (_, callback) => { narrowHeader.change = callback; }};
   const viewport = {height:800, offsetTop:0, scale:1, events:{}, addEventListener: (type, callback) => { viewport.events[type]=callback; }};
   let back = 0, layouts = 0, desktopContext = 0, frame;
-  const view = {matchMedia: query => {media.query = query; return media;}, visualViewport:viewport,
+  const view = {matchMedia: query => {if (query === "(max-width: 360px)") return narrowHeader; media.query = query; return media;}, visualViewport:viewport,
     frameElement: pane ? {classList: {contains: name => name === "conversation-pane-frame"}} : null,
     parent: {document: {body: {classList: {contains: name => name === "dispatcher-workspace"}}}},
     requestAnimationFrame: callback => {frame=callback; return 1;}, cancelAnimationFrame: () => {frame=null;}};
   const chat = new MobileChat({document:doc, view, onBack: () => {back++;}, onLayout: () => {layouts++;}, onContextLayout: () => {desktopContext++;}});
-  return {chat, elements, body, header, actions, info, media, viewport,
+  return {chat, elements, body, header, actions, info, media, narrowHeader, viewport,
     counts: () => ({back,layouts,desktopContext}), flush: () => {const callback=frame; frame=null; callback?.();}};
 }
 
@@ -232,4 +234,32 @@ test("latest navigation moves to the mobile header and restores its original des
   assert.equal(button.hidden, false);
   assert.equal(button.onclick(), "latest");
   assert.equal(s.header.children.includes(button), false);
+});
+
+test("narrow phones retain the original latest action in the thread sheet across resizes", () => {
+  const s = setup(true, false, true), button = s.elements["jump-to-latest"];
+  button.onclick = () => "latest";
+  assert.equal(button.parentElement, s.elements["mobile-sheet-actions"]);
+  s.chat.open("actions");
+  s.narrowHeader.matches = false; s.narrowHeader.change();
+  assert.equal(s.elements["mobile-thread-sheet"].open, false);
+  assert.equal(button.parentElement, s.header);
+  s.narrowHeader.matches = true; s.narrowHeader.change();
+  assert.equal(button.parentElement, s.elements["mobile-sheet-actions"]);
+  assert.equal(button.onclick(), "latest");
+  s.media.matches = false; s.media.change();
+  assert.equal(button.parentElement, s.body);
+});
+
+test("mobile notices stay available in the overview and restore their original desktop position", () => {
+  const s = setup(), notice = s.elements.error;
+  notice.onclick = () => "dismiss";
+  assert.equal(notice.parentElement, s.elements.timeline.parentElement);
+  s.elements.conversation.hidden = true; s.chat.layoutNotice();
+  assert.equal(notice.parentElement, s.body);
+  s.elements.conversation.hidden = false; s.chat.layoutNotice();
+  assert.equal(notice.parentElement, s.elements.timeline.parentElement);
+  s.media.matches = false; s.media.change();
+  assert.equal(notice.parentElement, s.body);
+  assert.equal(notice.onclick(), "dismiss");
 });

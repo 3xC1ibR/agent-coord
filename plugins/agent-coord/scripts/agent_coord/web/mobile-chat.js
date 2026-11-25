@@ -13,16 +13,18 @@ class MobileChat {
     // conversation still provides its own back button when pane chrome is hidden.
     const pane = view.frameElement?.classList.contains("conversation-pane-frame");
     this.media = view.matchMedia(`(max-width: ${pane ? 800 : 720}px), (max-width: 1100px) and (hover: none) and (pointer: coarse)`);
+    this.narrowHeader = view.matchMedia("(max-width: 360px)");
     this.dialog = this.$("mobile-thread-sheet");
     this.trigger = this.$("mobile-chat-actions");
     this.jumpButton = this.$("jump-to-latest");
+    this.notice = this.$("error");
     this.panel = this.$("context-panel");
     this.actions = doc.querySelector(".session-actions");
     this.info = doc.querySelector(".session-statusbar");
     this.composerOptions = this.$("composer-options");
     this.sendWork = this.$("send-work-mobile-chat");
     this.origin = this.$("fork-origin");
-    this.homes = [this.actions, this.panel, this.info, this.composerOptions, this.sendWork, this.origin, this.jumpButton].map(element => {
+    this.homes = [this.actions, this.panel, this.info, this.composerOptions, this.sendWork, this.origin, this.jumpButton, this.notice].map(element => {
       const marker = doc.createComment("mobile chat control position");
       element.before(marker);
       return {element, marker};
@@ -48,9 +50,16 @@ class MobileChat {
       const button = event.target.closest("button");
       if (button && button.id !== "speech-toggle" && !button.closest(".context-panel-tabs, .agent-tree-panel") &&
           !button.disabled && (this.actions.contains(button) || this.panel.contains(button) || this.info.contains(button) ||
-            this.composerOptions.contains(button) || button === this.sendWork)) this.close();
+            this.composerOptions.contains(button) || button === this.sendWork || button === this.jumpButton)) this.close();
     }, {capture: true});
     this.media.addEventListener("change", () => this.sync());
+    this.narrowHeader.addEventListener("change", () => {
+      if (this.matches) { this.close(); this.layoutNavigation(); }
+    });
+    if (view.MutationObserver) {
+      this.noticeObserver = new view.MutationObserver(() => this.layoutNotice());
+      this.noticeObserver.observe(this.$("conversation"), {attributes: true, attributeFilter: ["hidden"]});
+    }
     view.visualViewport?.addEventListener("resize", () => this.viewport());
     view.visualViewport?.addEventListener("scroll", () => this.viewport());
     this.sync();
@@ -62,8 +71,8 @@ class MobileChat {
     this.close();
     this.doc.body.classList.toggle("mobile-chat", this.matches);
     if (this.matches) {
-      this.trigger.before(this.jumpButton);
       this.$("mobile-sheet-actions").append(this.actions);
+      this.layoutNavigation();
       this.$("mobile-sheet-context").append(this.panel);
       this.$("mobile-sheet-info").append(this.info);
       this.$("mobile-sheet-info").append(this.origin);
@@ -74,8 +83,25 @@ class MobileChat {
       this.onContextLayout();
     }
     this.layoutComposer();
+    this.layoutNotice();
     this.placeholder();
     this.viewport();
+  }
+
+  layoutNavigation() {
+    if (this.narrowHeader.matches) this.actions.before(this.jumpButton);
+    else this.trigger.before(this.jumpButton);
+  }
+
+  layoutNotice() {
+    const marker = this.homes.find(home => home.element === this.notice).marker;
+    const timeline = this.$("timeline");
+    const inConversation = this.matches && !this.$("conversation").hidden;
+    const target = inConversation ? timeline.parentElement : marker.parentElement;
+    if (this.notice.parentElement !== target) {
+      if (inConversation) timeline.before(this.notice);
+      else marker.after(this.notice);
+    }
   }
 
   placeholder(desktop, mobile) {

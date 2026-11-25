@@ -1145,4 +1145,7 @@ body.mobile-chat .jump-latest-label { display: inline; }
 .conversation .composer-footer .quiet { font-size: var(--chat-meta-size); }
 .conversation .checkpoint-saved { display: block; margin-top: var(--chat-toolbar-gap); font-size: var(--chat-meta-size); line-height: var(--chat-message-leading); }
 .conversation .context-secondary:not(:has(#context-reuse > *)) { display: none; }
-body.mobile-chat .error { top: calc(var(--mobile-chat-header-height) + var(--mobile-chat-gap)); bottom: auto; }
+body.mobile-chat .mobile-thread-sheet .jump-to-latest { position: static; display: flex; align-items: center; gap: var(--mobile-chat-gap); width: 100%; min-height: var(--chat-control-size); padding: var(--mobile-chat-inset); transform: none; border: 0; border-radius: var(--response-action-radius); box-shadow: none; background: transparent; color: var(--ink); font: inherit; }
+body.mobile-chat .conversation-content > .error { position: static; flex-shrink: 0; transform: none; width: auto; margin: 0 var(--mobile-chat-inset); padding: var(--mobile-chat-control-padding) var(--mobile-chat-inset); gap: var(--mobile-chat-gap); box-shadow: none; z-index: auto; }
+body.mobile-chat .conversation-content > .error > span { min-width: 0; overflow-wrap: anywhere; }
+body.mobile-chat .conversation-content > .error button { flex-shrink: 0; min-width: var(--chat-control-size); min-height: var(--chat-control-size); padding: 0; }

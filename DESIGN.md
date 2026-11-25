@@ -25,7 +25,8 @@ spacing:
 Ribbon Field is a persistent workspace for conversations and coordinated agent work.
 Its quiet, dense workspace keeps the work prominent. Auxiliary pages such as Usage
 and Activity use the same paper, ink, controls and type with more reading room.
-The chat composition candidate deliberately revises the conversation surface for review; other surfaces retain this contract.
+The approved conversation composition gives reading and replying a shared measure;
+other surfaces retain this contract.
 
 ## Colors
 `web/styles.css` is the implementation source of truth; `web/theme.css` replaces
@@ -67,12 +68,15 @@ working/input status is explicit text beneath the title, with Stop a distinct
 thread options sheet; reuse their original controls and handlers. Keep 44px touch
 targets and a visible send action as drafts grow or the keyboard opens. Mobile
 dimensions are declared once in `web/styles.css`.
-Jump to latest uses a down chevron, floating above the desktop composer in a
+Jump to latest uses a downward arrow, floating above the desktop composer in a
 44px button. The phone adds a visible Latest label immediately before thread
-options in its existing header, retaining a 44px target height. Its desktop anchor never reserves a layout row;
+options in its existing header, retaining a 44px target height. At 360px and below,
+the same control moves into thread actions to preserve title space.
+Its desktop anchor never reserves a layout row;
 phone navigation stays apart from Send and never covers the transcript or draft.
-Retain the accessible name and tooltip. Mobile error notices sit below the
-header so they do not cover the composer controls. Checkpoint provenance and
+Retain the accessible name and tooltip. Mobile error notices occupy a dedicated
+row before the transcript, with a 44px dismiss target; they return to the global
+notice position in the overview and on desktop. Checkpoint provenance and
 actions stay with the context they describe, above the scratchpad; the short
 date uses the 12px metadata scale and its precise value is available on focus.
 The asks view opens in a workspace dialog and uses the auxiliary-page grammar: a
@@ -103,7 +107,7 @@ stroke icons. Auxiliary report sections use whitespace rather than card outlines
 | Component | Use |
 | --- | --- |
 | Permission menu | Provider-supplied session modes as checked menu choices; unavailable native choices remain identified; opening never changes a selection |
-| Composer controls | Shortcut help in the state-aware placeholder; arrow send and calendar schedule retain accessible names and touch targets |
+| Composer controls | Short prompts with shortcut help on desktop focus and in the accessible description; arrow send and calendar schedule retain accessible names and touch targets |
 | Scheduled prompts | A small clock in the chat header appears when the thread has upcoming prompts and opens its scheduled-prompt details in the existing dialog. Repeat is an attribute of a scheduled prompt; reuse native labelled selects and inputs, existing result cards, and quiet Edit, Pause, Resume and Cancel actions |
 | Thread group label | Group beside the workspace path opens the existing group assignment editor |
 | Quiet button | Refresh, dismiss, secondary actions |
@@ -174,7 +178,7 @@ system typography, and a dark workspace sidebar are the existing signatures.
 ## Decision log
 | Date | Decision | Reason |
 | --- | --- | --- |
-| 2026-11-24 | Chat composition review candidate: aligned reading and composing, quiet task chrome, compact reference context | Give the conversation a confident reading hierarchy while preserving every existing action. Candidate only; no rollout is authorized. |
+| 2026-11-25 | Approved chat composition: aligned reading and composing, quiet task chrome, compact reference context | User approved integration after reviewing the alternatives. Narrow phones retain title space and allocate a layout row for alerts. |
 | 2026-11-24 | A Pinned section leads the inbox; inbox row menus offer Dismiss from Attention and Mark as read; a phone opens a conversation on the conversation, not the agent tree | The owner expected pins at the top regardless of state, had no way to dismiss or read from an inbox row, and had to close the tree sheet to read a thread with agents |
 | 2026-11-24 | The tab dot and the agent tree badge share one needs-you derivation built on the inbox's request rule; closed tree children fold to icons | Dismissing a request left the tree badge and the parent's tab dot orange, and a parent showed orange while working, because three copies derived attention differently |
 | 2026-11-24 | Runtime-generated prompts render as Agent Coord system rows with a popover, or fold into the matching message card | Deliveries and subscription events appeared as user bubbles of raw JSON beside their own cards; they are not the user's words |
