@@ -42,9 +42,10 @@ CREATE TABLE IF NOT EXISTS thread_turns (
     compact_length INTEGER NOT NULL,
     full_offset INTEGER NOT NULL,
     full_length INTEGER NOT NULL,
-    PRIMARY KEY (thread_id, turn_seq),
-    UNIQUE (thread_id, turn_id)
+    PRIMARY KEY (thread_id, turn_seq)
 );
+CREATE INDEX IF NOT EXISTS thread_turns_turn_id_idx
+    ON thread_turns (thread_id, turn_id, turn_seq DESC);
 """
 
 
@@ -71,7 +72,7 @@ def thread_directory(database_path: str | Path, thread_id: str) -> Path:
 def ensure_schema(db: sqlite3.Connection) -> None:
     """Ensure the additive thread_turns offset index exists with all columns."""
     exists = db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_turns'"
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='thread_turns'"
     ).fetchone()
     if not exists:
         db.executescript(THREAD_TURNS_SCHEMA)
@@ -96,6 +97,34 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE thread_turns ADD COLUMN started_at REAL")
     if "completed_at" not in columns:
         db.execute("ALTER TABLE thread_turns ADD COLUMN completed_at REAL")
+    if "UNIQUE" in (exists[0] or "").upper():
+        db.executescript("""
+            CREATE TABLE thread_turns_migrated (
+                thread_id TEXT NOT NULL,
+                turn_seq INTEGER NOT NULL,
+                turn_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at REAL,
+                completed_at REAL,
+                compact_offset INTEGER NOT NULL,
+                compact_length INTEGER NOT NULL,
+                full_offset INTEGER NOT NULL,
+                full_length INTEGER NOT NULL,
+                PRIMARY KEY (thread_id, turn_seq)
+            );
+            INSERT INTO thread_turns_migrated (
+                thread_id, turn_seq, turn_id, status, started_at, completed_at,
+                compact_offset, compact_length, full_offset, full_length
+            )
+            SELECT thread_id, turn_seq, turn_id, status, started_at, completed_at,
+                   compact_offset, compact_length, full_offset, full_length
+            FROM thread_turns;
+            DROP TABLE thread_turns;
+            ALTER TABLE thread_turns_migrated RENAME TO thread_turns;
+        """)
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS thread_turns_turn_id_idx ON thread_turns (thread_id, turn_id, turn_seq DESC)"
+    )
 
 
 def _quick_turn_stamp(turn: dict) -> tuple:
@@ -411,10 +440,15 @@ class TranscriptStore:
                             "status": "inProgress",
                         }
                     if new_item is not None:
-                        claude_blocks[idx] = new_item
-                        if item_id not in items_by_id:
+                        if item_id in items_by_id:
+                            existing_block = items_by_id[item_id]
+                            existing_block.clear()
+                            existing_block.update(new_item)
+                            claude_blocks[idx] = existing_block
+                        else:
                             turn.setdefault("items", []).append(new_item)
                             items_by_id[item_id] = new_item
+                            claude_blocks[idx] = new_item
                 elif ev_type == "content_block_delta":
                     target = claude_blocks.get(idx)
                     delta = ev.get("delta") if isinstance(ev.get("delta"), dict) else {}
@@ -773,14 +807,6 @@ class TranscriptStore:
             db.execute("DELETE FROM thread_turns WHERE thread_id = ? AND turn_seq >= ?", (thread_id, truncate_from))
         upserts = plan["upserts"]
         if upserts:
-            first_seq = upserts[0][1]
-            if first_seq < prev_len:
-                turn_ids = [row[2] for row in upserts]
-                placeholders = ",".join("?" for _ in turn_ids)
-                db.execute(
-                    f"DELETE FROM thread_turns WHERE thread_id = ? AND turn_id IN ({placeholders})",
-                    (thread_id, *turn_ids),
-                )
             db.executemany(
                 """INSERT OR REPLACE INTO thread_turns (
                        thread_id, turn_seq, turn_id, status, started_at, completed_at,
@@ -1464,8 +1490,10 @@ def migrate_database(
                     if legacy_flat_dir.exists():
                         shutil.rmtree(legacy_flat_dir, ignore_errors=True)
 
-                    # Prune completed ephemeral read-only model/limit queries and closed-channel wire receipts.
+                    # Prune completed ephemeral read-only model/limit queries, historical wire receipts,
+                    # and embedded blob copies inside aged completed submission receipts.
                     import time as _time
+                    now_ts = _time.time()
                     with db:
                         if "app_control_requests" in tables:
                             db.execute(
@@ -1473,16 +1501,44 @@ def migrate_database(
                                    WHERE operation IN ('models', 'provider-limits')
                                      AND status IN ('completed', 'failed', 'cancelled')
                                      AND updated_at < ?""",
-                                (_time.time() - 3600.0,),
+                                (now_ts - 3600.0,),
                             )
-                        if "coordinator_commands" in tables and "coordinator_channels" in tables:
+                        if "coordinator_commands" in tables:
+                            if "coordinator_channels" in tables:
+                                db.execute(
+                                    """DELETE FROM coordinator_commands
+                                       WHERE outcome IN ('written', 'rejected')
+                                         AND channel NOT IN (
+                                             SELECT channel FROM coordinator_channels WHERE closed = 0
+                                         )"""
+                                )
                             db.execute(
                                 """DELETE FROM coordinator_commands
-                                   WHERE outcome IN ('written', 'rejected')
-                                     AND channel NOT IN (
-                                         SELECT channel FROM coordinator_channels WHERE closed = 0
-                                     )"""
+                                   WHERE operation = 'write' AND outcome = 'written'
+                                     AND rowid <= COALESCE((SELECT MAX(rowid) - 500 FROM coordinator_commands), 0)"""
                             )
+                        if "browser_submission_receipts" in tables:
+                            bsr_cols = {r[1] for r in db.execute("PRAGMA table_info(browser_submission_receipts)")}
+                            if {"state", "updated_at", "payload_json", "result_json"} <= bsr_cols:
+                                db.execute(
+                                    """UPDATE browser_submission_receipts
+                                       SET payload_json = '{}',
+                                           result_json = CASE
+                                               WHEN result_json IS NOT NULL AND LENGTH(result_json) > 1024 THEN json_object(
+                                                   'turn', CASE
+                                                       WHEN json_extract(result_json, '$.turn.id') IS NOT NULL
+                                                           THEN json_object('id', json_extract(result_json, '$.turn.id'))
+                                                       ELSE NULL
+                                                   END,
+                                                   'turnId', json_extract(result_json, '$.turnId'),
+                                                   'acceptedMessage', json_extract(result_json, '$.acceptedMessage')
+                                               )
+                                               ELSE result_json
+                                           END
+                                       WHERE state = 'completed' AND updated_at < ?
+                                         AND (LENGTH(payload_json) > 256 OR LENGTH(COALESCE(result_json, '')) > 1024)""",
+                                    (now_ts - 86400.0,),
+                                )
 
                     # 4. VACUUM INTO '<db>.compacted' + atomic swap under exclusive lock.
                     compacted_path = Path(str(path) + ".compacted")

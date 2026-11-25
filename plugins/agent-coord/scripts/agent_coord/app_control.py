@@ -328,20 +328,33 @@ class AppControl:
 
     def complete(self, request_id, *, result=None, error=None, uncertain=False):
         status = "uncertain" if uncertain else "failed" if error is not None else "completed"
+        now = self.store.clock()
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute("UPDATE app_control_requests SET status = ?, result_json = ?, error = ?, updated_at = ? WHERE request_id = ? AND status = 'running'",
-                       (status, json.dumps(result) if result is not None else None, error, self.store.clock(), request_id))
-            if changed.rowcount and status in {"failed", "uncertain"}:
-                notify_creation_failure(self.store, db, db.execute(
-                    "SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone())
-            if changed.rowcount and status == 'completed':
-                row = db.execute('SELECT * FROM app_control_requests WHERE request_id=?',(request_id,)).fetchone()
+                       (status, json.dumps(result) if result is not None else None, error, now, request_id))
+            row = (
+                db.execute("SELECT * FROM app_control_requests WHERE request_id = ?", (request_id,)).fetchone()
+                if changed.rowcount
+                else None
+            )
+            if row and status in {"failed", "uncertain"}:
+                notify_creation_failure(self.store, db, row)
+            if row and row["operation"] in {"models", "provider-limits"}:
+                db.execute(
+                    """DELETE FROM app_control_requests
+                       WHERE operation IN ('models', 'provider-limits')
+                         AND status IN ('completed', 'failed', 'cancelled')
+                         AND updated_at < ?
+                         AND request_id != ?""",
+                    (now - 3600.0, request_id),
+                )
+            if row and status == 'completed':
                 if row['operation'] == 'create' and json.loads(row['payload_json']).get('interactive'):
                     # Commit binding and creation together. The inbox wake cannot
                     # produce its first public message before the journal exists.
                     db.execute('INSERT OR IGNORE INTO interactive_bindings(thread_id,sender_id,touched_at) VALUES (?,?,?)',
-                               (row['thread_id'],row['sender_session_id'],self.store.clock()))
+                               (row['thread_id'],row['sender_session_id'],now))
             # The message can refresh the timeline before creation is confirmed.
             if changed.rowcount and status == "completed" and isinstance(result, dict) and type(result.get("message_id")) is int:
                 db.execute("""INSERT INTO message_changes(sender_session_id, recipient_session_id)

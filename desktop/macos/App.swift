@@ -3534,8 +3534,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let drag = pane.subviews.first { $0 is TitlebarDragView }
         let content = pane.subviews.first { $0 is NSStackView }
         let top = { (view: NSView) in item.window.frame.height - view.convert(view.bounds, to: nil).maxY }
-        smokeResults["titlebar_file_pane"] = ["drag_top": drag.map(top).map(Double.init) ?? -1,
-            "drag_height": Double(drag?.frame.height ?? -1), "content_top": content.map(top).map(Double.init) ?? -1]
+        let filePaneMetrics: [String: Double] = [
+            "drag_top": drag.map(top).map(Double.init) ?? -1,
+            "drag_height": Double(drag?.frame.height ?? -1),
+            "content_top": content.map(top).map(Double.init) ?? -1,
+        ]
+        smokeResults["titlebar_file_pane"] = filePaneMetrics
         try smokeCheck("titlebar_file_pane_band", drag.map(top) == 0 && drag?.frame.height == band
             && (content.map(top) ?? 0) >= band)
         // The narrower conversation area uses the compact header, which must also clear the controls.

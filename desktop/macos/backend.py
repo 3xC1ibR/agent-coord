@@ -16,7 +16,11 @@ from pathlib import Path
 
 # Optional Web Push dependencies are installed into the signed app bundle,
 # never into the user's global Python or the client plugin caches.
-push_libraries = Path(__file__).resolve().parent / "push-libs"
+resources_dir = Path(__file__).resolve().parent
+backend_libraries = resources_dir / "backend"
+if backend_libraries.is_dir() and str(backend_libraries) not in sys.path:
+    sys.path.insert(0, str(backend_libraries))
+push_libraries = resources_dir / "push-libs"
 if push_libraries.is_dir():
     sys.path.insert(0, str(push_libraries))
 

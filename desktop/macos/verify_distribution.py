@@ -57,27 +57,28 @@ print(json.dumps({'architecture': platform.machine(), 'python': sys.version.spli
         # The fixture modules normally add their own checkout to sys.path.
         # Copy them outside the checkout so they cannot import its implementation.
         fixtures = root / "tests"
-        (fixtures / "fixtures").mkdir(parents=True)
+        fixtures.mkdir(parents=True)
         tests = Path(__file__).resolve().parents[2] / "tests"
         for filename in ("test_codex_app_server.py", "test_coordinator_projection.py",
-                         "test_desktop_runtime.py", "test_runtime_unsupported_update.py",
-                         "fixtures/update_interruption_provider.py"):
+                         "test_desktop_runtime.py", "test_runtime_unsupported_update.py"):
             shutil.copyfile(tests / filename, fixtures / filename)
         subprocess.run([str(python), "-m", "unittest", "-v",
                         "test_coordinator_projection.ProjectionTests."
                         "test_next_request_replaces_codex_provider_whose_output_ended",
                         "test_coordinator_projection.ProjectionTests."
                         "test_signed_legacy_watchdog_restores_approval_and_processes_next_event",
-                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_explicit_update_pauses_and_continues_each_provider_once",
-                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_pending_approval_waits_with_admission_open_and_is_never_withdrawn",
-                        "test_runtime_unsupported_update.UnsupportedProviderUpdateTests."
-                        "test_muse_background_workflow_waits_with_a_named_reason"],
+                        "test_runtime_unsupported_update.BrokeredProviderReadinessTests."
+                        "test_forced_interruption_constants_and_methods_are_removed",
+                        "test_runtime_unsupported_update.BrokeredProviderReadinessTests."
+                        "test_uninterrupted_readiness_transfers_all_five_brokered_providers_including_muse_workflows",
+                        "test_runtime_unsupported_update.BrokeredProviderReadinessTests."
+                        "test_unbrokered_active_provider_defers_handover_without_interrupting_turn",
+                        "test_runtime_unsupported_update.BrokeredProviderReadinessTests."
+                        "test_candidate_validation_failure_rejects_update_without_pausing_work"],
                        cwd=fixtures, env=environment, check=True, timeout=60)
         result["codex_provider_relaunch"] = True
         result["legacy_watchdog_approval_recovery"] = True
-        result["coordinator_owned_provider_update"] = ["kimi", "antigravity", "muse"]
+        result["coordinator_owned_provider_update"] = ["codex", "claude", "kimi", "antigravity", "muse"]
         with subprocess.Popen([str(python), "-u", str(resources / "backend.py")], cwd=home,
                               env=environment, stdin=subprocess.PIPE,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:

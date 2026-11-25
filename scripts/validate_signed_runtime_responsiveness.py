@@ -193,38 +193,77 @@ def copy_saved_histories(snapshot, database, root, *, manifest_thread=None):
     refs = []
     with closing(sqlite3.connect(snapshot.resolve(strict=True).as_uri() + "?mode=ro", uri=True)) as source:
         source.execute("PRAGMA query_only=ON")
-        legacy = [
-            r[0]
-            for r in source.execute(
-                """
-            SELECT h.thread_id FROM browser_history h JOIN browser_sessions b USING(thread_id)
-            WHERE b.archived=0 AND octet_length(h.history_json) BETWEEN 10485760 AND 33554432
-            ORDER BY b.updated_at DESC LIMIT 3"""
-            )
-        ]
+        has_browser_history = bool(
+            source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_history'").fetchone()
+        )
+        has_thread_turns = bool(
+            source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_turns'").fetchone()
+        )
+        legacy = (
+            [
+                r[0]
+                for r in source.execute(
+                    """
+                SELECT h.thread_id FROM browser_history h JOIN browser_sessions b USING(thread_id)
+                WHERE b.archived=0 AND length(CAST(h.history_json AS BLOB)) BETWEEN 10485760 AND 33554432
+                ORDER BY b.updated_at DESC LIMIT 3"""
+                )
+            ]
+            if has_browser_history
+            else []
+        )
         ids = legacy + ([manifest_thread] if manifest_thread else []) + [
             r[0]
             for r in source.execute(
                 "SELECT thread_id FROM browser_sessions WHERE archived=0 ORDER BY updated_at DESC LIMIT 200"
             )
         ]
+        from agent_coord.transcript_store import thread_directory as transcript_directory_for
+
         for source_id in dict.fromkeys(ids):
-            row = source.execute(
-                "SELECT history_json FROM browser_history WHERE thread_id=?", (source_id,)
-            ).fetchone()
-            if not row:
+            row = (
+                source.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (source_id,)).fetchone()
+                if has_browser_history
+                else None
+            )
+            stored = None
+            if row:
+                stored = json.loads(row[0])
+                storage_format = "manifest" if history.MARKER in stored else "legacy"
+                if refs and refs[0]["size_band"] == "large":
+                    if stored.get("layout") != "turns" or storage_format != "manifest":
+                        continue
+                    if manifest_thread and source_id != manifest_thread:
+                        continue
+                    archive = history._documents(source, [stored["root"]])[0]
+                    if len(archive["turns"]) < MIN_ARCHIVE_TURNS:
+                        continue
+                raw = history.decode_history(row[0], db=source) if storage_format == "manifest" else stored
+            elif has_thread_turns:
+                turn_rows = source.execute(
+                    "SELECT full_offset, full_length FROM thread_turns WHERE thread_id=? ORDER BY turn_seq ASC",
+                    (source_id,),
+                ).fetchall()
+                if not turn_rows:
+                    continue
+                tdir = transcript_directory_for(snapshot.resolve(strict=True), source_id)
+                full_file = tdir / "turns.full.jsonl"
+                if not full_file.is_file():
+                    continue
+                meta_file = tdir / "meta.json"
+                meta_obj = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else {}
+                loaded_turns = []
+                fd = os.open(full_file, os.O_RDONLY)
+                try:
+                    for full_off, full_len in turn_rows:
+                        chunk = os.pread(fd, int(full_len), int(full_off))
+                        loaded_turns.append(json.loads(chunk.decode("utf-8", "surrogatepass")))
+                finally:
+                    os.close(fd)
+                raw = {**(meta_obj if isinstance(meta_obj, dict) else {}), "id": source_id, "turns": loaded_turns}
+                storage_format = "transcript"
+            else:
                 continue
-            stored = json.loads(row[0])
-            storage_format = "manifest" if history.MARKER in stored else "legacy"
-            if refs and refs[0]["size_band"] == "large":
-                if stored.get("layout") != "turns" or storage_format != "manifest":
-                    continue
-                if manifest_thread and source_id != manifest_thread:
-                    continue
-                archive = history._documents(source, [stored["root"]])[0]
-                if len(archive["turns"]) < MIN_ARCHIVE_TURNS:
-                    continue
-            raw = history.decode_history(row[0], db=source) if storage_format == "manifest" else stored
             turns = raw.get("turns") or []
             if len(turns) < 3:
                 continue
@@ -239,10 +278,15 @@ def copy_saved_histories(snapshot, database, root, *, manifest_thread=None):
             if not band or any(r["size_band"] == band for r in refs):
                 continue
             items = sum(len(t.get("items", ())) for t in turns)
-            if band == "medium" and (storage_format != "manifest" or stored.get("layout") != "turns"
-                    or len(turns) < MIN_ARCHIVE_TURNS or items < MIN_ARCHIVE_ITEMS
-                    or manifest_thread and source_id != manifest_thread):
-                continue
+            if band == "medium":
+                if storage_format == "manifest" and stored.get("layout") != "turns":
+                    continue
+                if storage_format not in {"manifest", "transcript"}:
+                    continue
+                if len(turns) < MIN_ARCHIVE_TURNS or items < MIN_ARCHIVE_ITEMS:
+                    continue
+                if manifest_thread and source_id != manifest_thread:
+                    continue
             identity = str(uuid.uuid5(uuid.NAMESPACE_OID, "signed-gate-" + band))
             safe = {"id": identity, "cwd": str(root), "turns": redact(turns)}
             for turn in safe["turns"]:
@@ -259,7 +303,7 @@ def copy_saved_histories(snapshot, database, root, *, manifest_thread=None):
                     "INSERT INTO browser_sessions(thread_id,cwd,name,created_at,updated_at) VALUES(?,?,?,?,?)",
                     (identity, str(root), name, time.time(), time.time()),
                 )
-            if storage_format == "manifest":
+            if storage_format in {"manifest", "transcript"}:
                 prepared = history.prepare_history(safe)
                 history.stage_history(store, prepared)
                 with store._connection() as db:

@@ -307,6 +307,38 @@ class TranscriptStoreTests(unittest.TestCase):
         second = migrate_database(db_path)
         self.assertEqual(second["threads_migrated"], 0)
 
+    def test_duplicate_turn_ids_preserve_every_turn_across_save_and_migration(self):
+        db_path = self.root / "duplicate-turn-ids.sqlite3"
+        turns = []
+        for idx in range(12):
+            turn = _make_turn(idx, tool_chars=600)
+            turn["id"] = f"colliding-{idx % 4}"
+            turns.append(turn)
+        history = {"id": "dup-thread", "turns": turns}
+
+        with sqlite3.connect(db_path) as db:
+            db.executescript("""
+                CREATE TABLE browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL);
+            """)
+            db.execute("INSERT INTO browser_history VALUES (?, ?)", ("dup-thread", json.dumps(history)))
+
+        report = migrate_database(db_path)
+        self.assertEqual(report["threads_migrated"], 1)
+        self.assertEqual(report["turns_migrated"], 12)
+
+        store = CoordinationStore(db_path)
+        try:
+            full = read_history(store, "dup-thread")
+            self.assertEqual(len(full["turns"]), 12)
+            self.assertEqual(full["turns"], turns)
+            window = store.transcripts.read_window("dup-thread", limit=5)
+            self.assertEqual(len(window["turns"]), 5)
+            self.assertEqual(window["earlierTurns"], 7)
+        finally:
+            store.transcripts.close()
+            store.search_store.close()
+            store.close_idle_connections()
+
 
 if __name__ == "__main__":
     unittest.main()

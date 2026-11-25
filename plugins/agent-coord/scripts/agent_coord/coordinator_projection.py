@@ -11,12 +11,14 @@ cursor watermark), always serializing outside ``sessions.lock``.
 """
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterator
 import copy
 import hashlib
 import json
 import logging
+import os
+from pathlib import Path
 import sqlite3
 import threading
 import time
@@ -126,11 +128,18 @@ def unpack(value, texts=None):
             return {_unpack_hashable(k, texts): unpack(v, texts) for k, v in value["$map"]}
         if "$set" in value:
             return {_unpack_hashable(v, texts) for v in value["$set"]}
-        if "$text" in value and texts is not None:
+        if "$text" in value:
             reference = value["$text"]
-            if isinstance(reference, list):
-                return "".join(texts[digest] for digest in reference)
-            return texts[reference]
+            if isinstance(reference, dict) and isinstance(reference.get("path"), str):
+                raw = Path(reference["path"]).read_bytes()
+                expected = reference.get("sha256")
+                if expected and hashlib.sha256(raw).hexdigest() != expected:
+                    raise TransportError("Saved coordinator external payload failed integrity verification.")
+                return raw.decode("utf-8", "surrogatepass")
+            if texts is not None:
+                if isinstance(reference, list):
+                    return "".join(texts[digest] for digest in reference)
+                return texts[reference]
         raise ValueError("Unknown coordinator state representation")
     return value
 
@@ -191,6 +200,9 @@ class CoordinatorProjection:
         self._publication_lock = threading.Lock()
         self._pending_publications: list[tuple[int, str]] = []
         self._last_publication_flush = time.monotonic()
+        self._external_texts_lock = threading.Lock()
+        self._external_texts: OrderedDict[int, tuple[str, dict]] = OrderedDict()
+        self._active_blob_names: set[str] = set()
         with self.store._connection() as db:
             db.execute(
                 """CREATE TABLE IF NOT EXISTS coordinator_projection (
@@ -241,11 +253,24 @@ class CoordinatorProjection:
                 for name, entry in self.channels.items()
             }
         with sessions.claude.lock:
-            claude = {
-                name: copy.deepcopy(getattr(sessions.claude, name))
-                for name in CLAUDE_FIELDS
-                if name != "completed"
-            }
+            claude = {}
+            for name in CLAUDE_FIELDS:
+                if name == "completed":
+                    continue
+                if durable and name == "blocks":
+                    claude["blocks"] = {
+                        identity: {
+                            index: (
+                                {"id": item["id"]}
+                                if isinstance(item, dict) and "id" in item
+                                else copy.deepcopy(item)
+                            )
+                            for index, item in blocks.items()
+                        }
+                        for identity, blocks in sessions.claude.blocks.items()
+                    }
+                else:
+                    claude[name] = copy.deepcopy(getattr(sessions.claude, name))
             claude["completed"] = {
                 identity: copy.deepcopy(turn)
                 for identity, turn in sessions.claude.completed.items()
@@ -332,6 +357,35 @@ class CoordinatorProjection:
                     self.channels[channel]["closed"] = entry.get("closed", False)
                     self.channels[channel]["process"].returncode = entry.get("returncode")
 
+    def _encode_large_text(self, value: str) -> dict[str, str]:
+        """Store >= 16 KB strings once in transcripts/_projection/ so SQLite checkpoints stay tiny."""
+        key = id(value)
+        with self._external_texts_lock:
+            cached = self._external_texts.get(key)
+            if cached is not None and cached[0] is value and Path(cached[1]["path"]).is_file():
+                self._external_texts.move_to_end(key)
+                return cached[1]
+        raw = value.encode("utf-8", "surrogatepass")
+        digest = hashlib.sha256(raw).hexdigest()
+        blob_dir = Path(self.store.database_path).expanduser().resolve().parent / "transcripts" / "_projection"
+        blob_dir.mkdir(parents=True, exist_ok=True)
+        blob_path = blob_dir / f"{digest}.blob"
+        if not blob_path.is_file():
+            temp_path = blob_dir / f"{digest}.{uuid.uuid4().hex}.tmp"
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, raw)
+            finally:
+                os.close(fd)
+            os.replace(temp_path, blob_path)
+        ref = {"path": str(blob_path), "sha256": digest}
+        with self._external_texts_lock:
+            self._external_texts[key] = (value, ref)
+            self._external_texts.move_to_end(key)
+            while len(self._external_texts) > 64:
+                self._external_texts.popitem(last=False)
+        return ref
+
     def _encode_checkpoint(self, *, inline: bool = True, pending_plans=()):
         """Build serialized projection bytes completely outside sessions.lock."""
         del inline
@@ -352,9 +406,17 @@ class CoordinatorProjection:
                 )
                 if saved == completed["status"]:
                     completions[identity] = {turn_id: completed["status"]}
+        referenced_blobs: set[str] = set()
+
+        def record_text(value: str) -> dict[str, str]:
+            ref = self._encode_large_text(value)
+            referenced_blobs.add(Path(ref["path"]).name)
+            return ref
+
         snapshot = self.state(durable=True, published_completions=completions)
-        packed = pack(snapshot)
+        packed = pack(snapshot, encode_text=record_text)
         encoded = zlib.compress(json.dumps(packed, separators=(",", ":")).encode("utf-8"), level=1)
+        self._pending_blob_names = referenced_blobs
         return completions, encoded
 
     def load(self):
@@ -540,6 +602,20 @@ class CoordinatorProjection:
         self.durable_cursor = cursor
         self._dirty_cursor = False
         self._last_watermark = time.monotonic()
+        keep = getattr(self, "_pending_blob_names", None)
+        if keep is not None:
+            self._active_blob_names = set(keep)
+            blob_dir = Path(self.store.database_path).expanduser().resolve().parent / "transcripts" / "_projection"
+            if blob_dir.is_dir():
+                try:
+                    for entry in os.scandir(blob_dir):
+                        if entry.name.endswith(".blob") and entry.name not in keep:
+                            try:
+                                os.unlink(entry.path)
+                            except OSError:
+                                pass
+                except OSError:
+                    pass
 
     def publication(self, event):
         value = (event["seq"], json.dumps(event))
@@ -653,6 +729,11 @@ class CoordinatorProjection:
                 ).rowcount
                 if not updated:
                     self._save(db, encoded, target_cursor)
+                db.execute(
+                    """DELETE FROM coordinator_commands
+                       WHERE operation = 'write' AND outcome = 'written'
+                         AND rowid <= COALESCE((SELECT MAX(rowid) - 2000 FROM coordinator_commands), 0)"""
+                )
             self._finish_checkpoint(completions, target_cursor)
         with self.store._writer.measure_request("provider.acknowledge_events"):
             self.client.call("acknowledge_events", cursor=self.durable_cursor, retain_after=self.durable_cursor)
@@ -985,7 +1066,11 @@ class CoordinatorProjection:
         if tid and tid in self.sessions.loaded and tid not in self.sessions.histories:
             self.sessions._load_history_unlocked(tid)
 
-        before = self.state()
+        before = self.state(durable=True)
+        with self.sessions.lock:
+            before_events = list(self.sessions.events)
+            before_has_tid = tid in self.sessions.histories if tid else False
+            before_tid_history = copy.deepcopy(self.sessions.histories[tid]) if before_has_tid else None
         try:
             with capture_writes() as writes:
                 self.in_event.active = True
@@ -1081,7 +1166,14 @@ class CoordinatorProjection:
             commands = list(self.in_event.commands)
             completion_callbacks = list(self.in_event.completions)
         except Exception:
+            before["events"] = before_events
             self.restore(before)
+            if tid:
+                with self.sessions.lock:
+                    if before_has_tid:
+                        self.sessions.histories[tid] = before_tid_history
+                    else:
+                        self.sessions.histories.pop(tid, None)
             raise
         finally:
             self.unloaded_observation = None

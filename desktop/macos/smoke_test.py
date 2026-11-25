@@ -77,6 +77,8 @@ def observe_single_origin_across_update(app, address: Path, smoke_directory: Pat
                 staged = json.loads(subprocess.check_output(
                     [python_exe, "-B", str(candidate / "backend.py"), "--runtime-bootstrap",
                      "--resources", str(candidate), "--db", str(database), "--runtime-confirm-updates"],
+                    env=dict(os.environ, PYTHONPATH=str(candidate / "backend"),
+                             PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1"),
                     text=True, timeout=30,
                 ))
                 desktop_runtime.control(
