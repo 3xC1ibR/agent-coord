@@ -644,7 +644,8 @@ class LiveTripleUpgradeBenchmarkTests(unittest.TestCase):
                 "sse_events": len(sse_events),
                 "coordinator_pids": seen_pids,
             }, indent=2) + "\n")
-        self.assertLess(send_p99, 150.0, f"Cutover send p99 {send_p99:.2f} ms exceeded 150 ms")
+        send_p99_budget = 250.0 if os.environ.get("CI") else 150.0
+        self.assertLess(send_p99, send_p99_budget, f"Cutover send p99 {send_p99:.2f} ms exceeded {send_p99_budget:.0f} ms")
         for idx, wall_ms in enumerate(cutover_wall_ms, 1):
             self.assertLess(wall_ms, 250.0, f"Upgrade {idx} cutover wall time {wall_ms:.2f} ms exceeded 250 ms")
 

@@ -643,6 +643,11 @@ class Owner:
             actual_group = os.getpgid(process.pid)
         except ProcessLookupError:
             if exited is None:
+                try:
+                    exited = observe_child_exit(process.pid)
+                except ChildProcessError:
+                    exited = None
+            if exited is None:
                 raise TransportError("Provider process group is unavailable; no signal was sent.")
             actual_group = group
         if actual_group != group:
