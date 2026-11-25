@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from test_codex_app_server import BrowserSessions, CoordinationStore, FakeCodex
 from test_browser_providers import claude_factory
+from test_antigravity import FakeACP
 from agent_coord.app_control import AppControl, AppControlWorker
 from agent_coord import supervision
 from agent_coord.app_agent_failures import notify_agent_failure, process_failure_followups, turn_failure_message
@@ -66,6 +67,58 @@ class AppAgentFailureTests(unittest.TestCase):
         if persist:
             self.persisted(child)
         return event
+
+    def create_with_journal(self, client, notification):
+        identified = self.control.identified
+
+        def record_startup(request_id, child):
+            identified(request_id, child)
+            if client == "codex":
+                # A real thread/read returns idle with no native turns at creation.
+                self.sessions.rpc.threads[child]["status"] = {"type": "idle"}
+                notification["params"]["threadId"] = child
+            self.store.transcripts.append_live(child, {"stream": "stdout", "data": json.dumps(notification)})
+
+        with patch.object(self.control, "identified", record_startup):
+            return self.create(client=client)
+
+    def test_initial_assignment_starts_once_after_provider_startup_notifications(self):
+        startup = {
+            "codex": {"method": "mcpServer/startupStatus/updated",
+                      "params": {"name": "agent-coord", "status": "ready"}},
+            "antigravity": {"method": "session/update", "params": {
+                "update": {"sessionUpdate": "available_commands_update", "availableCommands": []}}},
+        }
+        with patch.object(Path, "home", return_value=self.root), \
+                patch.object(self.sessions.antigravity, "connection_factory", FakeACP):
+            for client, notification in startup.items():
+                with self.subTest(client=client):
+                    child = self.create_with_journal(client, notification)
+                    self.dispatch(child)
+                    self.dispatch(child)
+                    turns = self.sessions.history_snapshot(child)["turns"]
+                    self.assertEqual(len(turns), 1)
+                    self.assertEqual(turns[0]["id"], self.sessions.active.get(child))
+                    self.assertIn("Implement the requested change.", turns[0]["items"][0]["content"][0]["text"])
+                    self.assertFalse(self.sessions.work_thread(child)["wake_paused"])
+                    self.assertEqual(self.reports(), [])
+
+    def test_initial_assignment_pauses_after_recovered_turn_activity(self):
+        # A provider can lose a real turn before it supplies a durable turn id.
+        with patch.object(Path, "home", return_value=self.root), \
+                patch.object(self.sessions.antigravity, "connection_factory", FakeACP):
+            child = self.create_with_journal("antigravity", {"method": "session/update", "params": {
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Working"}}}})
+            self.dispatch(child)
+            self.dispatch(child)
+            detail = self.sessions.read(child)
+            self.assertFalse(detail["running"])
+            self.assertEqual(detail["work_thread"]["wake_pause_kind"], "failure")
+            report, = self.reports()
+            failure = json.loads(report["body"])
+            self.assertEqual((failure["event"], failure["stage"], failure["turn_id"]),
+                             ("app_agent_failed", "turn", "recovered-live-turn"))
+            self.assertFalse(any(method == "session/prompt" for method, _ in self.sessions.antigravity.connections[child].calls))
 
     def test_limits_and_other_errors_notify_creator_without_reply_contract(self):
         for error in ("5 hour usage limit reached; resets at 6pm", "Insufficient credits", "Provider crashed"):
