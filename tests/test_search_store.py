@@ -47,7 +47,7 @@ class SearchStoreTests(unittest.TestCase):
         )
         self.assertTrue(self.search.flush())
 
-        with closing(sqlite3.connect(self.search.path)) as db:
+        with closing(self.search._open_writer_connection()) as db:
             journal = db.execute("PRAGMA journal_mode").fetchone()[0]
             sync = db.execute("PRAGMA synchronous").fetchone()[0]
             logical_tables = {

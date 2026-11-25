@@ -172,6 +172,12 @@ class SearchStore:
                 self._worker_holder[0] = worker
                 worker.start()
 
+    def _open_writer_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=5.0)
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     def _run_writer(self) -> None:
         writer_conn: sqlite3.Connection | None = None
         writer_identity: tuple[int, int] | None = None
@@ -199,9 +205,7 @@ class SearchStore:
                             if writer_conn is None or writer_identity != cur_identity:
                                 if writer_conn is not None:
                                     writer_conn.close()
-                                writer_conn = sqlite3.connect(self.path, timeout=5.0)
-                                writer_conn.execute("PRAGMA synchronous = NORMAL")
-                                writer_conn.execute("PRAGMA busy_timeout = 5000")
+                                writer_conn = self._open_writer_connection()
                                 writer_identity = cur_identity
                             with writer_conn:
                                 for item in batch:
@@ -370,22 +374,19 @@ class SearchStore:
 
     def index_turns_sync(self, thread_id: str, turn_pairs: list[tuple[int, dict]]) -> None:
         self._ensure_initialized()
-        with self._write_lock, closing(sqlite3.connect(self.path, timeout=5.0)) as db:
-            db.execute("PRAGMA busy_timeout = 5000")
+        with self._write_lock, closing(self._open_writer_connection()) as db:
             with db:
                 self._upsert_turns_on_connection(db, thread_id, turn_pairs)
 
     def index_metadata_sync(self, thread_id: str, title: str = "", domain: str = "", body: str = "") -> None:
         self._ensure_initialized()
-        with self._write_lock, closing(sqlite3.connect(self.path, timeout=5.0)) as db:
-            db.execute("PRAGMA busy_timeout = 5000")
+        with self._write_lock, closing(self._open_writer_connection()) as db:
             with db:
                 self._upsert_metadata_on_connection(db, thread_id, title, domain, body)
 
     def delete_thread_sync(self, thread_id: str) -> None:
         self._ensure_initialized()
-        with self._write_lock, closing(sqlite3.connect(self.path, timeout=5.0)) as db:
-            db.execute("PRAGMA busy_timeout = 5000")
+        with self._write_lock, closing(self._open_writer_connection()) as db:
             with db:
                 self._delete_thread_on_connection(db, thread_id)
 
