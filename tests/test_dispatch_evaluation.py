@@ -30,7 +30,10 @@ class EvaluationTests(unittest.TestCase):
         def classifier(state, config, policy):
             # The evidence must survive even if the process dies inside the network call.
             with self.store._connection() as db:
-                saved = json.loads(db.execute("SELECT evidence_json FROM dispatch_attempts WHERE request_id=?", (identity,)).fetchone()[0])
+                saved = json.loads(db.execute(
+                    "SELECT evidence_json FROM dispatch_attempts WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                    (identity,),
+                ).fetchone()[0])
             self.assertEqual(saved["input"]["state"], state)
             self.assertNotIn("retrieval", state)  # logging must not change the Jev prompt
             if crash:
