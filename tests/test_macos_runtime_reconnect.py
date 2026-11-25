@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,9 +15,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "native runtime test requires macOS")
 class NativeRuntimeReconnectTests(unittest.TestCase):
-    def test_same_owner_recovers_after_poll_failure_and_manual_retry(self):
+    def test_same_owner_recovers_after_urlsession_health_poll_failure_and_manual_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+
+            class HealthHandler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    if self.path != "/_runtime/health":
+                        self.send_error(404)
+                        return
+                    if (root / "unavailable").exists():
+                        raw = json.dumps({"status": "unavailable"}).encode()
+                        self.send_response(503)
+                    else:
+                        raw = json.dumps({
+                            "status": "serving",
+                            "url": f"http://127.0.0.1:{self.server.server_port}/",
+                            "pid": 123,
+                            "instance": "same-owner",
+                            "payload": str(root),
+                        }).encode()
+                        self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+
+                def log_message(self, *_args):
+                    pass
+
+            health_server = ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
+            health_server.daemon_threads = True
+            server_thread = threading.Thread(target=health_server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+            server_thread.start()
+            self.addCleanup(health_server.server_close)
+            self.addCleanup(server_thread.join, 2)
+            self.addCleanup(health_server.shutdown)
+            edge_url = f"http://127.0.0.1:{health_server.server_port}/"
+
             source = root / "RuntimeHost.swift"
             source.write_text((ROOT / "desktop/macos/RuntimeHost.swift").read_text().replace(
                 "private func poll(", "func poll(").replace("private var polling", "var polling"))
@@ -23,13 +60,13 @@ class NativeRuntimeReconnectTests(unittest.TestCase):
                 "python": sys.executable, "runtime_protocol": 1,
                 "runtime_schema_min": 1, "runtime_schema_max": 2,
             }))
-            (root / "backend.py").write_text('''import json, pathlib, sys
+            (root / "backend.py").write_text(f'''import json, pathlib, sys
 root = pathlib.Path(__file__).parent
 if (root / "unavailable").exists():
     print("The runtime owner is unavailable. Refusing a second owner.", file=sys.stderr)
     raise SystemExit(1)
-print(json.dumps({"status": "serving", "url": "http://127.0.0.1:12345/",
-    "pid": 123, "instance": "same-owner", "payload": str(root)}))
+print(json.dumps({{"status": "serving", "url": {edge_url!r},
+    "pid": 123, "instance": "same-owner", "payload": str(root)}}))
 ''')
             main = root / "main.swift"
             main.write_text(r'''import Foundation
@@ -49,7 +86,6 @@ func wait(_ condition: () -> Bool) {
 }
 try backend.start(resources: root, configuration: config, database: root.appendingPathComponent("state.sqlite3").path)
 wait { ready == 1 }
-backend.detach()
 let unavailable = root.appendingPathComponent("unavailable")
 func disconnect() throws {
     try Data().write(to: unavailable)
@@ -62,7 +98,7 @@ func disconnect() throws {
 }
 try disconnect()
 precondition(failures == 1 && ready == 1)
-// The existing poll timer must restore the interface for the same owner.
+// The URLSession /_runtime/health poll must restore the interface for the same owner.
 backend.poll()
 wait { !backend.polling }
 precondition(ready == 2 && backend.process?.processIdentifier == 123,
@@ -86,3 +122,7 @@ precondition(backend.process?.processIdentifier == 123)
             self.assertEqual(build.returncode, 0, build.stderr)
             result = subprocess.run([str(binary), str(root)], capture_output=True, text=True, timeout=45)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

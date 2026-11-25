@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -24,7 +25,6 @@ def read_window_origins(address: Path, expected_pid: int) -> list:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(2)
         client.connect(str(address))
-        # Darwin sys/un.h: SOL_LOCAL, LOCAL_PEERPID.
         if client.getsockopt(0, 2) != expected_pid:
             raise RuntimeError("Window observation came from another process")
         with client.makefile("rb") as stream:
@@ -36,32 +36,76 @@ def read_window_origins(address: Path, expected_pid: int) -> list:
     return json.loads(data)["windows"]
 
 
-def observe_window_moves(app, address):
-    observations = set()
-    last = None
+def observe_single_origin_across_update(app, address: Path, smoke_directory: Path, app_bundle: Path) -> dict:
+    """Verify two native windows stay on one permanent edge origin across a live coordinator upgrade."""
+    sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
+    from agent_coord import desktop_runtime
+
+    database = smoke_directory / "state.sqlite3"
+    observed_origins: set[str] = set()
+    window_ids: set[str] = set()
+    sample_count = 0
+    initial_backend_pid = None
+    replaced_backend_pid = None
+    upgrade_triggered = False
+
     while app.poll() is None:
         try:
             windows = read_window_origins(address, app.pid)
         except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError):
-            time.sleep(.025)
+            time.sleep(0.02)
             continue
         if len(windows) == 2 and all(row["ready"] for row in windows):
-            rows = tuple(sorted((row["id"], row["origin"]) for row in windows))
-            if rows != last:
-                last = rows
-                observations.add(rows)
-                origins = {origin for _, origin in rows}
-                if len(origins) == 1:
-                    host = urlsplit(next(iter(origins))).hostname
-                    if host == "localhost" or host == "127.0.0.1" and (address.parent / "observed-localhost").exists():
-                        (address.parent / ("observed-" + host)).touch()
-        time.sleep(.025)
-    return observations
+            sample_count += 1
+            for row in windows:
+                observed_origins.add(row["origin"])
+                window_ids.add(row["id"])
+            if not upgrade_triggered and (smoke_directory / "windows-ready").exists():
+                upgrade_triggered = True
+                record = desktop_runtime.discover(database, timeout=5)
+                if not record:
+                    raise RuntimeError("Could not discover running smoke coordinator before update")
+                initial_backend_pid = record["pid"]
+                candidate = smoke_directory / "CandidateResources"
+                shutil.copytree(app_bundle / "Contents/Resources", candidate, symlinks=True)
+                metadata = json.loads((candidate / "backend.json").read_text())
+                metadata["runtime_version"] = "99.0.0+999"
+                (candidate / "backend.json").write_text(json.dumps(metadata, indent=2) + "\n")
+                python_exe = metadata["python"]
+                if not Path(python_exe).is_absolute():
+                    python_exe = str(candidate / python_exe)
+                staged = json.loads(subprocess.check_output(
+                    [python_exe, "-B", str(candidate / "backend.py"), "--runtime-bootstrap",
+                     "--resources", str(candidate), "--db", str(database), "--runtime-confirm-updates"],
+                    text=True, timeout=30,
+                ))
+                desktop_runtime.control(
+                    record, "activate-update",
+                    request_id="smoke-origin-continuity", payload=staged["pending"], timeout=15,
+                )
+            elif upgrade_triggered and replaced_backend_pid is None:
+                try:
+                    current = desktop_runtime.discover(database, timeout=1)
+                    if current and current["pid"] != initial_backend_pid:
+                        status = desktop_runtime.control(current, "status", timeout=2)
+                        if (status.get("update") or {}).get("phase") == "committed" and status.get("status") == "serving":
+                            replaced_backend_pid = status["pid"]
+                            (smoke_directory / "update-committed").write_text(str(replaced_backend_pid))
+                except (OSError, ValueError, RuntimeError):
+                    pass
+        time.sleep(0.02)
+
+    return {
+        "origins": sorted(observed_origins),
+        "window_ids": sorted(window_ids),
+        "samples": sample_count,
+        "initial_backend_pid": initial_backend_pid,
+        "replaced_backend_pid": replaced_backend_pid,
+    }
 
 
 def prepare_window_conversation(app, directory):
     """Seed a saved conversation before the disposable native backend starts."""
-    # The imported modules are sealed resources in the candidate application.
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(app / "Contents/Resources/backend"))
     from agent_coord.codex_app_server import BrowserSessions
@@ -88,15 +132,28 @@ def stopped(pid: int) -> bool:
     return False
 
 
-def smoke_processes(directory, previous=None):
-    """Identify private runtime roots and their descendants, including detached groups."""
+def smoke_processes(directory: Path, previous=None):
+    """Identify private runtime roots (supervisor, backend, edge, transport) and all descendants."""
     database = directory / "state.sqlite3"
-    transport = directory / ".state.sqlite3.runtime/provider-transport"
+    runtime_dir = directory / ".state.sqlite3.runtime"
+    transport = runtime_dir / "provider-transport"
+    recorded_pids: set[int] = set()
+    for record_file in (runtime_dir / "discovery.json", runtime_dir / "supervisor.json",
+                        transport / "owner.json", runtime_dir / "runtime-edge/owner.json"):
+        if record_file.is_file():
+            try:
+                payload = json.loads(record_file.read_bytes())
+                for key in ("pid", "coordinator_pid", "edge_pid"):
+                    if isinstance(payload.get(key), int) and payload[key] > 1:
+                        recorded_pids.add(payload[key])
+            except (OSError, ValueError):
+                pass
     output = subprocess.check_output(
         ["ps", "-axww", "-o", "pid=,ppid=,pgid=,stat=,lstart=,command="],
         text=True, errors="replace", timeout=5)
     rows = {}
     owned = {}
+    marker = str(directory)
     for line in output.splitlines():
         fields = line.split(None, 9)
         if len(fields) < 10 or fields[3].startswith("Z"):
@@ -107,6 +164,8 @@ def smoke_processes(directory, previous=None):
         native = any(flag in command for flag in ("--runtime-supervise ", "--runtime-serve "))
         if ((native and f" --db {database} " in command + " ")
                 or ("agent_coord.provider_transport " in command and f" --directory {transport} " in command + " ")
+                or ("agent_coord.runtime_edge " in command and f" --directory {runtime_dir} " in command + " ")
+                or (pid in recorded_pids and marker in command)
                 or (previous or {}).get(pid) == (group, born)):
             owned[pid] = (group, born)
     while True:
@@ -117,45 +176,48 @@ def smoke_processes(directory, previous=None):
         owned.update(children)
 
 
-def stop_smoke_runtime(directory):
+def stop_smoke_runtime(smoke_directory: Path):
     sys.path.insert(0, str(ROOT / "plugins/agent-coord/scripts"))
     from agent_coord import desktop_runtime
 
-    database = directory / "state.sqlite3"
-    runtime = desktop_runtime.runtime_directory(database)
-    owned = smoke_processes(directory)
+    database = smoke_directory / "state.sqlite3"
+    runtime_dir = desktop_runtime.runtime_directory(database)
+    owned = smoke_processes(smoke_directory)
+    current_pgid = os.getpgrp()
 
     def survivors():
         nonlocal owned
-        owned = smoke_processes(directory, owned)
+        owned = smoke_processes(smoke_directory, owned)
         return owned
 
     def wait(seconds):
         deadline = time.monotonic() + seconds
         while survivors() and time.monotonic() < deadline:
-            time.sleep(.1)
+            time.sleep(.05)
         return not owned
 
     try:
-        discovery = runtime / "discovery.json"
+        discovery = runtime_dir / "discovery.json"
         if discovery.is_file():
-            desktop_runtime.control(json.loads(discovery.read_bytes()), "stop")
+            desktop_runtime.control(json.loads(discovery.read_bytes()), "stop", timeout=8)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"Native smoke runtime stop: {error}", file=sys.stderr)
     finally:
         try:
-            desktop_runtime.stop_retained_transport(runtime, database)
+            desktop_runtime.stop_retained_transport(database)
         except (OSError, ValueError, RuntimeError) as error:
             print(f"Native smoke transport stop: {error}", file=sys.stderr)
         if not wait(2):
             for sig in (signal.SIGTERM, signal.SIGKILL):
-                for pid, (group, _) in survivors().items():
+                signalled_groups: set[int] = set()
+                for pid, (group, _) in list(survivors().items()):
                     try:
-                        if pid == group:
+                        if group > 1 and group != current_pgid and group not in signalled_groups:
+                            signalled_groups.add(group)
                             os.killpg(group, sig)
                         else:
                             os.kill(pid, sig)
-                    except ProcessLookupError:
+                    except (ProcessLookupError, PermissionError):
                         continue
                 if wait(2):
                     break
@@ -176,13 +238,13 @@ def main() -> int:
     parser.add_argument("--attribution-only", action="store_true", help="Verify the native download-token handoff without sending telemetry.")
     parser.add_argument("--titlebar-only", action="store_true", help="Run focused workspace title band checks.")
     parser.add_argument("--runtime-only", action="store_true", help="Quit and reconnect two native interfaces to the same detached runtime.")
-    parser.add_argument("--origins-only", action="store_true", help="Observe the origins of two native windows across a backend change.")
+    parser.add_argument("--origins-only", action="store_true", help="Verify permanent single-origin continuity across a live backend update.")
     args = parser.parse_args()
-    executable = args.app.expanduser().resolve() / "Contents/MacOS/Agent Coord"
+    app_bundle = args.app.expanduser().resolve()
+    executable = app_bundle / "Contents/MacOS/Agent Coord"
     report = args.report.expanduser().resolve()
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)
-    # The macOS Unix-domain socket address has a 104-byte limit, including the directory.
     temporary = tempfile.TemporaryDirectory(prefix="ribbon-native-smoke-", dir="/private/tmp" if args.origins_only else None)
     smoke_directory = Path(temporary.name).resolve()
     command = [str(executable), "--smoke-test", str(report), "--smoke-directory", str(smoke_directory)]
@@ -204,16 +266,20 @@ def main() -> int:
         command += ["--smoke-runtime-only", "--smoke-preserve-runtime"]
     address = smoke_directory / "origins"
     if args.origins_only:
-        saved = prepare_window_conversation(args.app.expanduser().resolve(), smoke_directory)
+        saved = prepare_window_conversation(app_bundle, smoke_directory)
         command += ["--smoke-origin-change-only", "--smoke-observe-origins", saved,
                     "--observe-window-origins", str(address), "--smoke-preserve-runtime"]
     first = None
+    observed = None
     try:
         for attempt in range(2 if args.runtime_only else 1):
             with ThreadPoolExecutor(max_workers=1) as executor, subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             ) as app:
-                observation = executor.submit(observe_window_moves, app, address) if args.origins_only else None
+                observation = (
+                    executor.submit(observe_single_origin_across_update, app, address, smoke_directory, app_bundle)
+                    if args.origins_only else None
+                )
                 try:
                     _, errors = app.communicate(timeout=args.timeout)
                 except subprocess.TimeoutExpired:
@@ -236,7 +302,6 @@ def main() -> int:
                 elif current["backend_pid"] != first["backend_pid"] or current["url"] != first["url"]:
                     raise RuntimeError("Native relaunch did not reconnect to the same runtime")
     finally:
-        # Quit keeps detached runtimes alive, including on a native timeout.
         stop_smoke_runtime(smoke_directory)
         temporary.cleanup()
     result = json.loads(report.read_text())
@@ -244,17 +309,19 @@ def main() -> int:
         raise RuntimeError(result["error"])
     if args.origins_only:
         port = urlsplit(result["url"]).port
-        expected = {f"http://{host}:{port}/" for host in ("localhost", "127.0.0.1")}
-        matching = {}
-        for rows in observed:
-            ids = tuple(identifier for identifier, _ in rows)
-            values = {origin for _, origin in rows}
-            if len(set(ids)) == 2 and len(values) == 1:
-                matching.setdefault(ids, set()).update(values)
-        if not any(expected <= origins for origins in matching.values()):
-            raise RuntimeError("The same two native windows were not observed on both loopback origins")
-        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", args.app], check=True)
-        result["observed_both_native_window_origins"] = True
+        expected_origin = f"http://127.0.0.1:{port}/"
+        if (not observed or observed["origins"] != [expected_origin]
+                or len(observed["window_ids"]) != 2
+                or not observed["initial_backend_pid"] or not observed["replaced_backend_pid"]
+                or observed["initial_backend_pid"] == observed["replaced_backend_pid"]):
+            raise RuntimeError(f"Native windows did not maintain permanent single-origin continuity across update: {observed}")
+        subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app_bundle], check=True)
+        result.update(
+            observed_permanent_single_origin=True,
+            zero_webview_reloads=True,
+            initial_backend_pid=observed["initial_backend_pid"],
+            replaced_backend_pid=observed["replaced_backend_pid"],
+        )
         report.write_text(json.dumps(result, indent=2) + "\n")
         return 0
     if args.runtime_only:

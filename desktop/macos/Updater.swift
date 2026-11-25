@@ -7,17 +7,14 @@ enum RibbonUpdatePrompt {
     /// How the running backend treats active work during its own replacement.
     enum Continuity {
         case restartsWork
-        case waitsForOtherProviders
-        case pausesOtherProviders
+        case uninterrupted
 
         var disclosure: String {
             switch self {
             case .restartsWork:
                 return "Installing restarts running agents and tools. Eligible conversations continue automatically; approvals and uncertain actions wait for your review."
-            case .waitsForOtherProviders:
-                return "Codex and Claude work keeps running. The update waits for running Kimi, Muse and Antigravity turns to finish. Approvals and uncertain actions wait for your review."
-            case .pausesOtherProviders:
-                return "Codex and Claude work keeps running. Running Kimi, Muse and Antigravity turns pause for the update and continue automatically. Approvals and uncertain actions wait for your review."
+            case .uninterrupted:
+                return "Running conversations and tools continue uninterrupted across the update. Approvals and uncertain actions wait for your review."
             }
         }
     }

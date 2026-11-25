@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Validate and publish a macOS release to R2 using the AWS CLI's S3 API.
+"""Validate, publish candidate artifacts, and promote Sparkle appcasts on R2.
 
 No third-party Python packages are required. Credentials come from the AWS CLI
-environment. Without --publish this only validates local artifacts.
+environment. Without --publish or --promote-only this only validates local artifacts.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import plistlib
-import zipfile
 import os
 from pathlib import Path
+import plistlib
 import re
 import subprocess
 import sys
-import xml.etree.ElementTree as ET
 import tempfile
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 
 
 ARCHITECTURES = ("arm64", "x86_64")
@@ -120,11 +120,13 @@ def release_files(directory: Path, version: str, commit: str, channel: str = "al
             sparkle.verify_signature(archive, update.get("signature", ""), update_public_key)
             with zipfile.ZipFile(archive) as bundle:
                 prefix = "Ribbon Field.app/Contents/"
+
                 def read_config(name):
                     member = bundle.getinfo(prefix + name)
                     if member.file_size > 1024 * 1024:
                         raise ValueError("Oversized update configuration")
                     return bundle.read(member)
+
                 info = plistlib.loads(read_config("Info.plist"))
                 backend = json.loads(read_config("Resources/backend.json"))
                 python = json.loads(read_config("Resources/python-runtime.json"))
@@ -155,8 +157,8 @@ def release_files(directory: Path, version: str, commit: str, channel: str = "al
                     or json.loads(item.findtext("ribbonRuntime", "null")) != update["runtime"]
                     or enclosure is None
                     or enclosure.attrib != {"url": f"{DOWNLOAD_URL}/releases/{version}/{archive.name}",
-                        "length": str(archive.stat().st_size), "type": "application/zip",
-                        ns + "edSignature": update["signature"]}):
+                                            "length": str(archive.stat().st_size), "type": "application/zip",
+                                            ns + "edSignature": update["signature"]}):
                 raise ValueError(f"Update feed metadata mismatch: {feed.name}")
             files.extend((archive, feed, metadata))
             release["updates"][arch] = {**expected, "appcast": feed.name, "archive": archive.name}
@@ -255,29 +257,42 @@ class R2:
 
 
 def verify_download(key: str, path: Path) -> None:
-    # The download host refuses Python's default urllib agent on updates/ (403),
-    # while browsers and Sparkle are served; identify the verifier explicitly.
     request = urllib.request.Request(f"{DOWNLOAD_URL}/{key}", headers={"User-Agent": "Ribbon Field release verifier"})
     with urllib.request.urlopen(request, timeout=120) as response:
         if digest(response) != file_digest(path):
             raise ValueError(f"Public download checksum mismatch: {key}")
 
 
-def publish(files: list[Path], release: dict, r2: R2 | None = None, *, promote_current: bool = False,
-            receipt_wait_seconds: int = 0) -> None:
-    release_workload_receipt.require_release_receipts(release, receipt_wait_seconds)
+def promote_release(files: list[Path], release: dict, r2: R2 | None = None, *, require_receipts: bool = False) -> None:
+    """Promote an already-published candidate release in seconds."""
+    if require_receipts:
+        release_workload_receipt.require_release_receipts(release, 0)
+    if r2 is None:
+        r2 = R2()
+    prefix = f"releases/{release['version']}/"
+    with tempfile.TemporaryDirectory(prefix="ribbon-promote-") as directory:
+        manifest = Path(directory) / "release.json"
+        manifest.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n")
+        verify_download(prefix + "release.json", manifest)
+        for arch, update in release.get("updates", {}).items():
+            feed = next(path for path in files if path.name == update["appcast"])
+            key = f"updates/{release['channel']}/{arch}.xml"
+            r2.promote_feed(key, feed)
+            verify_download(key, feed)
+        r2.promote(manifest)
+        verify_download(CURRENT_KEY, manifest)
+
+
+def publish(files: list[Path], release: dict, r2: R2 | None = None, *, promote_current: bool = False) -> None:
+    """Immediately upload verified candidate artifacts to R2 without blocking on operator receipts."""
     if r2 is None:
         r2 = R2()
     prefix = f"releases/{release['version']}/"
     with tempfile.TemporaryDirectory(prefix="ribbon-release-") as directory:
         manifest = Path(directory) / "release.json"
         manifest.write_text(json.dumps(release, indent=2, sort_keys=True) + "\n")
-        # Detect all conflicts before uploading anything. If a previous attempt
-        # stopped partway through, identical objects can be safely reused.
         objects = [(prefix + path.name, path) for path in [*files, manifest]]
         existing = {key: r2.exists_identical(key, path) for key, path in objects}
-        # release.json is a completion marker: upload it only after every public
-        # artifact has been downloaded again and its checksum verified.
         for key, path in objects:
             if not existing[key]:
                 r2.put(key, path)
@@ -298,20 +313,26 @@ def main() -> None:
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--channel", choices=("alpha", "beta", "stable"), default="alpha")
-    parser.add_argument("--publish", action="store_true", help="Upload verified files to the public R2 bucket")
-    parser.add_argument("--promote-current", action="store_true", help="Advance the website release after every artifact verifies")
+    parser.add_argument("--publish", action="store_true", help="Upload verified candidate files to the public R2 bucket")
+    parser.add_argument("--promote-current", action="store_true", help="Advance the website release and appcast feeds immediately after upload")
+    parser.add_argument("--promote-only", action="store_true", help="Promote an already-published candidate release in R2")
+    parser.add_argument("--require-receipts", action="store_true", help="Require authenticated operator receipts before promotion")
     parser.add_argument("--require-updates", action="store_true", help="Reject releases without signed Sparkle artifacts")
     parser.add_argument("--update-public-key", help="Trusted public key for archive and feed verification")
-    parser.add_argument("--receipt-wait-seconds", type=int, default=0,
-                        help="Seconds to wait for the authenticated operator workload receipts")
     args = parser.parse_args()
     if args.promote_current and not args.publish:
         parser.error("--promote-current requires --publish")
-    files, release = release_files(args.directory, args.version, args.commit, args.channel,
-                                   require_updates=args.require_updates or args.publish, update_public_key=args.update_public_key)
+    if args.promote_only and args.publish:
+        parser.error("--promote-only and --publish are mutually exclusive")
+    files, release = release_files(
+        args.directory, args.version, args.commit, args.channel,
+        require_updates=args.require_updates or args.publish or args.promote_only,
+        update_public_key=args.update_public_key)
     if args.publish:
-        publish(files, release, promote_current=args.promote_current, receipt_wait_seconds=args.receipt_wait_seconds)
-    print(json.dumps({"published": args.publish, **release}, indent=2))
+        publish(files, release, promote_current=args.promote_current)
+    elif args.promote_only:
+        promote_release(files, release, require_receipts=args.require_receipts)
+    print(json.dumps({"published": args.publish, "promoted": args.promote_current or args.promote_only, **release}, indent=2))
 
 
 if __name__ == "__main__":

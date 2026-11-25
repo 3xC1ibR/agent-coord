@@ -196,12 +196,22 @@ class ReleaseWorkloadTests(unittest.TestCase):
                 gate.verify_installer_app(self.candidate, directory/"candidate.dmg", directory)
             self.assertEqual(command.call_args.args[0][:2], ["/usr/bin/hdiutil", "detach"])
 
-    def test_publisher_does_not_touch_storage_on_missing_receipts(self):
-        argv = ["publisher", "--directory", ".", "--version", "1.2.3", "--commit", "a"*40, "--publish"]
-        with mock.patch.object(sys, "argv", argv), \
+    def test_publisher_uploads_candidate_without_receipts_and_gates_promote_only_when_requested(self):
+        publish_argv = ["publisher", "--directory", ".", "--version", "1.2.3", "--commit", "a"*40, "--publish"]
+        with mock.patch.object(sys, "argv", publish_argv), \
              mock.patch.object(publisher, "release_files", return_value=([], self.release)) as validate, \
+             mock.patch.object(gate, "require_release_receipts", side_effect=AssertionError("publish must not block on receipts")), \
+             mock.patch.object(publisher, "publish") as upload, \
+             mock.patch("builtins.print"):
+            publisher.main()
+        self.assertIs(validate.call_args.kwargs["require_updates"], True)
+        upload.assert_called_once()
+
+        promote_argv = ["publisher", "--directory", ".", "--version", "1.2.3", "--commit", "a"*40,
+                        "--promote-only", "--require-receipts"]
+        with mock.patch.object(sys, "argv", promote_argv), \
+             mock.patch.object(publisher, "release_files", return_value=([], self.release)), \
              mock.patch.object(gate, "require_release_receipts", side_effect=ValueError("missing")), \
              mock.patch.object(publisher, "R2") as storage, self.assertRaisesRegex(ValueError, "missing"):
             publisher.main()
-        self.assertIs(validate.call_args.kwargs["require_updates"], True)
         storage.assert_not_called()

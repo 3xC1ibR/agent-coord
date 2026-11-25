@@ -59,10 +59,12 @@ final class Backend {
     private var database: String?
     private var python: URL?
     private var helperResources: URL?
-    private var interactionResources: URL?
-    private var interactionRequestID: String?
-    private(set) var interactionURL: URL?
+    private var edgeOrigin: URL?
     private var lastWebURL: URL?
+    private var cachedPayloadKey: String?
+    private var cachedPayloadConfig: BackendConfiguration?
+    private var cachedPendingPath: String?
+    private var cachedPendingVersion: String?
     private var timer: Timer?
     private var polling = false
     private var starting = false
@@ -71,6 +73,15 @@ final class Backend {
     private var instance: String?
     private var failures = 0
     private let worker = DispatchQueue(label: "com.agentcoord.desktop.runtime")
+    private lazy var healthSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 1.5
+        config.timeoutIntervalForResource = 2.0
+        config.waitsForConnectivity = false
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
 
     init(directory: URL) { logURL = directory.appendingPathComponent("backend.log") }
 
@@ -97,15 +108,13 @@ final class Backend {
               let config = configuration, let database = database else {
             throw Self.failure("The runtime has not been configured.")
         }
-        // The serving predecessor may predate interaction continuity. Its
-        // control helper must never authorize an upgrade around the gateway.
-        let continuity = arguments.contains("--runtime-interaction-continuity")
-        let gatewayHelper = arguments.contains("--runtime-bootstrap") ? self.resources : (interactionResources ?? self.resources)
-        let resources = continuity ? (gatewayHelper ?? retained) : retained
-        let python = continuity ? try JSONDecoder().decode(BackendConfiguration.self,
-            from: Data(contentsOf: resources.appendingPathComponent("backend.json"))).pythonURL(resources: resources) : defaultPython
+        let resources = arguments.contains("--runtime-bootstrap") ? (self.resources ?? retained) : retained
+        let executable = arguments.contains("--runtime-bootstrap")
+            ? try JSONDecoder().decode(BackendConfiguration.self,
+                from: Data(contentsOf: resources.appendingPathComponent("backend.json"))).pythonURL(resources: resources)
+            : defaultPython
         let child = Process(), output = Pipe(), errors = Pipe(), stdin = Pipe()
-        child.executableURL = python
+        child.executableURL = executable
         child.arguments = ["-B", "-u", resources.appendingPathComponent("backend.py").path, "--db", database] + arguments
         var environment = ProcessInfo.processInfo.environment
         for key in Array(environment.keys) where key.hasPrefix("AGENT_COORD_") || key.hasPrefix("RIBBON_RUNTIME_") || key.hasPrefix("ZELLIJ") || key == "CODEX_THREAD_ID" {
@@ -131,7 +140,6 @@ final class Backend {
             if finished { stateLock.unlock(); return }
             expired = true
             stateLock.unlock()
-            // This is our short-lived helper, never the detached runtime PID.
             if child.isRunning { child.terminate() }
             DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
                 if child.isRunning { kill(child.processIdentifier, SIGKILL) }
@@ -158,6 +166,34 @@ final class Backend {
         return object
     }
 
+    private func resolvePayloadMetadata(for status: [String: Any]) throws -> (BackendConfiguration?, String?) {
+        var resolvedConfig: BackendConfiguration?
+        if let instance = status["instance"] as? String, let payload = status["payload"] as? String {
+            let key = instance + ":" + payload
+            if key == cachedPayloadKey, let cached = cachedPayloadConfig {
+                resolvedConfig = cached
+            } else {
+                let retained = URL(fileURLWithPath: payload)
+                let decoded = try JSONDecoder().decode(
+                    BackendConfiguration.self,
+                    from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
+                cachedPayloadKey = key
+                cachedPayloadConfig = decoded
+                resolvedConfig = decoded
+            }
+        }
+        let pending = status["pending"] as? String
+        if pending != cachedPendingPath {
+            cachedPendingPath = pending
+            cachedPendingVersion = pending.flatMap { path in
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("backend.json")),
+                      let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                return metadata["runtime_version"] as? String
+            }
+        }
+        return (resolvedConfig, cachedPendingVersion)
+    }
+
     func start(resources: URL, configuration: BackendConfiguration, database: String?) throws {
         guard !starting, process == nil else { return }
         self.resources = resources
@@ -172,71 +208,35 @@ final class Backend {
         stoppedInstance = nil
         worker.async {
             do {
-                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path, "--runtime-confirm-updates", "--runtime-interaction-continuity"])
+                let status = try self.command(["--runtime-bootstrap", "--resources", resources.path, "--runtime-confirm-updates"])
+                let (decodedConfig, pendingVersion) = try self.resolvePayloadMetadata(for: status)
                 DispatchQueue.main.async {
                     self.starting = false
-                    do { try self.accept(status) }
+                    do { try self.accept(status, preloadedConfig: decodedConfig, preloadedPendingVersion: pendingVersion) }
                     catch { self.exited?(error.localizedDescription); return }
+                    self.timer?.invalidate()
                     self.timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.poll() }
                 }
             } catch { DispatchQueue.main.async { self.starting = false; self.exited?(error.localizedDescription) } }
         }
     }
 
-    private func loopbackURL(_ value: Any?) throws -> URL {
-        guard let text = value as? String, let url = URL(string: text), let port = url.port,
-              (1...65535).contains(port), text == "http://127.0.0.1:\(port)/" else {
-            throw Self.failure("Invalid local interaction address.")
-        }
-        return url
-    }
-
-    private func accept(_ status: [String: Any]) throws {
-        let wasBound = interactionURL != nil
-        var gatewaySettled = false
-        if status["interaction_url"] != nil {
-            let url = try loopbackURL(status["interaction_url"])
-            guard let settled = status["interaction_settled"] as? Bool, let path = status["interaction_payload"] as? String,
-                  let db = database.map({ URL(fileURLWithPath: $0).resolvingSymlinksInPath() }) else {
-                throw Self.failure("Invalid interaction gateway handshake.")
-            }
-            let helper = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            let payloads = db.deletingLastPathComponent().appendingPathComponent("." + db.lastPathComponent + ".runtime/payloads")
-            guard helper.deletingLastPathComponent().resolvingSymlinksInPath().path == payloads.resolvingSymlinksInPath().path,
-                  helper.lastPathComponent.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
-                  interactionURL == nil || interactionURL == url else {
-                throw Self.failure("Interaction gateway identity changed before the previous intake settled.")
-            }
-            interactionResources = helper
-            interactionRequestID = settled ? nil : status["interaction_request_id"] as? String
-            interactionURL = url
-            gatewaySettled = settled
-        } else if wasBound {
-            throw Self.failure("The interaction gateway has not confirmed delivery of pending messages.")
-        }
-        // During the interval without a coordinator, reopening the app still
-        // restores the stable gateway. Normal status overlays hide web views.
-        if let origin = interactionURL, !gatewaySettled, lastWebURL != origin {
-            lastWebURL = origin
-            ready?(origin)
-        }
+    private func accept(_ status: [String: Any], preloadedConfig: BackendConfiguration? = nil,
+                        preloadedPendingVersion: String? = nil) throws {
         var completedUpdate = false
         var terminalUpdate: (key: String, message: String, failed: Bool)?
         if let update = status["update"] as? [String: Any],
            update["superseded_by"] == nil,
-           let identity = update["id"] as? String, let phase = update["phase"] as? String,
-           (interactionURL == nil || gatewaySettled || interactionRequestID == identity ||
-            !["committed", "rolled-back", "failed"].contains(phase)) {
+           let identity = update["id"] as? String, let phase = update["phase"] as? String {
             if status["status"] as? String == "preparing" {
                 if let target = update["target"] as? String { expectedUpdate = (identity, target) }
-                if interactionURL == nil { updateStatus?("Updating backend…", false) }
+                updateStatus?(update["notice"] as? String ?? "Updating backend…", false)
                 return
             }
             if !["committed", "rolled-back", "failed"].contains(phase) {
                 if let target = update["target"] as? String { expectedUpdate = (identity, target) }
-                // The backend names what the update is waiting for or pausing.
                 if let notice = update["notice"] as? String { updateStatus?(notice, false) }
-                else if interactionURL == nil { updateStatus?("Updating backend…", false) }
+                else { updateStatus?("Updating backend…", false) }
                 if status["status"] as? String != "serving" { return }
             } else if reportedUpdate != identity + phase {
                 let matches = phase == "committed" && status["status"] as? String == "serving"
@@ -248,7 +248,6 @@ final class Backend {
                 if phase == "committed" && status["payload"] as? String != update["target"] as? String {
                     throw Self.failure("The active backend does not match the committed update.")
                 }
-                if interactionURL != nil && !gatewaySettled { return }
                 completedUpdate = expectedUpdate != nil
                 let review = update["requires_review"] as? Bool == true
                 let message = matches
@@ -257,29 +256,35 @@ final class Backend {
                 terminalUpdate = (identity + phase, message, !matches || review)
             }
         }
-        if status["status"] as? String == "preparing" { return }
+        if status["status"] as? String == "preparing" || status["status"] as? String == "updating" { return }
+        let rawPID = (status["pid"] as? Int32) ?? (status["pid"] as? Int).flatMap(Int32.init(exactly:))
         guard let value = status["url"] as? String, let url = URL(string: value),
               url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
               url.user == nil, url.password == nil, url.path == "/",
-              let pid = status["pid"] as? Int32, let instance = status["instance"] as? String,
+              let pid = rawPID, let instance = status["instance"] as? String,
               let payload = status["payload"] as? String else { throw Self.failure("Invalid runtime handshake.") }
-        // A failed connection can hide every web view while the same runtime
-        // keeps working. Its next valid handshake must restore those views.
-        let direct = interactionURL == nil || (gatewaySettled && status["status"] as? String == "serving")
-        let destination = direct ? url : interactionURL!
-        let changed = lastWebURL != destination || (direct && (process == nil || self.instance != instance || completedUpdate))
-        if direct { interactionURL = nil }
-        // Use retained code even if Sparkle has already replaced the bundle.
         let retained = URL(fileURLWithPath: payload)
-        let config = try JSONDecoder().decode(BackendConfiguration.self, from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
+        let config: BackendConfiguration
+        if let preloadedConfig = preloadedConfig {
+            config = preloadedConfig
+        } else {
+            config = try JSONDecoder().decode(
+                BackendConfiguration.self,
+                from: Data(contentsOf: retained.appendingPathComponent("backend.json")))
+        }
         let pending = status["pending"] as? String
-        if pending != pendingUpdate {
+        if let preloadedPendingVersion = preloadedPendingVersion {
+            pendingUpdateVersion = preloadedPendingVersion
+        } else if pending != pendingUpdate {
             pendingUpdateVersion = pending.flatMap { path in
                 guard let data = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("backend.json")),
                       let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
                 return metadata["runtime_version"] as? String
             }
         }
+        let destination = edgeOrigin ?? url
+        if edgeOrigin == nil { edgeOrigin = url }
+        let changed = lastWebURL != destination
         pendingUpdate = pending
         supportsRuntimeUpdates = (status["runtime_updates"] as? Int ?? 0) >= 1
         supportsUninterruptedUpdates = (status["uninterrupted_updates"] as? Int ?? 0) >= 1
@@ -306,29 +311,53 @@ final class Backend {
     }
 
     private func poll() {
-        guard !polling, !stopping else { return }
+        guard !polling, !stopping, let origin = edgeOrigin else { return }
         polling = true
-        worker.async {
-            do {
-                let status = try self.command(["--runtime-command", "status", "--resources", self.resources!.path, "--runtime-interaction-continuity"])
-                DispatchQueue.main.async {
-                    self.polling = false
-                    do { try self.accept(status) }
-                    catch {
+        let healthURL = origin.appendingPathComponent("_runtime/health")
+        let task = healthSession.dataTask(with: healthURL) { [weak self] data, response, error in
+            guard let self = self else { return }
+            self.worker.async {
+                guard error == nil,
+                      let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data,
+                      let status = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                    let message = error?.localizedDescription ?? "The local runtime health endpoint is unavailable."
+                    DispatchQueue.main.async {
+                        self.polling = false
+                        self.failures += 1
+                        if self.failures == 15 {
+                            self.process = nil
+                            self.lastWebURL = nil
+                            self.exited?(message)
+                        }
+                    }
+                    return
+                }
+                do {
+                    let (decodedConfig, pendingVersion) = try self.resolvePayloadMetadata(for: status)
+                    DispatchQueue.main.async {
+                        self.polling = false
+                        do {
+                            try self.accept(status, preloadedConfig: decodedConfig, preloadedPendingVersion: pendingVersion)
+                        } catch {
+                            if self.lastStatusFailure != error.localizedDescription {
+                                self.lastStatusFailure = error.localizedDescription
+                                self.updateStatus?(error.localizedDescription, true)
+                            }
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.polling = false
                         if self.lastStatusFailure != error.localizedDescription {
                             self.lastStatusFailure = error.localizedDescription
                             self.updateStatus?(error.localizedDescription, true)
                         }
                     }
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.polling = false
-                    self.failures += 1
-                    if self.failures == 15 { self.process = nil; self.lastWebURL = nil; self.exited?(error.localizedDescription) }
-                }
             }
         }
+        task.resume()
     }
 
     func preflight(_ target: [String: Any], completion: @escaping (Error?) -> Void) {
@@ -348,19 +377,18 @@ final class Backend {
             completion(Self.failure("No supported backend update is staged.")); return
         }
         if expectedUpdate != nil { completion(Self.failure("The requested backend update is still being observed.")); return }
-        let request = interactionRequestID ?? UUID().uuidString
-        if interactionURL != nil { interactionRequestID = request }
+        let request = UUID().uuidString
         expectedUpdate = (request, payload)
         worker.async {
             do {
-                let result = try self.command(["--runtime-command", "activate-update", "--runtime-interaction-continuity"],
+                let result = try self.command(["--runtime-command", "activate-update"],
                     input: ["request_id": request, "payload": payload])
                 guard let update = result["update"] as? [String: Any], update["id"] as? String == request else {
                     throw Self.failure("The runtime did not confirm the update request.")
                 }
                 DispatchQueue.main.async {
                     self.pendingUpdate = nil
-                    if self.interactionURL == nil { self.updateStatus?("Updating backend…", false) }
+                    self.updateStatus?("Updating backend…", false)
                     completion(nil)
                 }
             } catch { DispatchQueue.main.async { self.expectedUpdate = nil; completion(error) } }
@@ -382,6 +410,8 @@ final class Backend {
                 DispatchQueue.main.async {
                     self.stoppedInstance = status["instance"] as? String
                     self.process = nil
+                    self.edgeOrigin = nil
+                    self.lastWebURL = nil
                     completion(nil)
                 }
             } catch { DispatchQueue.main.async {
@@ -392,5 +422,9 @@ final class Backend {
         }
     }
 
-    func detach() { timer?.invalidate(); timer = nil }
+    func detach() {
+        timer?.invalidate()
+        timer = nil
+        healthSession.invalidateAndCancel()
+    }
 }

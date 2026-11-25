@@ -1,4 +1,4 @@
-"""Durable, conservative continuation after an explicitly requested update."""
+"""Durable, conservative continuation after an unbrokered legacy runtime update."""
 from __future__ import annotations
 
 import json
@@ -10,9 +10,6 @@ PROMPT = ("[Automatic continuation after a Ribbon Field backend update]\n"
           "Continue the unfinished assignment from the saved conversation. The update interrupted execution. "
           "Before repeating any action that changes state, inspect whether it completed or is still running. "
           "If the outcome cannot be established, report the uncertainty instead of repeating the action.")
-# Providers whose processes the coordinator owns. An update can continue them
-# only after it stopped the exact turn itself and confirmed the result.
-INTERRUPTIBLE_PROVIDERS = frozenset({"kimi", "antigravity", "muse"})
 
 
 class RuntimeRecovery:
@@ -25,9 +22,6 @@ class RuntimeRecovery:
                 turn_key TEXT, settings TEXT NOT NULL, state TEXT NOT NULL, reason TEXT,
                 result_turn_id TEXT, created_at REAL NOT NULL,
                 PRIMARY KEY(update_id, thread_id))""")
-            # Evidence that this update itself stopped an exact provider turn.
-            # A separate additive table keeps older coordinators' positional
-            # recovery inserts valid after a rollback or downgrade.
             db.execute("""CREATE TABLE IF NOT EXISTS runtime_update_interruptions (
                 update_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
                 client TEXT NOT NULL, state TEXT NOT NULL, reason TEXT,
@@ -61,13 +55,6 @@ class RuntimeRecovery:
                 row = db.execute("SELECT started FROM claude_sessions WHERE thread_id=?", (thread_id,)).fetchone()
                 if not row or not row[0]:
                     return "No saved native Claude session is available."
-            elif client in INTERRUPTIBLE_PROVIDERS:
-                # Only an interruption this update requested and confirmed for
-                # this exact turn establishes that native execution has ended.
-                if update_id is None or not db.execute("""SELECT 1 FROM runtime_update_interruptions
-                        WHERE update_id=? AND thread_id=? AND turn_id=? AND state='confirmed'""",
-                        (update_id, thread_id, turn_id)).fetchone():
-                    return "This provider cannot verify native turn recovery; continue it explicitly."
             if db.execute("SELECT 1 FROM turn_completions WHERE thread_id=? AND turn_key=? AND status='completed'",
                           (thread_id, thread["turn_key"])).fetchone():
                 return "The original turn completed."
@@ -107,13 +94,8 @@ class RuntimeRecovery:
                                f"{persistence['pending']} pending write(s). Inspect runtime diagnostics before retrying.")
         with sessions.lock:
             active = dict(sessions.active)
-            # Requests arriving during shutdown are retained as recovery exclusions.
             sessions.runtime_update_requests = {
                 (value.get("params") or {}).get("threadId") for value in sessions.requests.values()}
-        # Native child-agent activity must still block an unverifiable restart:
-        # this runtime cannot issue an independent continuation for a thread it
-        # does not manage. Completed children have no recovery intent and must
-        # not permanently poison subsequent updates.
         observed = set(active) | (sessions.runtime_update_requests - {None})
         with self.store.reading(), self.store._connection() as db:
             managed = {row[0] for row in db.execute("""SELECT thread_id FROM browser_sessions
@@ -143,7 +125,6 @@ class RuntimeRecovery:
 
     def recover(self, update_id):
         with self.store._connection() as db:
-            # A process may have died after provider acceptance. Never replay it.
             db.execute("UPDATE runtime_update_recoveries SET state='uncertain', reason=? WHERE update_id=? AND state='submitting'",
                        ("Continuation delivery was interrupted; inspect the conversation.", update_id))
             rows = [dict(row) for row in db.execute(
@@ -163,8 +144,6 @@ class RuntimeRecovery:
         if reason:
             raise BrowserBusyError(reason)
         provider = self.sessions._rpc(identity)
-        # Do not validate against the display cache: it deliberately preserves
-        # old turns when a native provider returns an empty response.
         history = self.sessions._query_thread(provider, identity, include_turns=True)
         turns = history.get("turns") or []
         if history.get("historyUnavailable") or not turns or turns[-1].get("id") != row["turn_id"]:
@@ -242,57 +221,12 @@ class RuntimeRecovery:
             db.execute("UPDATE runtime_update_recoveries SET state=?, reason=?, result_turn_id=? WHERE update_id=? AND thread_id=? AND state IN ('prepared','submitting')",
                        (state, reason, result_turn, update_id, thread_id))
 
-    def plan_interruption(self, update_id, thread_id, turn_id, client):
-        """Record the exact turn and settings before any provider is signalled."""
-        with self.sessions._thread_lock(thread_id):
-            thread = self.store.threads.get(thread_id)
-            settings = self.settings(thread_id)
-            now = self.store.clock()
-            with self.store._connection() as db:
-                db.execute("INSERT OR IGNORE INTO runtime_update_interruptions VALUES (?,?,?,?,'interrupting',NULL,?,NULL)",
-                           (update_id, thread_id, turn_id, client, now))
-                db.execute("INSERT OR IGNORE INTO runtime_update_recoveries VALUES (?,?,?,?,?,'interrupting',?,NULL,?)",
-                           (update_id, thread_id, turn_id, thread["turn_key"], settings,
-                            "The backend update is stopping this turn.", now))
-
-    def settle_interruption(self, update_id, thread_id, state, reason=None):
-        """Only a confirmed interruption becomes eligible for one continuation.
-
-        Turns that finished on their own, were withdrawn before interruption
-        or could not be confirmed keep their own outcome and are never resumed.
-        """
-        recovery = {"confirmed": "prepared", "uncertain": "uncertain"}.get(state, "skipped")
-        with self.store._connection() as db:
-            changed = db.execute("""UPDATE runtime_update_interruptions SET state=?, reason=?, finished_at=?
-                WHERE update_id=? AND thread_id=? AND state='interrupting'""",
-                (state, reason, self.store.clock(), update_id, thread_id)).rowcount
-            if changed:
-                db.execute("""UPDATE runtime_update_recoveries SET state=?, reason=?
-                    WHERE update_id=? AND thread_id=? AND state='interrupting'""",
-                    (recovery, None if recovery == "prepared" else reason, update_id, thread_id))
-        return bool(changed)
-
-    def abandon_interruptions(self, update_id):
-        """A coordinator that exited mid-interruption leaves no outcome proof."""
-        reason = "The backend restarted while the update was stopping this turn; inspect it before continuing."
-        with self.store._connection() as db:
-            db.execute("""UPDATE runtime_update_interruptions SET state='uncertain', reason=?, finished_at=?
-                WHERE update_id=? AND state='interrupting'""", (reason, self.store.clock(), update_id))
-            db.execute("""UPDATE runtime_update_recoveries SET state='uncertain', reason=?
-                WHERE update_id=? AND state='interrupting'""", (reason, update_id))
-
     def summary(self, update_id):
         with self.store.reading(), self.store._connection() as db:
             return dict(db.execute("SELECT state, COUNT(*) FROM runtime_update_recoveries WHERE update_id=? GROUP BY state", (update_id,)))
 
 
 def status(store, update_id):
-    """Report submission separately from the continuation turn's own outcome.
-
-    ``continued`` means the provider accepted the continuation. Its native
-    result can still fail (for example, a provider quota error); that failure
-    keeps the ordinary failure report and inbox guard.
-    """
     with store.reading(), store._connection() as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_update_recoveries'").fetchone():
             return {"counts": {}, "conversations": []}

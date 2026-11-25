@@ -49,8 +49,6 @@ private final class DesktopWindow {
     var loaded = false
     var navigationReady = false
     var documentOrigin: URL?
-    var nextOrigin: URL?
-    var replacement: (navigation: WKNavigation, origin: URL)?
     var navigating = false
     var pendingLinks: [URL] = []
     var incomingConversation: [String: Any]?
@@ -154,9 +152,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 }
                 let ready = origin != nil && (item.isSettings || url?.path != "/" || item.navigationReady) &&
                     item.loaded && !item.webView.isHidden && !item.webView.isLoading &&
-                    item.nextOrigin == nil && item.replacement == nil && !item.restoringWorkspace &&
+                    !item.restoringWorkspace &&
                     url.map { self.isLocal($0, at: item.documentOrigin) } == true && item.documentOrigin != nil
-                return ["id": item.id, "origin": origin as Any, "ready": ready]
+                return ["id": item.id, "origin": origin as Any, "ready": ready,
+                        "backend_pid": self.backend.process?.processIdentifier as Any]
             }
             guard let bytes = try? JSONSerialization.data(withJSONObject: ["windows": observations]) else {
                 connection.cancel()
@@ -224,8 +223,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             updater.backendUpdateRequiresConfirmation = { [weak self] in self?.backend.pendingUpdateRequiresConfirmation == true }
             updater.backendUpdateContinuity = { [weak self] in
                 guard let backend = self?.backend else { return .restartsWork }
-                return backend.continuesInterruptedProviders ? .pausesOtherProviders
-                    : backend.supportsUninterruptedUpdates ? .waitsForOtherProviders : .restartsWork
+                return backend.supportsUninterruptedUpdates ? .uninterrupted : .restartsWork
             }
             updater.applyBackendUpdate = { [weak self] completion in
                 guard let backend = self?.backend else { completion(Backend.failure("Runtime unavailable.")); return }
@@ -240,7 +238,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 guard let self = self else { return }
                 self.updater.backendUpdateNotice = message
                 if failed { NSApp.presentError(Backend.failure(message)) }
-                else if self.backend.updateInProgress && self.backend.interactionURL == nil { self.showStatus(message, failed: false) }
+                else if self.backend.updateInProgress && self.serverURL == nil { self.showStatus(message, failed: false) }
             }
             makeMenu()
             sessionKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -260,7 +258,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                 let links = self.pendingAppLinks
                 self.pendingAppLinks.removeAll()
                 for link in links { self.openAppLink(link) }
-                for item in self.windows { self.moveWindow(item, to: url) }
+                for item in self.windows { self.connectWindow(item, to: url) }
             }
             backend.exited = { [weak self] message in
                 guard let self = self, !self.quitting else { return }
@@ -558,67 +556,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         URL(string: item.launchRoute, relativeTo: base)?.absoluteURL ?? base
     }
 
-    private func moveWindow(_ item: DesktopWindow, to origin: URL) {
+    private func connectWindow(_ item: DesktopWindow, to origin: URL) {
         if !item.isSettings { item.files.connect(BackendWorkspaceFiles(baseURL: origin, local: true)) }
-        // The main workspace and detached conversations expose the workspace bridge.
-        // Other routes (Settings, Usage, Activity, previews and Monitor) load their own pages.
-        guard item.documentOrigin != nil, item.webView.url?.path == "/", !item.isSettings else {
-            item.documentOrigin = origin
-            configureScripts(item.webView)
-            item.webView.load(URLRequest(url: destination(for: item, base: origin)))
-            return
-        }
-        guard item.nextOrigin != origin else { return }
-        item.nextOrigin = origin
-        if item.replacement != nil { item.webView.stopLoading() }
-        prepareOriginChange(in: item)
-    }
-
-    private func retryOriginChange(in item: DesktopWindow) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self, weak item] in
-            guard let self = self, let item = item else { return }
-            self.prepareOriginChange(in: item)
-        }
-    }
-
-    private let requireMovableDocument = """
-        const bridge = window.agentCoordDesktop;
-        if (bridge?.windowStateBusy?.() !== false || document.querySelector('dialog[open]') ||
-            (typeof state === 'object' && (state.busy || state.transferLocks?.size))) return null;
-        for (const pane of window.agentCoordPanes?.records?.values() || [])
-            if (pane.frame?.contentDocument?.querySelector('dialog[open]')) return null;
-        """
-
-    private func canMoveWorkspace(_ item: DesktopWindow) -> Bool {
-        item.navigationReady && !item.restoringWorkspace && !item.navigating && item.window.attachedSheet == nil &&
-            !conversationTransfers.values.contains { $0.source === item || $0.target === item }
-    }
-
-    private func resumeOriginalDocument(in item: DesktopWindow, navigation: WKNavigation) {
-        guard item.replacement?.navigation === navigation else { return }
-        item.replacement = nil
-        item.webView.evaluateJavaScript("document.documentElement.inert = false")
-        retryOriginChange(in: item)
-    }
-
-    private func prepareOriginChange(in item: DesktopWindow) {
-        guard !quitting, windows.contains(where: { $0 === item }), let origin = item.nextOrigin,
-              origin == serverURL, item.replacement == nil else { return }
-        guard canMoveWorkspace(item) else {
-            retryOriginChange(in: item)
-            return
-        }
-        item.webView.callAsyncJavaScript(requireMovableDocument + "\nreturn true;",
-            arguments: [:], in: nil, in: .page) { [weak self, weak item] result in
-            guard let self = self, let item = item, item.nextOrigin == origin, item.replacement == nil,
-                  self.windows.contains(where: { $0 === item }), !self.quitting else { return }
-            if case .success(let ready) = result, ready as? Bool == true {
-                // The original document remains interactive while WebKit fetches the destination.
-                if let navigation = item.webView.load(URLRequest(url: self.destination(for: item, base: origin))) {
-                    item.replacement = (navigation, origin)
-                } else { self.retryOriginChange(in: item) }
-            } else { self.retryOriginChange(in: item) }
-        }
+        guard item.documentOrigin != origin || !item.loaded else { return }
+        item.documentOrigin = origin
+        configureScripts(item.webView)
+        item.webView.load(URLRequest(url: destination(for: item, base: origin)))
     }
 
     /// AppKit ignores miniaturize while a window is still being ordered in during
@@ -1122,48 +1065,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
     }
 
-    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        guard navigationResponse.isForMainFrame, let item = item(for: webView),
-              let replacement = item.replacement else { decisionHandler(.allow); return }
-        guard let origin = item.nextOrigin, origin == replacement.origin, let url = navigationResponse.response.url,
-              isLocal(url, at: origin), canMoveWorkspace(item) else {
-            decisionHandler(.cancel)
-            resumeOriginalDocument(in: item, navigation: replacement.navigation)
-            return
-        }
-        // Capture at response arrival, so typing during the destination fetch is included.
-        // Recheck acceptance in this same JS turn. Lock input only while admitting the new document.
-        webView.callAsyncJavaScript(requireMovableDocument + "\n" + """
-            const snapshot = bridge.exportWindowState();
-            if (snapshot) document.documentElement.inert = true;
-            return snapshot;
-            """, arguments: [:], in: nil, in: .page) { [weak self, weak item] result in
-                guard let self = self, let item = item, !self.quitting, item.nextOrigin == origin,
-                      self.windows.contains(where: { $0 === item }), self.canMoveWorkspace(item),
-                      item.replacement?.navigation === replacement.navigation,
-                      case .success(let value) = result, let snapshot = value as? [String: Any] else {
-                    decisionHandler(.cancel)
-                    if let item = item { self?.resumeOriginalDocument(in: item, navigation: replacement.navigation) }
-                    return
-                }
-                item.restoredWorkspace = snapshot
-                item.restorationAttempted = false
-                self.acceptWorkspaceState(snapshot, for: item)
-                self.configureScripts(webView)
-                decisionHandler(.allow)
-            }
-    }
-
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let item = item(for: webView) else { return }
         item.navigationReady = false
-        if let replacement = item.replacement, replacement.navigation === navigation {
-            item.documentOrigin = replacement.origin
-            item.replacement = nil
-            if item.nextOrigin == replacement.origin { item.nextOrigin = nil }
-            else { retryOriginChange(in: item) }
-        }
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
@@ -1186,13 +1090,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if smokeReport != nil { checkSmoke(attempt: 0) }
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        if let item = item(for: webView), item.replacement?.navigation !== navigation { item.navigationReady = false }
+        if let item = item(for: webView) { item.navigationReady = false }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if let item = item(for: webView), let replacement = item.replacement, replacement.navigation === navigation {
-            resumeOriginalDocument(in: item, navigation: replacement.navigation)
-            return
-        }
         if (error as NSError).code != NSURLErrorCancelled { showStatus(error.localizedDescription, failed: true, in: item(for: webView)) }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -2060,94 +1960,64 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     }
 
     @MainActor private func smokeOriginChange(_ item: DesktopWindow) async throws {
-        guard let direct = serverURL, var alternate = URLComponents(url: direct, resolvingAgainstBaseURL: false),
-              direct.host == "127.0.0.1", let directory = smokeDirectory else {
-            throw Backend.failure("Missing private loopback runtime for origin change.")
+        guard let direct = serverURL, direct.host == "127.0.0.1", let directory = smokeDirectory else {
+            throw Backend.failure("Missing permanent loopback edge origin.")
         }
-        // Same disposable coordinator, two distinct WebKit origins. The production
-        // ready handler is responsible for navigation on both sides of the switch.
-        alternate.host = "localhost"
-        guard let staged = alternate.url else { throw Backend.failure("Invalid smoke origin.") }
         let arguments = CommandLine.arguments
         let flag = arguments.firstIndex(of: "--smoke-observe-origins")
         let saved = flag.flatMap { $0 + 1 < arguments.count ? arguments[$0 + 1] : nil }
-        let thread = try await smokeJS("""
+        let firstSetup = try await smokeJS("""
             document.querySelector('[data-jev-skip]')?.click();
             const id = saved || (await api('sessions', {client:'claude', name:'Window continuity', cwd})).session.thread_id;
             await refreshList(); await select(id);
             const field = document.querySelector('#message');
             field.value = 'An unsent draft'; field.focus(); field.setSelectionRange(2, 8);
             field.dispatchEvent(new Event('input', {bubbles:true}));
-            return id;
-            """, in: item.webView, arguments: ["cwd": directory.path, "saved": saved ?? ""]) as! String
+            window.__smokeDocumentToken = crypto.randomUUID();
+            return [id, window.__smokeDocumentToken];
+            """, in: item.webView, arguments: ["cwd": directory.path, "saved": saved ?? ""]) as! [String]
+        let thread = firstSetup[0], firstToken = firstSetup[1]
         let sibling = makeWindow()
         defer { sibling.window.close() }
         try await smokeReady(sibling)
-        _ = try await smokeJS("""
+        let secondToken = try await smokeJS("""
             await refreshList(); await select(id);
             const field = document.querySelector('#message');
             field.value = 'Second window draft'; field.setSelectionRange(2, 8);
             field.dispatchEvent(new Event('input', {bubbles:true}));
-            return true;
-            """, in: sibling.webView, arguments: ["id": thread])
-        func reached(_ window: DesktopWindow, _ endpoint: URL, text: String) async -> Bool {
-            for _ in 0..<120 {
-                if window.webView.url?.host == endpoint.host && window.navigationReady && !window.restoringWorkspace,
-                   (try? await smokeJS("""
-                      const field = document.querySelector('#message');
-                      return location.origin === origin && state.selected === id && field?.value === text &&
-                        field.selectionStart === 2 && field.selectionEnd === 8;
-                      """, in: window.webView, arguments: ["id": thread, "text": text,
-                            "origin": String(endpoint.absoluteString.dropLast())]) as? Bool) == true { return true }
-                try? await Task.sleep(nanoseconds: 50_000_000)
+            window.__smokeDocumentToken = crypto.randomUUID();
+            return window.__smokeDocumentToken;
+            """, in: sibling.webView, arguments: ["id": thread]) as! String
+        let expectedOrigin = String(direct.absoluteString.dropLast())
+        if arguments.contains("--smoke-observe-origins") {
+            try Data().write(to: directory.appendingPathComponent("windows-ready"))
+            let committed = directory.appendingPathComponent("update-committed")
+            for _ in 0..<400 {
+                if FileManager.default.fileExists(atPath: committed.path) { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
             }
-            return false
+            try smokeCheck("observed_live_backend_replacement", FileManager.default.fileExists(atPath: committed.path))
+        } else {
+            backend.ready?(direct)
         }
-        backend.ready?(staged)
-        let stagedRestored = await reached(item, staged, text: "An unsent draft")
-        try smokeCheck("origin_change_staged_window", stagedRestored)
-        let otherStaged = await reached(sibling, staged, text: "Second window draft")
-        try smokeCheck("origin_change_independent_drafts", otherStaged)
-        if CommandLine.arguments.contains("--smoke-observe-origins") {
-            // The external reader acknowledges a fresh sample from both windows.
-            for endpoint in [staged, direct] {
-                if endpoint == direct { backend.ready?(direct) }
-                let acknowledgment = directory.appendingPathComponent("observed-" + endpoint.host!)
-                for _ in 0..<200 {
-                    if FileManager.default.fileExists(atPath: acknowledgment.path) { break }
-                    try await Task.sleep(nanoseconds: 50_000_000)
-                }
-                try smokeCheck("observed_" + endpoint.host!, FileManager.default.fileExists(atPath: acknowledgment.path))
-            }
-            return
+        let firstIntact = try await smokeJS("""
+            const field = document.querySelector('#message');
+            await refreshList();
+            return window.__smokeDocumentToken === token && location.origin === origin &&
+              state.selected === id && field?.value === 'An unsent draft' &&
+              field.selectionStart === 2 && field.selectionEnd === 8;
+            """, in: item.webView, arguments: ["id": thread, "token": firstToken, "origin": expectedOrigin]) as? Bool
+        let secondIntact = try await smokeJS("""
+            const field = document.querySelector('#message');
+            return window.__smokeDocumentToken === token && location.origin === origin &&
+              state.selected === id && field?.value === 'Second window draft' &&
+              field.selectionStart === 2 && field.selectionEnd === 8;
+            """, in: sibling.webView, arguments: ["id": thread, "token": secondToken, "origin": expectedOrigin]) as? Bool
+        try smokeCheck("permanent_origin_first_window", firstIntact == true)
+        try smokeCheck("permanent_origin_second_window", secondIntact == true)
+        if !arguments.contains("--smoke-observe-origins") {
+            try await smokeWindowImage(item, suffix: "origin-change")
         }
-        _ = try await smokeJS("(state.sending ||= new Set()).add(id); return true;",
-                              in: item.webView, arguments: ["id": thread])
-        backend.ready?(direct)
-        let otherDirect = await reached(sibling, direct, text: "Second window draft")
-        try smokeCheck("origin_change_ready_window_continues", otherDirect)
-        try await smokeFocus(item)
-        item.window.makeFirstResponder(item.webView)
-        let editable = try await smokeJS("""
-            const field = document.querySelector('#message');
-            field.focus(); field.setSelectionRange(field.value.length, field.value.length);
-            return location.hostname === 'localhost' && state.sending.has(id) && !document.documentElement.inert;
-            """, in: item.webView, arguments: ["id": thread])
-        try smokeCheck("origin_change_busy_window_editable", editable as? Bool == true)
-        try smokeCheck("origin_change_native_keystroke", smokeWebKey("x", flags: [], code: 7, throughApplication: true))
-        let typed = try await smokeJS("""
-            const field = document.querySelector('#message');
-            for (let i = 0; i < 30 && field.value !== 'An unsent draftx'; i++)
-              await new Promise(resolve => setTimeout(resolve, 30));
-            field.setSelectionRange(2, 8);
-            state.sending.delete(id);
-            return field.value === 'An unsent draftx';
-            """, in: item.webView, arguments: ["id": thread])
-        try smokeCheck("origin_change_keystroke_visible", typed as? Bool == true)
-        let directRestored = await reached(item, direct, text: "An unsent draftx")
-        try smokeCheck("origin_change_direct_window", directRestored)
-        _ = try await smokeJS("document.querySelector('[data-jev-skip]')?.click(); return true;", in: item.webView)
-        try await smokeWindowImage(item, suffix: "origin-change")
     }
 
     @MainActor private func smokeScratchpad(_ item: DesktopWindow, other: DesktopWindow) async throws {

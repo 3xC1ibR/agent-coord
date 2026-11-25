@@ -15,7 +15,7 @@ on:
         default: ''
         type: string
       publish:
-        description: 'Publish to downloads.ribbonfield.com after release approval'
+        description: 'Publish candidate to downloads.ribbonfield.com and promote after approval'
         default: false
         type: boolean
       channel:
@@ -32,7 +32,6 @@ permissions:
   contents: read
 
 concurrency:
-  # A signed candidate can be installed while a public release awaits approval.
   group: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish && 'macos-release-candidate' || 'macos-release' }}
   cancel-in-progress: false
 
@@ -175,6 +174,14 @@ jobs:
             --update-private-key-file "$RUNNER_TEMP/sparkle-private-key" \
             --update-archive "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.zip" \
             --dmg "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
+      - name: Qualify APFS-cloned responsiveness and blue/green cutover
+        timeout-minutes: 3
+        run: |
+          python3 scripts/validate_signed_runtime_responsiveness.py \
+            --qualify-ci "build/release-app/Ribbon Field.app" \
+            --report "$RUNNER_TEMP/cutover-qualification-$RELEASE_ARCH.json"
+          cp "$RUNNER_TEMP/cutover-qualification-$RELEASE_ARCH.json" \
+            "build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.cutover.json"
       - name: Verify the packaged distribution
         run: |
           dmg="build/release/Ribbon-Field-$RELEASE_VERSION-$RELEASE_ARCH.dmg"
@@ -211,16 +218,9 @@ jobs:
     needs: [validate, build]
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
-      statuses: read
-    # Configure a required reviewer on this environment before enabling uploads.
-    # Download and test the retained DMGs before approving this job.
-    environment:
-      name: macos-release
-      url: https://downloads.ribbonfield.com
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -231,9 +231,8 @@ jobs:
           pattern: macos-release-*
           path: build/release
           merge-multiple: true
-      - name: Upload immutable releases and verify public downloads
+      - name: Upload immutable candidate release artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_EC2_METADATA_DISABLED: 'true'
@@ -248,13 +247,59 @@ jobs:
           python3 scripts/publish_macos_release.py --directory build/release \
             --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
             --require-updates --update-public-key "$SPARKLE_PUBLIC_KEY" \
-            --publish --promote-current --receipt-wait-seconds 9000 | tee release-result.json
+            --publish | tee release-candidate.json
           {
-            echo '### Published macOS downloads'
+            echo '### Uploaded macOS candidate downloads'
             echo
             echo "https://downloads.ribbonfield.com/releases/$RELEASE_VERSION/release.json"
             echo
             echo '```json'
-            cat release-result.json
+            cat release-candidate.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    needs: [validate, build, publish]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: macos-release
+      url: https://downloads.ribbonfield.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: macos-release-*
+          path: build/release
+          merge-multiple: true
+      - name: Promote Sparkle appcast feeds and website current release
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: 'true'
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
+          RELEASE_CHANNEL: ${{ inputs.channel || 'alpha' }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ACCESS_KEY_ID" && test -n "$AWS_SECRET_ACCESS_KEY"
+          python3 scripts/publish_macos_release.py --directory build/release \
+            --version "$RELEASE_VERSION" --commit "$RELEASE_COMMIT" --channel "$RELEASE_CHANNEL" \
+            --require-updates --update-public-key "$SPARKLE_PUBLIC_KEY" \
+            --promote-only | tee release-promoted.json
+          {
+            echo '### Promoted macOS release'
+            echo
+            echo "https://downloads.ribbonfield.com/releases/current.json"
+            echo
+            echo '```json'
+            cat release-promoted.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

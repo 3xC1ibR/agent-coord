@@ -339,6 +339,20 @@ class MacOSReleaseTests(unittest.TestCase):
         args = run.call_args.args
         self.assertEqual(args[args.index("--if-none-match") + 1], "*")
 
+    def test_promote_only_advances_feeds_and_current_release_after_verifying_candidate_manifest(self):
+        key = self.add_updates()
+        files, manifest = self.update_files(key)
+        r2, events = mock.Mock(), []
+        r2.promote_feed.side_effect = lambda feed_key, _path: events.append(("feed", feed_key))
+        r2.promote.side_effect = lambda _path: events.append(("current", release.CURRENT_KEY))
+        with mock.patch.object(release, "verify_download", side_effect=lambda dl_key, _path: events.append(("verify", dl_key))):
+            release.promote_release(files, manifest, r2)
+        self.assertEqual(events[0], ("verify", "releases/1.2.3/release.json"))
+        self.assertIn(("feed", "updates/alpha/arm64.xml"), events)
+        self.assertIn(("feed", "updates/alpha/x86_64.xml"), events)
+        self.assertEqual(events[-2:], [("current", release.CURRENT_KEY), ("verify", release.CURRENT_KEY)])
+        r2.put.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "native runtime test requires macOS")
 class NativeRuntimeUpdateTests(unittest.TestCase):
-    def test_update_completion_requires_committed_serving_handshake(self):
+    def test_update_completion_preserves_single_permanent_edge_origin_without_reloading(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "RuntimeHost.swift"
@@ -34,18 +34,23 @@ backend.ready = { _ in ready += 1 }
 backend.updateStatus = { notices.append(($0, $1)) }
 func status(_ instance: String, _ payload: URL) -> [String: Any] {
     return ["status": "serving", "url": "http://127.0.0.1:12345/", "pid": Int32(123),
-            "instance": instance, "payload": payload.path, "runtime_updates": 1]
+            "instance": instance, "payload": payload.path, "runtime_updates": 1, "uninterrupted_updates": 1]
 }
-func update(_ id: String, _ phase: String) -> [String: Any] {
-    return ["id": id, "phase": phase, "target": target.path, "previous": previous.path]
+func update(_ id: String, _ phase: String, notice: String? = nil) -> [String: Any] {
+    var result: [String: Any] = ["id": id, "phase": phase, "target": target.path, "previous": previous.path]
+    if let notice = notice { result["notice"] = notice }
+    return result
 }
 try backend.accept(status("old", previous))
+precondition(ready == 1)
 var accepted = status("old", previous)
-accepted["update"] = update("first", "accepted")
+accepted["update"] = update("first", "accepted", notice: "Draining operations…")
 try backend.accept(accepted)
 precondition(backend.updateInProgress && ready == 1)
-try backend.accept(["status": "preparing", "payload": target.path, "update": update("first", "committed")])
+precondition(notices.last?.0 == "Draining operations…")
+try backend.accept(["status": "updating", "payload": target.path, "update": update("first", "stopping", notice: "Switching coordinator…")])
 precondition(backend.updateInProgress && ready == 1)
+precondition(notices.last?.0 == "Switching coordinator…")
 precondition(!notices.contains { $0.0.hasPrefix("Backend updated.") })
 var committed = status("new", target)
 committed["update"] = update("first", "committed")
@@ -55,10 +60,11 @@ do { try backend.accept(invalid); fatalError("Invalid handshake accepted") } cat
 precondition(backend.updateInProgress)
 precondition(!notices.contains { $0.0.hasPrefix("Backend updated.") })
 try backend.accept(committed)
-precondition(!backend.updateInProgress && ready == 2)
+// Permanent loopback edge origin: ready remains 1 (0 WebView reloads across backend update!).
+precondition(!backend.updateInProgress && ready == 1)
 precondition(notices.filter { $0.0.hasPrefix("Backend updated.") }.count == 1)
 try backend.accept(committed)
-precondition(ready == 2)
+precondition(ready == 1)
 accepted["update"] = update("second", "accepted")
 try backend.accept(accepted)
 var wrong = status("wrong", previous)
@@ -68,7 +74,7 @@ precondition(backend.updateInProgress)
 var rollback = status("restored", previous)
 rollback["update"] = update("second", "rolled-back").merging(["error": "Candidate failed"]) { _, new in new }
 try backend.accept(rollback)
-precondition(!backend.updateInProgress && notices.last?.1 == true)
+precondition(!backend.updateInProgress && notices.last?.1 == true && ready == 1)
 ''')
             binary = root / "runtime-update-test"
             build = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-module-cache-path", str(root / "modules"),
@@ -76,3 +82,7 @@ precondition(!backend.updateInProgress && notices.last?.1 == true)
             self.assertEqual(build.returncode, 0, build.stderr)
             result = subprocess.run([str(binary), str(root)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

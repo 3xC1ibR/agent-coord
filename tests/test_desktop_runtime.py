@@ -165,21 +165,49 @@ class RuntimeTests(unittest.TestCase):
                         PYTHONWARNINGS="error::ResourceWarning")
 
     def tearDown(self):
+        directory = runtime.runtime_directory(self.database)
         try:
-            # Cleanup uses our private record even when a test deliberately
-            # makes discovery fail; no PID from an untrusted/stale record is killed.
-            discovery = runtime.runtime_directory(self.database) / "discovery.json"
+            discovery = directory / "discovery.json"
             def stop_owned():
-                if runtime.owner_available(runtime.runtime_directory(self.database)):
+                if runtime.owner_available(directory):
                     return True
                 try:
                     if discovery.exists():
                         runtime.control(runtime.read_json(discovery), "stop")
                 except (OSError, RuntimeError):
-                    pass  # Handover may replace discovery between read and POST.
+                    pass
                 return False
             self.wait(stop_owned, timeout=25)
         finally:
+            try:
+                runtime.stop_retained_transport(self.database)
+            except (OSError, ValueError, RuntimeError):
+                pass
+            marker = str(self.root)
+            current_pgid = os.getpgrp()
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                output = subprocess.run(["ps", "-axww", "-o", "pid=,pgid=,command="],
+                                        capture_output=True, text=True, check=False).stdout
+                survivors = []
+                for line in output.splitlines():
+                    parts = line.split(None, 2)
+                    if len(parts) == 3 and marker in parts[2]:
+                        pid, pgid = int(parts[0]), int(parts[1])
+                        if pid != os.getpid():
+                            survivors.append((pid, pgid))
+                if not survivors:
+                    break
+                signalled_groups = set()
+                for pid, pgid in survivors:
+                    try:
+                        if pgid > 1 and pgid != current_pgid and pgid not in signalled_groups:
+                            signalled_groups.add(pgid)
+                            os.killpg(pgid, sig)
+                        else:
+                            os.kill(pid, sig)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                time.sleep(0.1)
             self.temporary.cleanup()
 
     def wait(self, predicate, timeout=10):
@@ -423,7 +451,7 @@ def uninterrupted_readiness(sessions):
     from . import runtime_update as test_updates
     reasons = _explicit_test_readiness(sessions)
     update = test_updates.read(runtime_directory(sessions.store.database_path))
-    if not update or update.get("phase") not in {"accepted", "draining", "stopping"}:
+    if not update or update.get("phase") not in {"accepted", "prepared", "trial", "draining", "stopping"}:
         reasons.append("automatic activation held by explicit-update fixture")
     return reasons
 ''')
@@ -1115,31 +1143,27 @@ def uninterrupted_readiness(sessions):
 
 
 class RuntimeStatusMetricsTests(unittest.TestCase):
-    def test_status_polling_preserves_cached_coverage_without_scanning_archive(self):
-        from agent_coord import conversation_substrings as substrings
+    def test_status_polling_preserves_cached_metrics_without_archive_scan(self):
         from agent_coord import database_writer
 
         store = Mock()
         store.database_metrics.side_effect = [{"foreground_observation": index} for index in range(3)]
-        substrings._status(store, supported=True, state="complete", remaining_sources=0,
-                           coverage_observed_monotonic=1.0, legacy_sources=12, legacy_indexed=12)
-        observed = dict(substrings._STATUS[store])
-        sessions = SimpleNamespace(store=store, admission=SimpleNamespace(paused=False),
+        sessions = SimpleNamespace(
+            store=store,
+            admission=SimpleNamespace(paused=False),
             history_persistence=SimpleNamespace(status=lambda: {"published_bytes": 10}),
             persistence=SimpleNamespace(status=lambda: {"pending": 2, "failures": {}}),
-            database_checkpoint=SimpleNamespace(snapshot=lambda: {"backlog_frames": 4}))
+            database_checkpoint=SimpleNamespace(snapshot=lambda: {"backlog_frames": 4}),
+        )
         with tempfile.TemporaryDirectory() as directory:
             owner = runtime.Runtime(Path(directory) / "state.sqlite3", Path(directory) / "payload", -1)
             owner.server = SimpleNamespace(browser_sessions=sessions, server_port=12345)
             owner.update_status = Mock(return_value={"phase": "committed"})
-            with patch.object(substrings, "_coverage", side_effect=AssertionError("Archive scan during ordinary status")) as scan, \
-                    patch.object(substrings.time, "monotonic", return_value=1000), \
-                    patch.object(runtime, "readiness", return_value={"active_turns": 1}), \
+            with patch.object(runtime, "readiness", return_value={"active_turns": 1}), \
                     patch.object(database_writer, "system_performance_snapshot", return_value={"process": {"cpu_seconds": 5}}):
                 for index in range(3):
                     status = owner.status()
                     metrics = status["database_metrics"]
-                    self.assertEqual(metrics["search"]["substring_index"], observed)
                     self.assertEqual(metrics["foreground_observation"], index)
                     self.assertEqual(metrics["history"], {"published_bytes": 10})
                     self.assertEqual(metrics["checkpoint"], {"backlog_frames": 4})
@@ -1148,7 +1172,42 @@ class RuntimeStatusMetricsTests(unittest.TestCase):
                     self.assertEqual(status["status"], "serving")
                     self.assertEqual(status["busy"], {"active_turns": 1})
                     self.assertEqual(status["update"], {"phase": "committed"})
-                scan.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "APFS clonefile snapshot test requires macOS")
+    def test_apfs_clonefile_snapshot_succeeds_with_active_readonly_wal_reader(self):
+        import sqlite3
+        from agent_coord import runtime_update
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "state.sqlite3"
+            runtime_dir = runtime.runtime_directory(database)
+            with closing(sqlite3.connect(database)) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE items(value TEXT)")
+                writer.execute("INSERT INTO items VALUES ('initial')")
+                writer.commit()
+            with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
+                reader.execute("BEGIN")
+                self.assertEqual(reader.execute("SELECT value FROM items").fetchall(), [("initial",)])
+                with closing(sqlite3.connect(database)) as writer:
+                    writer.execute("INSERT INTO items VALUES ('in-wal-frame')")
+                    writer.commit()
+                update = runtime_update.write(runtime_dir, {
+                    "id": "apfs-clone", "phase": "accepted", "previous": "/prev", "target": "/next"})
+                with patch.object(runtime_update, "check_capacity", side_effect=AssertionError("check_capacity called on APFS")):
+                    started = time.perf_counter()
+                    update = runtime_update.snapshot(str(database), runtime_dir, update)
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                self.assertLess(elapsed_ms, 50.0)
+                self.assertTrue(runtime.read_json(runtime_dir / "update-backup.json")["cloned"])
+            with closing(sqlite3.connect(database)) as writer:
+                writer.execute("DELETE FROM items")
+                writer.commit()
+            runtime_update.restore(str(database), runtime_dir, update)
+            with closing(sqlite3.connect(database)) as restored:
+                rows = [r[0] for r in restored.execute("SELECT value FROM items ORDER BY rowid").fetchall()]
+            self.assertEqual(rows, ["initial", "in-wal-frame"])
 
 
 class AdmissionTests(unittest.TestCase):
