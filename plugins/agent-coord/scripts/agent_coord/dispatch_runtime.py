@@ -11,7 +11,6 @@ import time
 import uuid
 
 from .attention import load_config
-from .conversation_search import refresh_messages
 from .dispatch_routing import route
 from .dispatch_snapshot import read_snapshot
 from .dispatch_evaluation import initialize_evaluation
@@ -44,6 +43,7 @@ class DispatchRuntime:
         self.lock = threading.Lock()
         self.worker = None
         self.stopped = False
+        self._configured_threads: set[str] = set()
         with self.store._connection() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS dispatch_settings (
@@ -62,8 +62,13 @@ class DispatchRuntime:
                     payload_json TEXT NOT NULL);
             """)
             initialize_evaluation(db)
+            self._configured_threads = {
+                row[0] for row in db.execute("SELECT thread_id FROM dispatch_settings")
+            }
 
     def settings(self, thread_id):
+        if thread_id not in self._configured_threads:
+            return {"enabled": False, "defaults": {}}
         with self.store.reading(), self.store._connection() as db:
             row = db.execute("SELECT * FROM dispatch_settings WHERE thread_id=?", (thread_id,)).fetchone()
         return {"enabled": bool(row and row["enabled"]),
@@ -86,6 +91,7 @@ class DispatchRuntime:
                 if not body["enabled"]:
                     for row in db.execute("SELECT id FROM dispatch_requests WHERE dispatcher_id=? AND state='pending'", (thread_id,)).fetchall():
                         self.transition(db, row[0], "cancelled", error="Dispatcher mode was turned off.")
+            self._configured_threads.add(thread_id)
         self.changed(thread_id)
         return self.settings(thread_id)
 
@@ -262,9 +268,7 @@ class DispatchRuntime:
         if body["askDispatcher"] or body["images"]:
             result = {"decision": {"action": "dispatcher", "reason": "direct_request" if body["askDispatcher"] else "attachment_context_required"}}
         else:
-            stage = time.perf_counter()
-            refresh_messages(self.store, cwd=item["cwd"])
-            timings["index_refresh"] = round((time.perf_counter() - stage) * 1000, 1)
+            timings["index_refresh"] = 0.0
             stage = time.perf_counter()
             snapshot = read_snapshot(self.store.database_path, cwd=item["cwd"])
             timings["snapshot"] = round((time.perf_counter() - stage) * 1000, 1)

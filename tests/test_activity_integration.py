@@ -108,8 +108,7 @@ class ActivityIntegrationTests(unittest.TestCase):
         # The fixture replaces persisted history directly. Finish creation's
         # queued mirror save first so it cannot overwrite this saved transcript.
         self.assertTrue(self.sessions.persistence.flush(key=self.thread))
-        with self.store._connection() as db:
-            db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (self.thread, json.dumps(history)))
+        self.store.transcripts.save_turns(self.thread, history)
 
     def test_history_pages_preserve_long_text_without_waking_provider(self):
         text = "evidence " * 12000

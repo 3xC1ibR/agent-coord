@@ -73,7 +73,7 @@ def restore_timing(store, thread):
     if not missing:
         return
     session_id = thread['id']
-    with store._connection() as db:
+    with store.reading(), store._connection() as db:
         session = db.execute('SELECT client FROM sessions WHERE session_id = ?', (session_id,)).fetchone()
         latest = db.execute('SELECT turn_id, turn_started_at FROM work_threads WHERE thread_id = ?', (session_id,)).fetchone()
         ends = dict(db.execute('SELECT turn_key, completed_at FROM turn_completions WHERE thread_id = ?', (session_id,)))

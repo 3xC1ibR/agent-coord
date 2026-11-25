@@ -321,6 +321,8 @@ class _StoreConnection(sqlite3.Connection):
         self.settings: tuple[int, int] | None = None
         self._diagnostic_context = None
         self.automatic_checkpoint_pages = None
+        self._cached_busy_timeout: int | None = None
+        self._cached_query_only: int | None = None
 
     def cursor(self, factory: Any = _StoreCursor) -> sqlite3.Cursor:
         cursor = super().cursor(factory)
@@ -480,6 +482,8 @@ class CoordinationStore:
         self.clock = clock
         self.read_only = read_only
         self._idle_connections = threading.local()
+        self._idle_holder_registry: weakref.WeakSet[_IdleConnection] = weakref.WeakSet()
+        self._idle_registry_lock = threading.Lock()
         self._connection_options = threading.local()
         from .database_writer import writer_for
         self._writer = writer_for(self.database_path)
@@ -559,6 +563,8 @@ class CoordinationStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
+        if not reading:
+            connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     def _bind_connection_diagnostics(self, connection, reading):
@@ -659,12 +665,15 @@ class CoordinationStore:
         operation = getattr(self._connection_options, "operation", None)
         named_operation = operation is not None
         if operation is None:
-            import sys
             frame = sys._getframe(1)
-            while frame and Path(frame.f_code.co_filename).stem in {"store", "contextlib"}:
+            while frame:
+                stem = os.path.splitext(os.path.basename(frame.f_code.co_filename))[0]
+                if stem not in {"store", "contextlib"}:
+                    operation = (stem + "." + frame.f_code.co_name, "foreground")
+                    break
                 frame = frame.f_back
-            operation = ((Path(frame.f_code.co_filename).stem + "." + frame.f_code.co_name)
-                         if frame else "database", "foreground")
+            else:
+                operation = ("database", "foreground")
             del frame
         milliseconds = getattr(self._connection_options, "timeout", None)
         # Opening a handle can wait on filesystem I/O or Python's GIL. It has
@@ -725,6 +734,19 @@ class CoordinationStore:
             raise CoordinationError("Create a new CoordinationStore after a process fork before reading metrics.")
         return self._writer.snapshot()
 
+    def close_idle_connections(self) -> None:
+        search = getattr(self, "_search_store_instance", None)
+        if search is not None:
+            search.close()
+        transcripts = getattr(self, "_transcript_store", None)
+        if transcripts is not None:
+            transcripts.close()
+        with self._idle_registry_lock:
+            holders = list(self._idle_holder_registry)
+        for holder in holders:
+            if not holder.in_use:
+                holder.discard()
+
     @contextmanager
     def _ungated_connection(self, *, transaction=True):
         # A new connection parses the whole schema, which dominated backend
@@ -749,22 +771,23 @@ class CoordinationStore:
         holder = None if idle is None else getattr(idle, slot, None)
         if idle is not None and holder is None:
             holder = _IdleConnection()
+            with self._idle_registry_lock:
+                self._idle_holder_registry.add(holder)
             setattr(idle, slot, holder)
         factory = getattr(self._connect, "__func__", self._connect)
         nested = holder is None or holder.in_use
         connection = None
+        timeout = getattr(self._connection_options, "timeout", None)
         if not nested:
             if holder.connection is not None and holder.factory() is factory:
                 connection = holder.connection
                 self._bind_connection_diagnostics(connection, reading)
                 try:
-                    # Start each use with the settings its factory produced.
                     connection.row_factory = sqlite3.Row
-                    connection.execute(f"PRAGMA busy_timeout = {connection.settings[0]}")
-                    # Writing foreign_keys expires every prepared statement, even
-                    # when the setting is already correct. Restore only a change.
-                    if connection.execute("PRAGMA foreign_keys").fetchone()[0] != connection.settings[1]:
-                        connection.execute(f"PRAGMA foreign_keys = {connection.settings[1]}")
+                    target_timeout = connection.settings[0] if timeout is None else timeout
+                    if getattr(connection, "_cached_busy_timeout", None) != target_timeout:
+                        connection.execute(f"PRAGMA busy_timeout = {target_timeout}")
+                        connection._cached_busy_timeout = target_timeout
                 except sqlite3.Error:
                     connection = None
             if connection is None:
@@ -778,9 +801,11 @@ class CoordinationStore:
             if not nested and isinstance(connection, _StoreConnection):
                 connection.settings = (connection.execute("PRAGMA busy_timeout").fetchone()[0],
                                        connection.execute("PRAGMA foreign_keys").fetchone()[0])
-        timeout = getattr(self._connection_options, "timeout", None)
-        if timeout is not None:
-            connection.execute(f"PRAGMA busy_timeout = {timeout}")
+                connection._cached_busy_timeout = connection.settings[0]
+            if timeout is not None:
+                connection.execute(f"PRAGMA busy_timeout = {timeout}")
+                if isinstance(connection, _StoreConnection):
+                    connection._cached_busy_timeout = timeout
         if not reading:
             from .database_checkpoint import automatic_checkpoint_pages
             pages = automatic_checkpoint_pages(self._database_identity)
@@ -789,8 +814,12 @@ class CoordinationStore:
                 if isinstance(connection, _StoreConnection):
                     connection.automatic_checkpoint_pages = pages
         # This setter also expires statements on an unchanged connection.
-        if fresh or connection.execute("PRAGMA query_only").fetchone()[0] != int(reading):
-            connection.execute(f"PRAGMA query_only = {int(reading)}")
+        desired_query_only = int(reading)
+        if fresh or getattr(connection, "_cached_query_only", None) != desired_query_only:
+            if fresh or connection.execute("PRAGMA query_only").fetchone()[0] != desired_query_only:
+                connection.execute(f"PRAGMA query_only = {desired_query_only}")
+            if isinstance(connection, _StoreConnection):
+                connection._cached_query_only = desired_query_only
         reusable = False
         if not nested:
             holder.in_use = True
@@ -800,7 +829,7 @@ class CoordinationStore:
             reusable = (not nested and isinstance(connection, _StoreConnection)
                         and connection.settings is not None and not connection.in_transaction
                         and file_identity is not None
-                        and file_identity == self._database_file_identity())
+                        and (reading or file_identity == self._database_file_identity()))
         finally:
             if not nested:
                 holder.in_use = False
@@ -826,9 +855,28 @@ class CoordinationStore:
             return None
         return status.st_dev, status.st_ino
 
+    @property
+    def transcripts(self):
+        instance = getattr(self, "_transcript_store", None)
+        if instance is None:
+            from .transcript_store import TranscriptStore
+            instance = self._transcript_store = TranscriptStore(self)
+        return instance
+
+    @property
+    def search_store(self):
+        instance = getattr(self, "_search_store_instance", None)
+        if instance is None:
+            from .search_store import SearchStore
+            instance = self._search_store_instance = SearchStore(self.database_path)
+        return instance
+
     def _initialize(self) -> None:
+        from .transcript_store import ensure_schema as ensure_transcript_schema
         with self._connection() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+            ensure_transcript_schema(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (

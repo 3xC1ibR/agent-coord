@@ -90,13 +90,12 @@ class ToolHistoryTests(unittest.TestCase):
         self.start(thread)
         self.update(thread, sessionUpdate='tool_call', toolCallId='pending', status='in_progress')
         self.update(thread, sessionUpdate='tool_call_update', toolCallId='confirmed', status='completed', rawOutput='contents')
+        from agent_coord.history_persistence import read_history, save_history
         # Snapshot the on-disk history as it would be left by a process crash.
         self.assertTrue(self.sessions.persistence.flush(key=thread))
-        with self.store._connection() as db:
-            saved = db.execute('SELECT history_json FROM browser_history WHERE thread_id = ?', (thread,)).fetchone()[0]
+        saved = read_history(self.store, thread)
         self.sessions.close()
-        with self.store._connection() as db:
-            db.execute('UPDATE browser_history SET history_json = ? WHERE thread_id = ?', (saved, thread))
+        save_history(self.store, thread, saved)
         self.sessions = self.make_sessions()
         self.assertEqual(self.tools(thread)['pending']['status'], 'unknown')
         self.assertIn('session ended', self.tools(thread)['pending']['statusReason'])
@@ -130,9 +129,9 @@ class DeliveryToolHistoryTests(unittest.TestCase):
         self.deliver(thread)
         self.assertEqual(self.tools(thread)['confirmed']['status'], 'completed')
         self.assertEqual(self.tools(thread)['pending']['status'], 'unknown')
+        from agent_coord.history_persistence import read_history
         self.assertTrue(self.sessions.persistence.flush(key=thread))
-        with self.store._connection() as db:
-            saved = json.loads(db.execute('SELECT history_json FROM browser_history WHERE thread_id = ?', (thread,)).fetchone()[0])
+        saved = read_history(self.store, thread)
         pending = next(i for i in saved['turns'][0]['items'] if i['id'] == 'pending')
         self.assertEqual(pending['status'], 'unknown')
         resumed = self.sessions.antigravity.connections[thread]

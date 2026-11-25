@@ -17,7 +17,7 @@ from agent_coord.attention import ClassificationError
 from agent_coord.dispatch_history import RoutingHistory
 from agent_coord.dispatch_routing import RoutingPolicy, build_state, classify, decide, question_for, route
 from agent_coord.dispatch_snapshot import read_snapshot
-from agent_coord.conversation_search import sync_messages
+from agent_coord.store import CoordinationStore
 
 
 def thread(tid, title, **kwargs):
@@ -359,94 +359,83 @@ class SnapshotTests(unittest.TestCase):
             self.assertTrue(by_id["stale_vendor"]["context_lifecycle"]["stale"])
 
 
-class IndexedSnapshotTests(unittest.TestCase):
+class TranscriptSnapshotTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = Path(tmp.name) / "app.sqlite3"
-        self.db = sqlite3.connect(self.path)
-        self.addCleanup(self.db.close)
-        self.db.row_factory = sqlite3.Row
-        self.db.executescript("""CREATE TABLE browser_sessions(thread_id TEXT PRIMARY KEY,cwd TEXT);
-            CREATE TABLE sessions(session_id TEXT,cwd TEXT,client TEXT,turn_active INTEGER,write_scope_json TEXT);
-            CREATE TABLE work_threads(thread_id TEXT,title TEXT,original_request TEXT,attention TEXT,created_at REAL);
-            CREATE TABLE thread_checkpoints(id INTEGER,thread_id TEXT,summary TEXT,phase TEXT,created_at REAL);
-            CREATE TABLE browser_history(thread_id TEXT PRIMARY KEY,history_json TEXT);
-            CREATE TABLE browser_inbox_wake(thread_id TEXT,paused INTEGER);
-            INSERT INTO browser_sessions VALUES ('vendor','/project'),('other','/other');
-            INSERT INTO sessions VALUES ('vendor','/old','codex',1,'[]'),('other','/old','codex',0,'[]');
-            INSERT INTO work_threads VALUES ('vendor','Vendor form','Build form','now',1),('other','Other form','','now',1);
-            INSERT INTO browser_inbox_wake VALUES ('vendor',0);
-        """)
-        self.save("vendor", {"turns": [{"id": "t", "items": [
+        self.store = CoordinationStore(self.path)
+        self.addCleanup(self.store.close_idle_connections)
+        with self.store._connection() as db:
+            db.executescript("""CREATE TABLE IF NOT EXISTS browser_sessions(thread_id TEXT PRIMARY KEY,cwd TEXT);
+                CREATE TABLE IF NOT EXISTS browser_inbox_wake(thread_id TEXT PRIMARY KEY,paused INTEGER);
+            """)
+        for tid, cwd, old_cwd, title, req, active in (
+            ("vendor", "/project", "/old", "Vendor form", "Build form", True),
+            ("other", "/other", "/old", "Other form", "", False),
+        ):
+            self.store.register(session_id=tid, client="codex", cwd=old_cwd, name=title)
+            if req:
+                self.store.threads.capture_request(tid, req)
+            self.store.touch(tid, turn_active=active)
+            with self.store._connection() as db:
+                db.execute("INSERT OR REPLACE INTO browser_sessions(thread_id,cwd) VALUES (?,?)", (tid, cwd))
+                db.execute("UPDATE work_threads SET title=?, created_at=1 WHERE thread_id=?", (title, tid))
+        with self.store._connection() as db:
+            db.execute("INSERT OR REPLACE INTO browser_inbox_wake VALUES ('vendor',0)")
+        self.save("vendor", {"turns": [{"id": "t", "status": "completed", "items": [
             {"id": "duplicate", "type": "agentMessage", "text": str(i) + "x" * 6000}
             for i in range(203)]}]})
-        self.save("other", {"turns": [{"items": [{"type": "agentMessage", "text": "other workspace"}]}]})
+        self.save("other", {"turns": [{"id": "t2", "status": "completed",
+                                       "items": [{"type": "agentMessage", "text": "other workspace"}]}]})
 
     def save(self, tid, history):
-        with self.db:
-            self.db.execute("INSERT OR REPLACE INTO browser_history VALUES (?,?)", (tid, json.dumps(history)))
+        self.store.transcripts.save_turns(tid, history)
 
     def snapshot(self, **kwargs):
         return read_snapshot(self.path, now=10, **kwargs)
 
-    def test_cold_warm_duplicate_ids_bounds_workspace_and_read_only_parity(self):
-        cold = self.snapshot()
-        with self.db:
-            sync_messages(self.db, cwd="/project")
-        self.assertEqual([r[0] for r in self.db.execute("SELECT thread_id FROM conversation_search_routing")], ["vendor"])
-        before = self.path.read_bytes()
-        self.assertEqual(self.snapshot(), cold)
-        self.assertEqual(self.path.read_bytes(), before)
+    def test_duplicate_ids_bounds_workspace_and_read_only_invariants(self):
         selected = self.snapshot(cwd="/project")
-        self.assertEqual(selected["threads"], [cold["threads"][1]])
+        self.assertEqual([t["thread_id"] for t in selected["threads"]], ["vendor"])
         history = selected["threads"][0]
         self.assertEqual(len(history["messages"]), 200)
         self.assertTrue(history["history_truncated"])
         self.assertTrue(history["messages"][0]["text"].startswith("3x"))
         self.assertEqual(len(history["messages"][0]["text"]), 6000)
         self.assertTrue(history["messages"][0]["truncated"])
-        with patch("agent_coord.conversation_search.messages", side_effect=AssertionError("Decoded unchanged history")):
-            with self.db:
-                sync_messages(self.db, cwd="/project")
-            self.snapshot(cwd="/project")
+        before = self.path.read_bytes()
+        self.assertEqual(self.snapshot(cwd="/project"), selected)
+        self.assertEqual(self.path.read_bytes(), before)
 
-    def test_updates_deletions_and_old_index_writers_cannot_leave_stale_routing(self):
-        with self.db:
-            sync_messages(self.db)
+    def test_updates_deletions_and_wake_pause_reflect_immediately(self):
         self.save("vendor", {"historyUnavailable": True, "turns": []})
-        # Older search code can drain its dirty queue, but cannot restore the
-        # separately invalidated routing projection.
-        with self.db:
-            self.db.execute("DELETE FROM conversation_search_dirty")
-            self.db.execute("UPDATE browser_inbox_wake SET paused=1 WHERE thread_id='vendor'")
-        cold = self.snapshot(cwd="/project")
-        self.assertEqual(cold["threads"][0]["history_status"], "partial")
-        self.assertTrue(cold["threads"][0]["wake_paused"])
-        with self.db:
-            sync_messages(self.db, cwd="/project")
-        self.assertEqual(self.snapshot(cwd="/project"), cold)
-        with self.db:
-            self.db.execute("DELETE FROM browser_history WHERE thread_id='vendor'")
+        with self.store._connection() as db:
+            db.execute("UPDATE browser_inbox_wake SET paused=1 WHERE thread_id='vendor'")
+        partial = self.snapshot(cwd="/project")
+        self.assertEqual(partial["threads"][0]["history_status"], "partial")
+        self.assertTrue(partial["threads"][0]["wake_paused"])
+        with self.store._connection() as db:
+            db.execute("DELETE FROM thread_turns WHERE thread_id='vendor'")
+        for file_path in self.store.transcripts.directory_for("vendor").glob("*"):
+            file_path.unlink()
+        self.store.transcripts.forget("vendor")
         self.assertEqual(self.snapshot(cwd="/project")["threads"][0]["history_status"], "missing")
 
     def test_malformed_histories_preserve_fallback_semantics(self):
-        for value in (None, [], {"turns": None}, {"turns": "odd"}, {"turns": 3}, {"turns": [{"items": 4}]}):
+        for value, expected_status in (
+            (None, "unavailable"),
+            ([], "unavailable"),
+            ({"turns": None}, "saved"),
+            ({"turns": "odd"}, "unavailable"),
+            ({"turns": 3}, "unavailable"),
+            ({"turns": [{"items": 4}]}, "unavailable"),
+        ):
             with self.subTest(value=value):
                 self.save("vendor", value)
-                cold = self.snapshot(cwd="/project")
-                with self.db:
-                    sync_messages(self.db, cwd="/project")
-                self.assertEqual(self.snapshot(cwd="/project"), cold)
-
-    def test_legacy_search_tables_are_migrated_without_changing_their_shape(self):
-        with self.db:
-            self.db.execute("CREATE TABLE conversation_search_histories(thread_id TEXT PRIMARY KEY,status TEXT NOT NULL)")
-            self.db.execute("INSERT INTO conversation_search_histories VALUES ('vendor','saved')")
-            sync_messages(self.db)
-            # This is how older installed runtimes write their projection.
-            self.db.execute("INSERT OR REPLACE INTO conversation_search_histories VALUES ('vendor','saved')")
-        self.assertEqual(self.snapshot()["threads"][1]["history_status"], "saved")
+                snap = self.snapshot(cwd="/project")
+                self.assertEqual(snap["threads"][0]["history_status"], expected_status)
+                self.assertEqual(snap["threads"][0]["messages"], [])
 
 
 if __name__ == "__main__":

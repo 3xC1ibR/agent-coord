@@ -197,9 +197,9 @@ class Sidecars:
         assignment = self.store.threads.get(payload["target_id"])
         assignment = {"request": assignment.get("original_request", "")[:8000],
                       "checkpoint": (assignment.get("checkpoint") or {}).get("summary", "")[:4000]}
-        from .conversation_search import messages
-        with sessions.lock:
-            requests = [m[4] for m in messages(sessions._history(payload["target_id"])) if m[2] == "user"]
+        from .history_window import messages
+        history = sessions.history_snapshot(payload["target_id"]) if hasattr(sessions, "history_snapshot") else sessions._history(payload["target_id"])
+        requests = [m[4] for m in messages(history) if m[2] == "user"]
         assignment["latest_user_request"] = requests[-1][:8000] if requests else ""
         with self.store._connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -308,8 +308,11 @@ class SidecarRuntime:
 
     def snapshot(self, watch):
         # Read the saved display mirror only. Never resume a provider to inspect it.
-        with self.sessions.lock:
-            history = json.loads(json.dumps(self.sessions._history(watch["target_id"])))
+        history = (
+            self.sessions.history_snapshot(watch["target_id"])
+            if hasattr(self.sessions, "history_snapshot")
+            else json.loads(json.dumps(self.sessions._history(watch["target_id"])))
+        )
         turns, remaining, truncated = [], 18000, False
         for turn in reversed(history.get("turns", [])[-6:]):
             items = []

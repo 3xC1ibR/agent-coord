@@ -175,10 +175,10 @@ class DatabaseCheckpoint:
             connection.execute("PRAGMA busy_timeout = 0").close()
             if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
                 raise RuntimeError("Database checkpoint maintenance requires WAL mode.")
-            connection.execute("PRAGMA synchronous = FULL").close()
+            connection.execute("PRAGMA synchronous = NORMAL").close()
             connection.execute("PRAGMA wal_autocheckpoint = 0").close()
-            if connection.execute("PRAGMA synchronous").fetchone()[0] != 2:
-                raise RuntimeError("Database checkpoint maintenance requires FULL durability.")
+            if connection.execute("PRAGMA synchronous").fetchone()[0] not in {1, 2}:
+                raise RuntimeError("Database checkpoint maintenance requires NORMAL or FULL durability.")
             self._page_size = connection.execute("PRAGMA page_size").fetchone()[0]
             return connection
         except BaseException:

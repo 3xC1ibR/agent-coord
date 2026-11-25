@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import random
 import sqlite3
@@ -8,465 +9,174 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import closing, contextmanager
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 
 from agent_coord import history_persistence as history_storage
-from agent_coord.history_persistence import (CHUNK_BYTES, INLINE_BYTES, MARKER, STAGE_BYTES,
-    HistoryPersistence, HistoryUnavailableError, decode_history, ensure_schema,
-    prepare_history, publish_history, read_history, stage_history)
+from agent_coord.history_persistence import (
+    CHUNK_BYTES,
+    MARKER,
+    HistoryPersistence,
+    HistoryUnavailableError,
+    SavedHistoryWindows,
+    decode_history,
+    ensure_schema,
+    prepare_history,
+    publish_history,
+    read_history,
+    save_history,
+    saved_turn_status,
+)
+from agent_coord.history_window import RECENT_TURNS, recent_view
 from agent_coord.store import CoordinationStore
 
 
-def large_history(identity="conversation", size=1024 * 1024):
+def large_history(identity="conversation", size=512 * 1024):
     content = random.Random(71).randbytes(size).hex()
-    return {"id": identity, "status": {"type": "idle"}, "extra": {"unicode": "λ雪"}, "turns": [
-        {"id": "old", "status": "completed", "items": [
-            {"id": "command", "type": "commandExecution", "aggregatedOutput": content},
-            {"id": "answer", "type": "agentMessage", "text": "Saved answer"}]},
-        {"id": "latest", "status": "inProgress", "items": [
-            {"id": "request", "type": "userMessage", "content": [{"type": "text", "text": "Continue"}]}]}]}
+    return {
+        "id": identity,
+        "status": {"type": "idle"},
+        "extra": {"unicode": "λ雪"},
+        "turns": [
+            {
+                "id": "old",
+                "status": "completed",
+                "items": [
+                    {"id": "command", "type": "commandExecution", "aggregatedOutput": content},
+                    {"id": "answer", "type": "agentMessage", "text": "Saved answer"},
+                ],
+            },
+            {
+                "id": "latest",
+                "status": "inProgress",
+                "items": [
+                    {"id": "request", "type": "userMessage", "content": [{"type": "text", "text": "Continue"}]},
+                ],
+            },
+        ],
+    }
 
 
-class HistoryPersistenceTests(unittest.TestCase):
+def _store_legacy_chunked(db: sqlite3.Connection, thread_id: str, history: dict) -> str:
+    """Write a legacy v1 chunked manifest into browser_history + browser_history_chunks for fallback tests."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS browser_history_chunks (digest TEXT PRIMARY KEY, payload BLOB NOT NULL);
+        """
+    )
+
+    def put_doc(doc) -> list[str]:
+        raw = json.dumps(doc, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        refs = []
+        for offset in range(0, max(1, len(raw)), CHUNK_BYTES):
+            piece = raw[offset : offset + CHUNK_BYTES]
+            digest = hashlib.sha256(piece).hexdigest()
+            db.execute("INSERT OR IGNORE INTO browser_history_chunks VALUES (?, ?)", (digest, piece))
+            refs.append(digest)
+        return refs
+
+    turn_refs = []
+    for turn in history.get("turns", []):
+        item_refs = [put_doc(item) for item in turn.get("items", [])]
+        t_meta = {k: v for k, v in turn.items() if k != "items"}
+        turn_refs.append(put_doc({"metadata": t_meta, "items": item_refs}))
+    root_meta = {k: v for k, v in history.items() if k != "turns"}
+    root_ref = put_doc({"metadata": root_meta, "turns": turn_refs})
+    manifest = json.dumps({MARKER: 1, "layout": "turns", "root": root_ref})
+    db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (thread_id, manifest))
+    return manifest
+
+
+class HistoryPersistenceFacadeTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.store = CoordinationStore(self.directory / "state.sqlite3")
+        self.addCleanup(self.store.close_idle_connections)
+        self.addCleanup(self.store.search_store.close)
+        self.addCleanup(self.store.transcripts.close)
         with self.store._connection() as db:
-            db.execute("CREATE TABLE browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL)")
             ensure_schema(db)
-            db.execute("CREATE TABLE history_changes (thread_id TEXT)")
-            for event in ("INSERT", "UPDATE"):
-                db.execute(f"""CREATE TRIGGER history_changes_{event.lower()} AFTER {event} ON browser_history
-                    BEGIN INSERT INTO history_changes VALUES (NEW.thread_id); END""")
         self.persistence = HistoryPersistence(self.store)
 
-    def raw(self):
-        with self.store.reading(), self.store._connection() as db:
-            return db.execute("SELECT history_json FROM browser_history WHERE thread_id='conversation'").fetchone()[0]
-
-    def test_large_history_is_lossless_and_small_legacy_history_stays_inline(self):
+    def test_save_and_read_history_roundtrip_via_transcript_store(self):
         small = {"id": "conversation", "turns": []}
         self.persistence.save("conversation", small)
-        self.assertEqual(json.loads(self.raw()), small)
-        self.assertEqual(decode_history(self.raw()), small)
+        self.assertEqual(read_history(self.store, "conversation"), small)
+
         history = large_history()
-        result = self.persistence.save("conversation", history)
-        self.assertLess(len(self.raw()), 1000)
-        self.assertEqual(json.loads(self.raw())[MARKER], 1)
+        save_history(self.store, "conversation", history)
         self.assertEqual(read_history(self.store, "conversation"), history)
-        self.assertEqual(decode_history(self.raw(), database_path=self.store.database_path), history)
-        self.assertGreater(result["staged_chunks"], 10)
+        self.assertEqual(saved_turn_status(self.store, "conversation", "old"), "completed")
+        self.assertEqual(saved_turn_status(self.store, "conversation", "latest"), "inProgress")
 
-    def test_multiblock_output_is_read_without_hex_encoding_the_payload(self):
-        history = large_history(size=4 * CHUNK_BYTES)
-        prepared = prepare_history(history)
-        stage_history(self.store, prepared)
-        digest = prepared.documents[(0, 0)].references[0]
-        statements = []
-        with self.store.reading(), self.store._connection() as db:
-            db.set_trace_callback(statements.append)
-            try:
-                restored = decode_history(prepared.serialized, db=db)
-            finally:
-                db.set_trace_callback(None)
-        self.assertEqual(restored, history)
-        payload_reads = [s.lower() for s in statements if digest in s]
-        self.assertTrue(payload_reads)
-        self.assertFalse(any("hex(payload)" in s for s in payload_reads))
-
-    def test_growing_output_reuses_verified_chunks_and_detects_changed_prefixes(self):
-        history = large_history(size=4 * CHUNK_BYTES)
-        previous = prepare_history(history)
-        item = history["turns"][0]["items"][0]
-        output = item["aggregatedOutput"]
-        item["aggregatedOutput"] = output[:CHUNK_BYTES] + "!" + output[CHUNK_BYTES + 1:] + " more output"
-        complete = prepare_history(history)
-        full_chunks = 0
-        digest = history_storage.hashlib.sha256
-
-        def count_chunks(value):
-            nonlocal full_chunks
-            if len(value) == CHUNK_BYTES:
-                full_chunks += 1
-            return digest(value)
-
-        with patch.object(history_storage.hashlib, "sha256", side_effect=count_chunks):
-            incremental = prepare_history(history, previous=previous)
-        self.assertEqual(incremental.serialized, complete.serialized)
-        self.assertEqual(incremental.chunks, complete.chunks)
-        self.assertEqual(full_chunks, 1, "only the edited full chunk needs a new digest")
-
-    def test_one_item_change_reuses_the_large_previous_turn_and_unchanged_save_does_not_invalidate(self):
-        history = large_history(size=4 * 1024 * 1024)
-        initial = self.persistence.save("conversation", history)
+    def test_incremental_turn_append_writes_only_changed_turns(self):
+        history = large_history(size=256 * 1024)
+        first = self.persistence.save("conversation", history)
+        self.assertGreater(first["published_bytes"], 256 * 1024)
         repeated = self.persistence.save("conversation", copy.deepcopy(history))
-        self.assertEqual((repeated["staged_bytes"], repeated["published_bytes"], repeated["unchanged_snapshots"]),
-                         (0, 0, 1))
+        self.assertEqual(repeated["unchanged_snapshots"], 1)
+
         history["turns"][-1]["items"].append({"id": "next", "type": "agentMessage", "text": "A new answer"})
         history["turns"][-1]["status"] = "completed"
         changed = self.persistence.save("conversation", history)
-        self.assertLess(changed["staged_bytes"], 4096)
-        self.assertGreater(changed["reused_bytes"], initial["staged_bytes"] - 4096)
-        self.assertLess(changed["published_bytes"], 1000)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-        with self.store.reading(), self.store._connection() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM history_changes").fetchone()[0], 2)
-
-    def test_appending_to_large_item_reuses_prefix_blocks(self):
-        history = large_history()
-        self.persistence.save("conversation", history)
-        history["turns"][0]["items"][0]["aggregatedOutput"] += "\nlast output λ"
-        result = self.persistence.save("conversation", history)
-        self.assertLess(result["staged_bytes"], CHUNK_BYTES + 8192)
-        self.assertGreater(result["reused_bytes"], 1024 * 1024)
+        self.assertLess(changed["published_bytes"], 4096)
         self.assertEqual(read_history(self.store, "conversation"), history)
 
-    def test_appending_native_text_encodes_only_the_changed_tail(self):
-        for field in ("text", "aggregatedOutput"):
-            with self.subTest(field=field):
-                item = {"id": "output", field: 'line "\n😀' * 32000, "z": {"note": "trailing metadata"}}
-                value = {"turns": [{"id": "turn", "status": "inProgress", "items": [item]}]}
-                previous = prepare_history(value)
-                for suffix in (" next", '"\\\n😀', "z" * (CHUNK_BYTES + 1)):
-                    item[field] += suffix
-                    updated = prepare_history(value, previous=previous)
-                    full = prepare_history(value)
-                    self.assertEqual((updated.serialized, updated.chunks), (full.serialized, full.chunks))
-                    self.assertLess(updated.encoded_document_bytes, len(suffix) + CHUNK_BYTES * 2)
-                    compact = history_storage.compact_history(updated)
-                    self.assertFalse(prepare_history(value, previous=compact).chunks)
-                    previous = updated
-                item["z"]["note"] = "changed after the text"
-                item[field] += "!"
-                corrected = prepare_history(value, previous=previous)
-                self.assertEqual(corrected.serialized, prepare_history(value).serialized)
-
-    def test_retry_and_one_item_change_only_stage_changed_documents(self):
-        history = large_history()
-        self.persistence.save("conversation", history)
-        history["turns"][-1]["items"].append({"id": "next", "type": "agentMessage", "text": "New answer"})
-        stage = history_storage.stage_history_steps
-
-        def bounded_staging(store, prepared, **options):
-            self.assertLess(sum(map(len, prepared.chunks.values())), 4096)
-            return (yield from stage(store, prepared, **options))
-
-        with patch.object(history_storage, "stage_history_steps", side_effect=bounded_staging):
-            with patch.object(history_storage, "publish_history", side_effect=sqlite3.OperationalError("database is locked")):
-                with self.assertRaises(sqlite3.OperationalError):
-                    self.persistence.save("conversation", history)
-            self.persistence.save("conversation", history)
+    def test_publish_history_commits_within_caller_transaction(self):
+        history = large_history(size=64 * 1024)
+        prepared = prepare_history(history)
+        with self.store._connection() as db:
+            self.assertTrue(publish_history(db, "conversation", prepared))
         self.assertEqual(read_history(self.store, "conversation"), history)
 
-    def test_committed_cache_discards_payloads_and_survives_confirmation_eviction(self):
-        history = large_history()
-        self.persistence.save("conversation", history)
-        cached = self.persistence.prepared["conversation"]
-        self.assertLess(cached.cache_bytes, 20000)
-        self.assertFalse(cached.chunks)
-        self.assertTrue(all(document.committed and document.value is None and not document.chunks
-                            for document in cached.documents.values()))
-        self.persistence.confirmed.clear()
-        prepared = prepare_history(history, previous=cached)
-        self.assertFalse(prepared.chunks)
-        self.assertGreater(sum(prepared.durable_chunks.values()), 1024 * 1024)
-        self.persistence.save("conversation", history)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-
-    def test_inline_cache_becoming_chunked_does_not_claim_unstaged_blocks(self):
-        history = {"id": "conversation", "turns": [{"id": "one", "items": [None, {"text": "small"}]}]}
-        self.persistence.save("conversation", history)
-        history["turns"].append(large_history()["turns"][0])
-        self.persistence.save("conversation", history)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-        history["turns"].reverse()
-        self.persistence.save("conversation", history)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-
-    def test_derived_projection_failure_does_not_reject_committed_history(self):
+    def test_derived_callback_failure_does_not_reject_committed_history(self):
         def failed(identity, prepared):
             raise RuntimeError("projection unavailable")
+
         persistence = HistoryPersistence(self.store, on_saved=failed)
-        history = large_history()
+        history = large_history(size=32 * 1024)
         with self.assertLogs("agent_coord.history_persistence", level="ERROR"):
             persistence.save("conversation", history)
         self.assertEqual(read_history(self.store, "conversation"), history)
         self.assertEqual(persistence.status()["failures"], 0)
         self.assertEqual(persistence.status()["search_seed_failures"], 1)
 
-    def test_preparation_cache_is_bounded_and_can_release_a_conversation(self):
-        with patch.object(history_storage, "PREPARATION_CACHE_THREADS", 1):
-            self.persistence.save("one", large_history("one"))
-            self.persistence.save("two", large_history("two"))
-        self.assertEqual(self.persistence.status()["preparation_cache_threads"], 1)
-        self.persistence.forget("two")
-        self.assertEqual(self.persistence.status()["preparation_cache_bytes"], 0)
-        with patch.object(history_storage, "PREPARATION_CACHE_BYTES", 1):
-            self.persistence.save("one", large_history("one"))
-        self.assertEqual(self.persistence.status()["preparation_cache_threads"], 0)
-
-    def test_confirmed_chunks_skip_membership_reads_and_cache_only_committed_data(self):
-        history = large_history()
-        self.persistence.save("conversation", history)
-        confirmed = set(self.persistence.confirmed)
-        connection = self.store._connection
-        queries = []
-
-        class ObservedConnection:
-            def __init__(self, db):
-                self.db = db
-
-            def execute(self, sql, values=()):
-                if "SELECT json_group_array(digest) FROM browser_history_chunks" in sql:
-                    queries.append(len(values))
-                    self_test.assertFalse(confirmed.intersection(values))
-                return self.db.execute(sql, values)
-
-            def __getattr__(self, key):
-                return getattr(self.db, key)
-
-        @contextmanager
-        def observed():
-            with connection() as db:
-                yield ObservedConnection(db)
-
-        self_test = self
-        history["turns"][-1]["items"].append({"id": "answer", "type": "agentMessage", "text": "New"})
-        with patch.object(self.store, "_connection", observed):
-            self.persistence.save("conversation", history)
-        self.assertTrue(queries)
-        fresh = HistoryPersistence(self.store)
-        with patch.object(history_storage, "stage_history_steps", side_effect=sqlite3.OperationalError("database is locked")):
-            with self.assertRaises(sqlite3.OperationalError):
-                fresh.save("conversation", history)
-        self.assertFalse(fresh.confirmed)
-        with patch.object(history_storage, "CONFIRMED_CHUNKS", 3):
-            fresh.save("conversation", history)
-        self.assertLessEqual(fresh.status()["confirmed_chunks"], 3)
-
-    def test_staging_is_bounded_and_preparation_does_not_hold_the_writer(self):
-        batches = []
-        connection = self.store._connection
-
-        class ObservedConnection:
-            def __init__(self, db):
-                self.db, self.size = db, 0
-
-            def execute(self, sql, values=()):
-                if sql.startswith("INSERT OR IGNORE INTO browser_history_chunks"):
-                    self.size += len(values[1])
-                return self.db.execute(sql, values)
-
-            def __getattr__(self, key):
-                return getattr(self.db, key)
-
-        @contextmanager
-        def observed():
-            with connection() as db:
-                observed_db = ObservedConnection(db)
-                yield observed_db
-                if observed_db.size:
-                    batches.append(observed_db.size)
-
-        serialize = history_storage._json
-        checked = []
-
-        def prepare(value):
-            if not checked:
-                ready = threading.Event()
-
-                def write():
-                    with connection() as db:
-                        db.execute("INSERT INTO history_changes VALUES ('unrelated')")
-                    ready.set()
-
-                worker = threading.Thread(target=write)
-                worker.start()
-                checked.append(ready.wait(1))
-                worker.join(1)
-            return serialize(value)
-
-        with patch.object(self.store, "_connection", observed), patch.object(history_storage, "_json", prepare):
-            self.persistence.save("conversation", large_history())
-        self.assertEqual(checked, [True])
-        self.assertGreater(len(batches), 4)
-        self.assertLessEqual(max(batches), STAGE_BYTES)
-
-    def test_failed_publication_keeps_previous_history_and_staged_blocks_allow_retry(self):
-        old = {"id": "conversation", "turns": []}
-        self.persistence.save("conversation", old)
-        history = large_history()
-        with patch.object(history_storage, "publish_history", side_effect=sqlite3.OperationalError("database is locked")):
-            with self.assertRaises(sqlite3.OperationalError):
-                self.persistence.save("conversation", history)
-        self.assertEqual(self.persistence.status()["failures"], 1)
-        self.assertGreater(self.persistence.status()["staged_bytes"], 1024 * 1024)
-        self.assertEqual(read_history(self.store, "conversation"), old)
-        restarted = HistoryPersistence(self.store)
-        result = restarted.save("conversation", history)
-        self.assertEqual(result["staged_bytes"], 0)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-
-    def test_sqlite_backup_contains_complete_history_and_prior_root_remains_readable(self):
-        history = large_history()
-        self.persistence.save("conversation", history)
-        original = self.raw()
-        changed = copy.deepcopy(history)
-        changed["turns"][0]["items"][1]["text"] = "Updated answer"
-        self.persistence.save("conversation", changed)
-        destination = self.directory / "backup.sqlite3"
-        with closing(sqlite3.connect(self.store.database_path)) as source, closing(sqlite3.connect(destination)) as backup:
-            source.backup(backup)
-        self.assertEqual(decode_history(original, database_path=destination), history)
-        self.assertEqual(decode_history(self.raw(), database_path=destination), changed)
-
-    def test_interrupted_staging_never_exposes_incomplete_new_history(self):
-        old = {"id": "conversation", "turns": []}
-        self.persistence.save("conversation", old)
-        history = large_history()
-        prepared = prepare_history(history)
-
-        def interrupt_after_commit(metrics):
-            raise OSError("interrupted after a committed block batch")
-
-        with self.assertRaisesRegex(OSError, "interrupted"):
-            stage_history(self.store, prepared, on_commit=interrupt_after_commit)
-        self.assertEqual(read_history(self.store, "conversation"), old)
-        result = HistoryPersistence(self.store).save("conversation", history)
-        self.assertGreater(result["reused_bytes"], 0)
-        self.assertGreater(result["staged_bytes"], 0)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-
-    def test_staging_steps_release_connections_and_thread_local_read_mode(self):
-        prepared = prepare_history(large_history())
-        steps = history_storage.stage_history_steps(self.store, prepared)
-        count = 0
-        while True:
-            try:
-                next(steps)
-            except StopIteration as finished:
-                self.assertGreater(finished.value["staged_chunks"], 0)
-                break
-            count += 1
-            with self.store._connection() as db:
-                db.execute("INSERT INTO history_changes VALUES ('interleaved')")
-            with self.store.reading(), self.store._connection() as db:
-                self.assertIsNone(db.execute("SELECT 1 FROM browser_history").fetchone())
-        self.assertGreater(count, 1)
+    def test_legacy_inline_and_chunked_fallback_when_transcript_store_has_no_rows(self):
+        inline = {"id": "legacy-inline", "turns": [{"id": "t1", "status": "completed", "items": [{"id": "a", "type": "agentMessage", "text": "Hello"}]}]}
+        chunked = large_history("legacy-chunked", size=3 * CHUNK_BYTES)
         with self.store._connection() as db:
-            publish_history(db, "conversation", prepared)
-        self.assertEqual(read_history(self.store, "conversation"), large_history())
+            db.execute("CREATE TABLE IF NOT EXISTS browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL)")
+            db.execute("INSERT INTO browser_history VALUES (?, ?)", ("legacy-inline", json.dumps(inline)))
+            manifest = _store_legacy_chunked(db, "legacy-chunked", chunked)
 
-    def test_missing_or_corrupt_chunks_are_explicit_errors(self):
-        self.persistence.save("conversation", large_history())
-        root = json.loads(self.raw())["root"][0]
-        with self.store._connection() as db:
-            original = db.execute("SELECT payload FROM browser_history_chunks WHERE digest=?", (root,)).fetchone()[0]
-        for invalid in (original.decode("ascii"), b"\xff\x00corrupt"):
-            with self.subTest(kind=type(invalid).__name__):
-                with self.store._connection() as db:
-                    db.execute("UPDATE browser_history_chunks SET payload=? WHERE digest=?", (invalid, root))
-                with self.assertRaisesRegex(HistoryUnavailableError, "integrity"):
-                    read_history(self.store, "conversation")
-        with self.store._connection() as db:
-            db.execute("DELETE FROM browser_history_chunks WHERE digest=?", (root,))
-        with self.assertRaisesRegex(HistoryUnavailableError, "missing"):
-            decode_history(self.raw(), database_path=self.store.database_path)
+        self.assertEqual(read_history(self.store, "legacy-inline"), inline)
+        self.assertEqual(read_history(self.store, "legacy-chunked"), chunked)
+        self.assertEqual(decode_history(manifest, database_path=self.store.database_path), chunked)
+        self.assertEqual(saved_turn_status(self.store, "legacy-chunked", "old"), "completed")
 
-    def test_many_small_items_do_not_require_a_python_row_per_item(self):
-        history = {"id": "conversation", "turns": [{"id": "turn", "status": "completed", "items": [
-            {"id": str(index), "type": "agentMessage", "text": "text " * 80}
-            for index in range(1000)]}]}
-        self.persistence.save("conversation", history)
-        fetched = []
-        def observe_row(cursor, row):
-            fetched.append(1)
-            return row
-        with closing(sqlite3.connect(self.store.database_path)) as db:
-            db.row_factory = observe_row
-            self.assertEqual(decode_history(self.raw(), db=db), history)
-        self.assertLess(len(fetched), 100, "History reads crossed into Python for every small item")
+        windows = SavedHistoryWindows()
+        window = read_history(self.store, "legacy-chunked", windows=windows)
+        self.assertEqual(window, recent_view(chunked))
 
-    def test_recent_manifest_reads_only_visible_turns_and_their_verified_items(self):
-        from agent_coord.history_window import RECENT_TURNS, recent_view
-        turns = [{"id": str(i), "status": "completed", "items": [
-            {"type": "commandExecution", "aggregatedOutput": str(i) + "output " * 1024}
-        ]} for i in range(RECENT_TURNS + 50)]
-        thread = {"id": "conversation", "turns": turns}
-        self.persistence.save("conversation", thread)
-        with closing(sqlite3.connect(self.store.database_path)) as db:
-            root = history_storage._documents(db, [json.loads(self.raw())["root"]])[0]
-            earlier = {tuple(ref) for ref in root["turns"][:-RECENT_TURNS]}
-            visible = history_storage._documents(db, root["turns"][-1:])[0]["items"][0][0]
-        windows = history_storage.SavedHistoryWindows()
-        with patch.object(history_storage, "_documents", wraps=history_storage._documents) as documents:
-            self.assertEqual(read_history(self.store, "conversation", windows=windows), recent_view(thread))
-        fetched = {tuple(ref) for call in documents.call_args_list for ref in call.args[1]}
-        self.assertFalse(earlier & fetched, "Recent refresh decoded archived turns")
-        with patch.object(history_storage, "_prefetch_blocks") as prefetch:
-            self.assertEqual(read_history(self.store, "conversation", windows=windows), recent_view(thread))
-            with history_storage._READ_AHEAD_SLOT:
-                self.assertEqual(read_history(self.store, "conversation", windows=history_storage.SavedHistoryWindows()),
-                                 recent_view(thread))
-            prefetch.assert_not_called()
+        # Corrupting a chunk raises HistoryUnavailableError explicitly.
+        root_digest = json.loads(manifest)["root"][0]
         with self.store._connection() as db:
-            db.execute("UPDATE browser_history_chunks SET payload=? WHERE digest=?", (b"damaged", visible))
+            db.execute("UPDATE browser_history_chunks SET payload = ? WHERE digest = ?", (b"corrupt", root_digest))
         with self.assertRaisesRegex(HistoryUnavailableError, "integrity"):
-            read_history(self.store, "conversation", windows=windows)
-        with self.assertRaisesRegex(HistoryUnavailableError, "integrity"):
-            read_history(self.store, "conversation", windows=history_storage.SavedHistoryWindows())
-
-    def test_existing_legacy_search_trigger_accepts_repeated_publication(self):
-        with self.store._connection() as db:
-            db.execute("CREATE TABLE legacy_dirty(thread_id TEXT PRIMARY KEY)")
-            for event in ("INSERT", "UPDATE"):
-                db.execute(f"""CREATE TRIGGER legacy_dirty_{event.lower()} AFTER {event} ON browser_history
-                    BEGIN INSERT OR REPLACE INTO legacy_dirty VALUES(NEW.thread_id); END""")
-        history = large_history()
-        self.persistence.save("conversation", history)
-        history["turns"][-1]["status"] = "completed"
-        self.persistence.save("conversation", history)
-        self.assertEqual(read_history(self.store, "conversation"), history)
-
-    def test_decoder_opens_one_read_connection_and_batches_items(self):
-        history = large_history()
-        history["turns"][0]["items"].extend({"id": str(index), "text": "answer"} for index in range(400))
-        self.persistence.save("conversation", history)
-        connect = sqlite3.connect
-        with patch.object(history_storage.sqlite3, "connect", wraps=connect) as opened:
-            self.assertEqual(decode_history(self.raw(), database_path=self.store.database_path), history)
-        self.assertEqual(opened.call_count, 1)
+            decode_history(manifest, database_path=self.store.database_path)
 
 
 class BrowserHistoryPersistenceTests(unittest.TestCase):
-    def test_derived_search_work_does_not_hold_conversation_save_barrier(self):
-        entered, release = threading.Event(), threading.Event()
-        history = large_history(self.identity)
-
-        def seed(store, prepared):
-            entered.set()
-            release.wait(2)
-            yield
-
-        try:
-            with patch("agent_coord.conversation_search.seed_prepared_history_steps", side_effect=seed):
-                self.sessions._remember_thread(history)
-                self.assertTrue(entered.wait(2))
-                self.assertTrue(self.sessions.persistence.flush(key=self.identity, timeout=.1))
-                self.assertEqual(read_history(self.store, self.identity)["turns"], history["turns"])
-        finally:
-            release.set()
-            self.assertTrue(self.sessions.persistence.flush(timeout=3))
-
     def setUp(self):
         from agent_coord.codex_app_server import BrowserSessions
         from test_codex_app_server import FakeCodex
+
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
@@ -476,8 +186,8 @@ class BrowserHistoryPersistenceTests(unittest.TestCase):
         self.identity = self.sessions.create({"name": "History validation"})["session"]["thread_id"]
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
 
-    def test_all_provider_readers_and_snapshot_recovery_read_chunked_history(self):
-        history = large_history(self.identity)
+    def test_all_provider_readers_and_snapshot_recovery_read_transcript_store(self):
+        history = large_history(self.identity, size=128 * 1024)
         history["turns"][-1]["status"] = "completed"
         self.sessions._remember_thread(history)
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
@@ -489,32 +199,34 @@ class BrowserHistoryPersistenceTests(unittest.TestCase):
             read = getattr(adapter, "_read_history", None) or adapter._history
             self.assertEqual(read(self.identity)["turns"], history["turns"], type(adapter).__name__)
 
-    def test_activity_and_routing_read_complete_history_before_and_after_indexing(self):
+    def test_activity_and_routing_read_complete_history(self):
         from agent_coord.activity_api import read_activity_history
-        from agent_coord.conversation_search import refresh_messages
         from agent_coord.dispatch_snapshot import read_snapshot
-        history = large_history(self.identity)
+
+        history = large_history(self.identity, size=64 * 1024)
+        history["turns"][-1]["status"] = "completed"
         self.sessions._remember_thread(history)
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        self.assertTrue(self.store.search_store.flush())
+
         activity = read_activity_history(self.store, self.identity)
         self.assertIn("Saved answer", [message["text"] for message in activity["messages"]])
-        for indexed in (False, True):
-            if indexed:
-                refresh_messages(self.store)
-            snapshot = read_snapshot(self.store.database_path)
-            conversation = next(row for row in snapshot["threads"] if row["thread_id"] == self.identity)
-            self.assertIn("Saved answer", [message["text"] for message in conversation["messages"]])
+
+        snapshot = read_snapshot(self.store.database_path)
+        conversation = next(row for row in snapshot["threads"] if row["thread_id"] == self.identity)
+        self.assertIn("Saved answer", [message["text"] for message in conversation["messages"]])
+
         history["turns"][0]["items"][1]["text"] = "Revised answer"
         self.sessions._remember_thread(history)
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
-        refresh_messages(self.store)
+        self.assertTrue(self.store.search_store.flush())
         snapshot = read_snapshot(self.store.database_path)
         conversation = next(row for row in snapshot["threads"] if row["thread_id"] == self.identity)
         self.assertIn("Revised answer", [message["text"] for message in conversation["messages"]])
         self.assertNotIn("Saved answer", [message["text"] for message in conversation["messages"]])
 
     def test_terminal_save_retains_final_item_and_does_not_clear_newer_dirty_revision(self):
-        history = large_history(self.identity)
+        history = large_history(self.identity, size=64 * 1024)
         self.sessions._remember_thread(history)
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
         saved = self.sessions.history_persistence.save_steps
@@ -526,7 +238,8 @@ class BrowserHistoryPersistenceTests(unittest.TestCase):
                 changed.append(True)
                 with self.sessions.lock:
                     self.sessions.histories[identity]["turns"][-1]["items"].append(
-                        {"id": "final", "type": "agentMessage", "text": "Final answer"})
+                        {"id": "final", "type": "agentMessage", "text": "Final answer"}
+                    )
                     self.sessions._save_history(identity)
             return result
 

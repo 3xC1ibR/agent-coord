@@ -513,27 +513,64 @@ class BrowserHTTPTests(unittest.TestCase):
             content = response.read().decode()
             return response.status, json.loads(content) if response.headers.get_content_type() == "application/json" else content
 
-    def test_transfer_input_pins_receiver_and_reserves_ordinary_message_once(self):
-        thread = self.request("/api/browser/sessions", {"cwd":str(self.root),"name":"Transfer"})[1]["session"]["thread_id"]
-        self.server.transfer_receiver = ("serving-instance", "serving-payload", "local-control")
-        file = Path(self.store.database_path).stat()
-        headers = {"X-Ribbon-Receiver-Instance":"serving-instance", "X-Ribbon-Receiver-Payload":"serving-payload",
-                   "Authorization":"Bearer local-control", "X-Ribbon-Receiver-Database":f"{file.st_dev}:{file.st_ino}"}
-        path = f"/api/browser/sessions/{thread}/update-input"
-        body = {"requestId":"original-receipt","message":"ordinary composer"}
-        with patch.object(self.sessions, "_send_composer", return_value={"turnId":"original-turn"}) as send, \
-                patch.object(self.sessions.dispatch, "submit", side_effect=AssertionError("Transferred input was rerouted")):
-            for key in headers:
-                self.assertEqual(self.request(path, body, {**headers,key:"changed"})[0], 403)
-            send.assert_not_called()
-            self.assertEqual(self.request(path, body, headers)[0], 200)
-            with patch.object(self.sessions.dispatch, "settings", return_value={"enabled":True}):
-                self.assertEqual(self.request(path, body, headers)[0], 200)
-            send.assert_called_once()
-        with self.store.reading(), self.store._connection() as db:
-            receipt = db.execute("SELECT state FROM browser_submission_receipts WHERE thread_id=? AND request_id=?",
-                                 (thread, body["requestId"])).fetchone()
-        self.assertEqual(receipt[0], "completed")
+    def test_retired_transfer_input_route_returns_not_found(self):
+        thread = self.request("/api/browser/sessions", {"cwd": str(self.root), "name": "Transfer"})[1]["session"]["thread_id"]
+        status, result = self.request(
+            f"/api/browser/sessions/{thread}/update-input",
+            {"requestId": "retired-receipt", "message": "ordinary composer"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(result, {"error": "not found"})
+
+    def test_session_window_pagination_and_turn_full_expansion(self):
+        thread = self.request("/api/browser/sessions", {"cwd": str(self.root), "name": "Paginated"})[1]["session"]["thread_id"]
+        large_output = "output-line-" * 200
+        turns = [
+            {
+                "id": f"turn-{index}",
+                "status": "completed",
+                "items": [
+                    {"id": f"user-{index}", "type": "userMessage", "content": [{"type": "text", "text": f"Prompt {index}"}]},
+                    {"id": f"cmd-{index}", "type": "commandExecution", "command": "ls", "status": "completed", "aggregatedOutput": large_output},
+                    {"id": f"ans-{index}", "type": "agentMessage", "text": f"Answer {index}"},
+                ],
+            }
+            for index in range(6)
+        ]
+        self.sessions._remember_thread({"id": thread, "turns": turns, "status": {"type": "idle"}})
+        self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread))
+
+        for resident in (True, False):
+            with self.subTest(resident=resident):
+                if not resident:
+                    self.sessions.histories.pop(thread, None)
+                    self.sessions.loaded.discard(thread)
+                status, page1 = self.request(f"/api/browser/sessions/{thread}?limit=2", headers={"X-Agent-Coord-History-View": "recent"})
+                self.assertEqual(status, 200)
+                self.assertEqual([t["id"] for t in page1["thread"]["turns"]], ["turn-4", "turn-5"])
+                self.assertEqual(page1["thread"]["earlierTurns"], 4)
+                self.assertEqual(page1["thread"]["beforeSeq"], 4)
+                cmd_item = page1["thread"]["turns"][0]["items"][1]
+                self.assertTrue(cmd_item["abridged"])
+                if not resident:
+                    self.assertEqual(cmd_item["blobRef"]["turnId"], "turn-4")
+
+                status, page2 = self.request(
+                    f"/api/browser/sessions/{thread}?before_seq={page1['thread']['beforeSeq']}&limit=2",
+                    headers={"X-Agent-Coord-History-View": "recent"},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual([t["id"] for t in page2["thread"]["turns"]], ["turn-2", "turn-3"])
+                self.assertEqual(page2["thread"]["earlierTurns"], 2)
+                self.assertEqual(page2["thread"]["beforeSeq"], 2)
+
+                status, expanded = self.request(f"/api/browser/sessions/{thread}/turns/turn-4/full")
+                self.assertEqual(status, 200)
+                self.assertEqual(expanded["turn"]["id"], "turn-4")
+                self.assertEqual(expanded["turn"]["items"][1]["aggregatedOutput"], large_output)
+                self.assertNotIn("abridged", expanded["turn"]["items"][1])
+
+        self.assertEqual(self.request(f"/api/browser/sessions/{thread}/turns/missing-turn/full")[0], 404)
 
     def test_skill_catalog_requires_csrf_and_restricts_workspace_without_starting_a_turn(self):
         body = {"client": "codex", "cwd": str(self.root)}
@@ -570,19 +607,14 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertNotIn(private_message, json.dumps(metrics))
 
     def test_authorized_performance_request_refreshes_index_coverage(self):
-        from agent_coord import conversation_substrings as substrings
-        if not substrings.ensure_schema(self.store):
-            self.skipTest("SQLite trigram indexing is unavailable")
-        substrings._status(self.store, remaining_sources=123, coverage_observed_monotonic=0)
-        with patch.object(substrings, "_coverage", wraps=substrings._coverage) as scan:
+        with patch.object(self.store.search_store, "status", wraps=self.store.search_store.status) as scan:
             self.assertEqual(self.request("/api/browser/performance", headers={"Host": "untrusted.invalid"})[0], 403)
             scan.assert_not_called()
             status, result = self.request("/api/browser/performance", headers={"X-Agent-Coord-Token": self.token})
             self.assertEqual(status, 200)
-            scan.assert_called_once_with(self.store)
-        coverage = result["search"]["substring_index"]
-        self.assertEqual(coverage["remaining_sources"], 0)
-        self.assertGreater(coverage["coverage_observed_monotonic"], 0)
+            scan.assert_called_once_with()
+        self.assertIn("indexed_turns", result["search"])
+        self.assertIn("size_bytes", result["search"])
 
     def test_database_contention_closes_event_stream_without_second_http_response(self):
         with patch.object(self.sessions, "snooze_notifications", side_effect=sqlite3.OperationalError("database is locked")):
@@ -596,10 +628,10 @@ class BrowserHTTPTests(unittest.TestCase):
                                                 ("elsewhere", self.root.parent / "other-workspace", "now")):
             self.store.register(session_id=identity, client="codex", cwd=str(directory), name="Unrelated title")
             self.store.threads.update(identity, attention=placement)
-            history = {"turns": [{"id": "turn", "items": [{"id": "item", "type": "userMessage",
+            history = {"turns": [{"id": "turn", "status": "completed", "items": [{"id": "item", "type": "userMessage",
                 "content": [{"type": "text", "text": "Could Jev help?"}]}]}]}
-            with self.store._connection() as db:
-                db.execute("INSERT INTO browser_history VALUES (?, ?)", (identity, json.dumps(history)))
+            self.store.transcripts.save_turns(identity, history)
+        self.assertTrue(self.store.search_store.flush())
         with patch.object(self.sessions, "read", side_effect=AssertionError("Search resumed a provider")):
             status, all_results = self.request("/api/browser/search?q=jev&my_messages=true")
             self.assertEqual(status, 200)

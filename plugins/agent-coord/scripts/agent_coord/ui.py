@@ -319,6 +319,107 @@ def browser_content_policy(path, status, content_type, origin, authorized):
     return {"X-Frame-Options": frame_policy, "Content-Security-Policy": content_policy}
 
 
+class _NotificationBroadcaster:
+    """Single shared in-process notification fan-out signaled on DatabaseWriter commits."""
+
+    def __init__(self, store: CoordinationStore, sessions: BrowserSessions | None) -> None:
+        self.store = store
+        self.sessions = sessions
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._subscribers = 0
+        self._generation = 0
+        self._snapshot: dict[str, Any] | None = None
+        self._error: sqlite3.OperationalError | None = None
+        self._stopped = False
+        self._worker: threading.Thread | None = None
+
+    def _poll_once(self) -> tuple[dict[str, Any] | None, sqlite3.OperationalError | None]:
+        if self.sessions is None or self.sessions.closed:
+            return None, None
+        try:
+            with self.store.reading(), self.store._connection() as db:
+                comp_seq = self.store.threads.completion_cursor()
+                msg_seq = db.execute("SELECT COALESCE(MAX(seq), 0) FROM message_changes").fetchone()[0]
+                send_seq = db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+            snoozes = self.sessions.snooze_notifications()
+            approvals = self.sessions.approval_notifications()
+            return {
+                "completion_seq": comp_seq,
+                "message_seq": msg_seq,
+                "send_seq": send_seq,
+                "snoozes": snoozes,
+                "approvals": approvals,
+            }, None
+        except sqlite3.OperationalError as exc:
+            return None, exc
+
+    def _run(self) -> None:
+        writer = self.store._writer
+        observed_commit = -1
+        while True:
+            with self._condition:
+                if self._stopped or self._subscribers <= 0 or self.sessions is None or self.sessions.closed:
+                    self._worker = None
+                    return
+            snap, err = self._poll_once()
+            with self._condition:
+                self._snapshot = snap
+                self._error = err
+                self._generation += 1
+                self._condition.notify_all()
+            with writer.commit_condition:
+                if writer.commit_revision == observed_commit and not self._stopped:
+                    writer.commit_condition.wait(timeout=1.0)
+                observed_commit = writer.commit_revision
+
+    def subscribe(self) -> tuple[int, dict[str, Any]]:
+        snap, err = self._poll_once()
+        if err is not None:
+            raise err
+        with self._condition:
+            self._subscribers += 1
+            if snap is not None and self._snapshot is None:
+                self._snapshot = snap
+                self._generation += 1
+            if not self._stopped and (self._worker is None or not self._worker.is_alive()):
+                self._worker = threading.Thread(
+                    target=self._run, name="rf-notification-broadcaster", daemon=True
+                )
+                self._worker.start()
+            return self._generation, self._snapshot or {
+                "completion_seq": 0,
+                "message_seq": 0,
+                "send_seq": 0,
+                "snoozes": [],
+                "approvals": [],
+            }
+
+    def unsubscribe(self) -> None:
+        with self._condition:
+            self._subscribers = max(0, self._subscribers - 1)
+        with self.store._writer.commit_condition:
+            self.store._writer.commit_condition.notify_all()
+
+    def latest(self, seen_generation: int) -> tuple[int, dict[str, Any] | None]:
+        with self._condition:
+            if self._error is not None:
+                raise self._error
+            if self._generation == seen_generation:
+                return seen_generation, None
+            return self._generation, self._snapshot
+
+    def close(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
+        with self.store._writer.commit_condition:
+            self.store._writer.commit_condition.notify_all()
+        worker = self._worker
+        if worker is not None and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=2)
+
+
 def _handler(
     store: CoordinationStore,
     parent_session_id: str | None,
@@ -330,11 +431,13 @@ def _handler(
     native_push: NativePush | None = None,
     provider_limits: ProviderLimits | None = None,
     coordination_metrics: CoordinationMetrics | None = None,
+    notification_broadcaster: _NotificationBroadcaster | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     views = ViewStore(store)
     navigation = NavigationStore(store)
     speech = Speech(store.database_path)
     jev = JevSettings(store.database_path)
+    broadcaster = notification_broadcaster or _NotificationBroadcaster(store, browser_sessions)
     provider_limits = provider_limits or (ProviderLimits(browser_sessions) if browser_sessions is not None else None)
     coordination_metrics = coordination_metrics or (CoordinationMetrics(store.database_path, browser_sessions.cwd)
                                                     if browser_sessions is not None else None)
@@ -580,41 +683,46 @@ def _handler(
                 b'{"error":"not found"}',
             )
 
-        def _coordination_events(self, completion_sequence, message_sequence, send_sequence):
-            completions = browser_sessions.completions_after(completion_sequence)
-            message_sequence, changes = message_changes(store, message_sequence, browser_sessions.cwd)
-            send_sequence, sends = message_sends(store, send_sequence, browser_sessions.cwd)
-            notifications = {
-                "completions": completions["events"], "completionSeq": completions["seq"],
-                "snoozes": browser_sessions.snooze_notifications(),
-                "approvals": browser_sessions.approval_notifications(),
-            }
-            return message_sequence, send_sequence, changes + sends, notifications
-
         def _stream_events(self, sequence, completion_sequence):
             message_sequence = message_cursor(store)
             send_sequence, _ = message_sends(store)
-            # Keep one poll in flight per connection. Only this handler writes
-            # frames and advances the cursors advertised to this client.
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="rf-notifications") as reader:
-                poll = None
-                next_poll = 0.0
+            seen_gen, initial_snap = broadcaster.subscribe()
+            first_pass = True
+            try:
                 while not browser_sessions.closed:
-                    if poll is None and time.monotonic() >= next_poll:
-                        next_poll = time.monotonic() + 1
-                        poll = reader.submit(self._coordination_events, completion_sequence, message_sequence, send_sequence)
                     batch = browser_sessions.events_after(sequence, timeout=1)
                     if browser_sessions.closed or not self._authorized():
                         return
                     sequence = batch["seq"]
                     batch.update(completions=[], completionSeq=completion_sequence)
-                    if poll is not None and poll.done():
-                        message_sequence, send_sequence, changes, notifications = poll.result()
-                        poll = None
+                    if first_pass:
+                        snap = initial_snap
+                        first_pass = False
+                    else:
+                        seen_gen, snap = broadcaster.latest(seen_gen)
+                    if snap is not None:
+                        changes: list[dict] = []
+                        if snap["completion_seq"] > completion_sequence:
+                            completions = browser_sessions.completions_after(completion_sequence)
+                            completion_sequence = completions["seq"]
+                            batch["completions"] = completions["events"]
+                            batch["completionSeq"] = completion_sequence
+                        if snap["message_seq"] > message_sequence:
+                            message_sequence, msg_events = message_changes(
+                                store, message_sequence, browser_sessions.cwd
+                            )
+                            changes.extend(msg_events)
+                        if snap["send_seq"] > send_sequence:
+                            send_sequence, send_events = message_sends(
+                                store, send_sequence, browser_sessions.cwd
+                            )
+                            changes.extend(send_events)
                         batch["events"].extend(changes)
-                        batch.update(notifications)
-                        completion_sequence = batch["completionSeq"]
+                        batch["snoozes"] = snap["snoozes"]
+                        batch["approvals"] = snap["approvals"]
                     self._event_batch(batch)
+            finally:
+                broadcaster.unsubscribe()
 
         def _event_batch(self, batch: dict) -> None:
             cursor = f"{batch['seq']}:{batch['completionSeq']}"
@@ -839,14 +947,51 @@ def _handler(
                     thread = browser_sessions.work_thread(thread_id)
                     thread["close_when_done"] = ThreadControl(store).status(thread_id)
                 self._json(HTTPStatus.OK, thread)
+            elif route.startswith("sessions/") and route.endswith("/full") and "/turns/" in route:
+                parts = route.split("/")
+                if len(parts) != 5 or parts[0] != "sessions" or parts[2] != "turns" or parts[4] != "full":
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                thread_id, turn_id = unquote(parts[1]), unquote(parts[3])
+                with store.reading():
+                    turn = browser_sessions.read_turn_full(thread_id, turn_id)
+                if turn is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "Turn not found."})
+                else:
+                    self._json(HTTPStatus.OK, {"turn": turn})
             elif route.startswith("sessions/"):
-                # Opening a conversation asks for its recent view; other reads
-                # and older clients receive the complete history.
+                # Opening a conversation asks for its recent view; upward pagination
+                # supplies before_seq and optional limit.
                 view = self.headers.get("X-Agent-Coord-History-View", "complete")
                 if view not in {"complete", "recent"}:
                     raise CoordinationError("History view must be complete or recent.")
+                if set(query) - {"before_seq", "limit"} or any(len(v) != 1 for v in query.values()):
+                    raise CoordinationError("Session history accepts optional before_seq and limit parameters.")
+                before_seq = None
+                if "before_seq" in query:
+                    try:
+                        before_seq = int(query["before_seq"][0])
+                        if before_seq < 0:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise CoordinationError("before_seq must be a nonnegative integer.") from exc
+                from .history_window import RECENT_TURNS
+                limit = RECENT_TURNS
+                if "limit" in query:
+                    try:
+                        limit = int(query["limit"][0])
+                        if not 1 <= limit <= 200:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise CoordinationError("History limit must be between 1 and 200.") from exc
                 with store.reading():
-                    result = browser_sessions.read(unquote(route[9:]), recent=view == "recent", snapshot=True)
+                    result = browser_sessions.read(
+                        unquote(route[9:]),
+                        recent=view == "recent" or before_seq is not None,
+                        snapshot=True,
+                        before_seq=before_seq,
+                        limit=limit,
+                    )
                     if self.headers.get("X-Agent-Coord-Thread-Controls") == "1":
                         from .thread_control import ThreadControl
                         work = result["work_thread"]
@@ -962,7 +1107,7 @@ def _handler(
                 return
             try:
                 route = urlparse(self.path).path.split("/")[1:]
-                image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue", "update-input"}
+                image_route = len(route) == 5 and route[:3] == ["api", "browser", "sessions"] and route[4] in {"messages", "queue"}
                 schedule_route = route[:3] == ["api", "browser", "schedules"]
                 max_body = MAX_MESSAGE_BODY_BYTES if image_route else 1024 * 1024 if schedule_route else _MAX_BODY_BYTES
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1366,20 +1511,6 @@ def _handler(
                 thread_id = unquote(route[3])
                 if len(route) == 4:
                     result = browser_sessions.update(thread_id, body)
-                elif len(route) == 5 and route[4] == "update-input":
-                    receiver = getattr(self.server, "transfer_receiver", None)
-                    file = Path(store.database_path).stat()
-                    if (not self._local_request() or receiver is None
-                            or self.headers.get("X-Ribbon-Receiver-Instance") != receiver[0]
-                            or self.headers.get("X-Ribbon-Receiver-Payload") != receiver[1]
-                            or self.headers.get("X-Ribbon-Receiver-Database") != f"{file.st_dev}:{file.st_ino}"
-                            or not secrets.compare_digest(self.headers.get("Authorization", "").encode(),
-                                                          ("Bearer " + receiver[2]).encode())):
-                        self._json(HTTPStatus.FORBIDDEN, {"error": "The receiving coordinator changed."})
-                        return
-                    if not isinstance(body.get("requestId"), str) or not body["requestId"].strip():
-                        raise CoordinationError("A transferred message requires its original receipt identity.")
-                    result = browser_sessions.submit(thread_id, body, transfer=True)
                 elif len(route) == 5 and route[4] == "messages":
                     result = browser_sessions.submit(thread_id, body)
                 elif len(route) == 5 and route[4] == "queue":
@@ -1437,6 +1568,7 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
     thread_control: ThreadControlWorker | None = None
     app_control: AppControlWorker | None = None
     coordination_metrics: CoordinationMetrics | None = None
+    notification_broadcaster: _NotificationBroadcaster | None = None
 
     stoic_integration = None
 
@@ -1475,6 +1607,8 @@ class LoopbackHTTPServer(ThreadingHTTPServer):
                 mailbox.put(None)
             self._idle_workers.clear()
         try:
+            if self.notification_broadcaster is not None:
+                self.notification_broadcaster.close()
             if self.stoic_integration is not None:
                 self.stoic_integration.close()
             if self.coordination_metrics is not None:
@@ -1537,14 +1671,17 @@ def make_ui_server(
     native = NativePush(store, sessions, remote)
     provider_limits = ProviderLimits(sessions)
     coordination_metrics = CoordinationMetrics(store.database_path, sessions.cwd)
+    notification_broadcaster = _NotificationBroadcaster(store, sessions)
     try:
-        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics))
+        server = server_type((host, port), _handler(store, parent_session_id, cwd, sessions, secrets.token_urlsafe(32), remote, push, native, provider_limits, coordination_metrics, notification_broadcaster))
     except Exception:
+        notification_broadcaster.close()
         coordination_metrics.close()
         push.close()
         native.close()
         sessions.close()
         raise
+    server.notification_broadcaster = notification_broadcaster
     server.external_work = sessions.external_work
     server.browser_sessions = sessions
     server.remote_access = remote

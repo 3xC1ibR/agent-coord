@@ -29,9 +29,10 @@ from .browser_queue import BrowserMessageQueue
 from .thread_inventory import WAKE_PAUSES, has_table, wake_fields
 from .inventory_projection import entity_tag, list_card
 from .conversation_residency import Resident, releasable
-from .history_window import RECENT_TURNS, recent_view
+from .history_window import RECENT_TURNS, abridge_turn, recent_view
 from .history_persistence import (HistoryPersistence, SavedHistoryWindows, ensure_schema as ensure_history_schema,
                                   prepare_history, publish_history, read_history, stage_history)
+from .transcript_store import migrate_if_needed
 from .browser_persistence import BrowserPersistence
 from .thread_usage import codex_totals
 from .app_agent_failures import notify_agent_failure
@@ -384,10 +385,8 @@ class BrowserSessions:
                 connection.execute("ALTER TABLE browser_sessions ADD COLUMN permission_mode TEXT")
             if "service_tier" not in columns:
                 connection.execute("ALTER TABLE browser_sessions ADD COLUMN service_tier TEXT")
-            connection.execute("""CREATE TABLE IF NOT EXISTS browser_history (
-                thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL
-            )""")
             ensure_history_schema(connection)
+        migrate_if_needed(store)
         self.navigation = NavigationStore(store)
         from .submission_receipts import SubmissionReceipts
         self.submissions = SubmissionReceipts(store)
@@ -483,13 +482,17 @@ class BrowserSessions:
         with self.lock:
             return self.thread_locks.setdefault(thread_id, threading.RLock())
 
-    def _record(self, thread_id: str) -> dict:
-        with self.store.reading(), self.store._connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)
-            ).fetchone()
-        if row is None or not matches_workspace(row["cwd"], self.cwd):
+    def _record_from_row(self, thread_id: str, row) -> dict:
+        if row is None:
             raise CoordinationError("Browser session not found in this workspace.")
+        ws_cache = getattr(self, "_verified_workspaces", None)
+        if ws_cache is None:
+            ws_cache = self._verified_workspaces = set()
+        ws_key = (row["cwd"], self.cwd)
+        if ws_key not in ws_cache:
+            if not matches_workspace(row["cwd"], self.cwd):
+                raise CoordinationError("Browser session not found in this workspace.")
+            ws_cache.add(ws_key)
         record = dict(row)
         record["permission_mode"] = selected_mode(record)
         cached = self.permission_catalogs.get((record["client"], record["cwd"]))
@@ -501,6 +504,13 @@ class BrowserSessions:
         record["permission_mode_effective"] = (self.permission_effective.get(thread_id) if record["client"] == "codex"
                                                else state(thread_id) if state else None)
         return record
+
+    def _record(self, thread_id: str) -> dict:
+        with self.store.reading(), self.store._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+        return self._record_from_row(thread_id, row)
 
     def permission_modes(self, client: str = "codex", cwd: str | None = None) -> list[dict]:
         provider = self._provider(client)
@@ -547,25 +557,35 @@ class BrowserSessions:
         return self._provider(session["client"])
 
     def _publish(self, method: str, params: dict, **extra) -> None:
-        if extra.get("requestKey") or not (method.startswith(("item/", "hook/")) or method.endswith(("/delta", "/outputDelta"))
-                                           or method in CONVERSATION_ONLY_EVENTS):
+        is_stream_only = not extra.get("requestKey") and (
+            method.startswith(("item/", "hook/"))
+            or method.endswith(("/delta", "/outputDelta"))
+            or method in CONVERSATION_ONLY_EVENTS
+        )
+        if not is_stream_only:
             self.inventory_changed()
+        projection = getattr(self, "projection", None)
+        if projection is not None and projection.buffer_publication({"method": method, "params": params, **extra}):
+            return
+        with self.events_changed:
+            self.sequence += 1
+            event = {"seq": self.sequence, "method": method, "params": params, **extra}
+            self.events.append(event)
+            self.events_changed.notify_all()
         with self.changed:
-            projection = getattr(self, "projection", None)
-            if projection is not None and projection.buffer_publication({"method": method, "params": params, **extra}):
-                return
-            event = {"seq": self.sequence + 1, "method": method, "params": params, **extra}
-            if projection is not None:
-                projection.publication(event)
-            self.append_committed_events([event])
+            self.changed.notify_all()
+        if projection is not None and not is_stream_only:
+            projection.publication(event)
 
     def append_committed_events(self, events):
         """Publish under the session lock only after the corresponding storage commit."""
         with self.events_changed:
             self.events.extend(events)
-            self.sequence = events[-1]["seq"]
+            if events[-1]["seq"] > self.sequence:
+                self.sequence = events[-1]["seq"]
             self.events_changed.notify_all()
-        self.changed.notify_all()
+        with self.changed:
+            self.changed.notify_all()
 
     def inventory_changed(self) -> None:
         with self.inventory_lock:
@@ -703,9 +723,8 @@ class BrowserSessions:
             if (self.closed or self.store.read_only or self.search_index_started
                     or str(self.store.database_path) not in _OWNED_DATABASES):
                 return False
-            from .conversation_substrings import backfill_steps
-            self.persistence.submit(lambda: backfill_steps(self.store),
-                                    key=("search_substrings",), required=False)
+            self.persistence.submit(lambda: self.store.search_store._ensure_initialized(),
+                                    key=("search_index",), required=False)
             self.search_index_started = True
             return True
 
@@ -766,7 +785,13 @@ class BrowserSessions:
             # controlled shutdown is not an unexpected provider interruption.
             params = {**params, "controlledShutdown": True}
         thread_id = params.get("threadId")
+        if thread_id and method.startswith(("turn/", "item/")):
+            with self.lock:
+                needs_preload = thread_id in self.loaded and thread_id not in self.histories
+            if needs_preload:
+                self._load_history_unlocked(thread_id)
         public, review_stage = self.reviews.public_event(method, params) if hasattr(self, "reviews") else (params, False)
+        live_journal_frame = None
         with self.lock:
             # A late completion for an older turn must not end a newer turn.
             if (method == "turn/completed" and self.active.get(thread_id)
@@ -800,7 +825,7 @@ class BrowserSessions:
                         continue
                     self.turn_revisions[loaded_id] = self.turn_revisions.get(loaded_id, 0) + 1
             if thread_id in self.loaded:
-                self._capture_history(method, params)
+                live_journal_frame = self._capture_history(method, params)
             if (method == "item/completed" and params.get("item", {}).get("type") == "userMessage"
                     and self.starting_notification_context.get(thread_id, {}).get("origin") == "user"
                     and params.get("turnId")):
@@ -863,7 +888,22 @@ class BrowserSessions:
             self._publish(method, public)
             if not review_stage and (method == "turn/completed" or (method == "item/completed" and params.get("item", {}).get("type") == "agentMessage")):
                 self._queue_public_output(method, params)
-            if method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
+            if (
+                method == "thread/tokenUsage/updated"
+                and thread_id
+                and thread_id in self.active
+                and getattr(self, "projection", None) is not None
+            ):
+                saved_usage = self._persistence_event_params(method, params)
+                saved_usage["usage_observed_at"] = self.store.clock()
+                self.__dict__.setdefault("_pending_token_usage", {})[thread_id] = saved_usage
+            elif method in {"turn/started", "turn/completed", "thread/closed", "bridge/disconnected", "thread/tokenUsage/updated"}:
+                deferred_usage = self.__dict__.setdefault("_pending_token_usage", {}).pop(thread_id, None) if thread_id else None
+                if deferred_usage is not None:
+                    self.persistence.submit(
+                        lambda deferred_usage=deferred_usage: self._persist_event("thread/tokenUsage/updated", deferred_usage, set()),
+                        key=thread_id, coalesce="usage", required=False,
+                    )
                 saved_params = self._persistence_event_params(method, params)
                 saved_params["usage_observed_at"] = self.store.clock()
                 saved_params["turn_observed_at"] = saved_params["usage_observed_at"]
@@ -872,12 +912,20 @@ class BrowserSessions:
                 if method == "bridge/disconnected":
                     # Provider-wide notifications still have conversation-local barriers.
                     for identity in disconnected:
+                        deferred = self.__dict__.get("_pending_token_usage", {}).pop(identity, None)
+                        if deferred is not None:
+                            self.persistence.submit(
+                                lambda deferred=deferred: self._persist_event("thread/tokenUsage/updated", deferred, set()),
+                                key=identity, coalesce="usage", required=False,
+                            )
                         self.persistence.submit(lambda identity=identity: self._persist_event(
                             method, saved_params, {identity}, disconnected_turns), key=identity)
                 else:
                     self.persistence.submit(lambda: self._persist_event(method, saved_params, disconnected, disconnected_turns),
                                             key=thread_id, coalesce="usage" if method == "thread/tokenUsage/updated" else None,
                                             required=method != "thread/tokenUsage/updated")
+        if live_journal_frame is not None and getattr(self, "projection", None) is None and thread_id:
+            self.store.transcripts.append_live(thread_id, live_journal_frame)
 
     def _queue_public_output(self, method, params):
         """Queue bounded public records, never copies of tool transcripts."""
@@ -903,6 +951,11 @@ class BrowserSessions:
             self.persistence.submit(lambda: self._persist_public_output("turn/completed", public_params), key=thread_id)
 
     def _persist_public_output(self, method, params):
+        thread_id = params.get("threadId")
+        if thread_id:
+            with self.store.reading(), self.store._connection() as db:
+                if not db.execute("SELECT 1 FROM interactive_bindings WHERE thread_id=?", (thread_id,)).fetchone():
+                    return
         self.session_control.observe(method, params)
 
     @staticmethod
@@ -1066,11 +1119,53 @@ class BrowserSessions:
                         SELECT 1 FROM turn_completions c WHERE c.thread_id = t.thread_id AND c.turn_key = t.turn_key)))""",
                 (self.store.clock(), int(active), activity, int(active), thread_id, turn_id, int(active))).rowcount)
 
+    def _load_history_unlocked(self, thread_id: str) -> dict:
+        with self.lock:
+            existing = self.histories.get(thread_id)
+            if existing is not None:
+                return existing
+        saved = read_history(self.store, thread_id)
+        loaded = saved if saved is not None else {"id": thread_id, "turns": []}
+        restore_timing(self.store, loaded)
+        with self.lock:
+            current = self.histories.get(thread_id)
+            if current is not None:
+                return current
+            self.histories[thread_id] = loaded
+            if saved is None:
+                self._dirty_history(thread_id)
+            return loaded
+
+    def history_snapshot(self, thread_id: str) -> dict:
+        self._load_history_unlocked(thread_id)
+        with self.lock:
+            snap, _ = self._snapshot_for_save_locked(thread_id)
+        return copy.deepcopy(snap)
+
+    def _snapshot_for_save_locked(self, thread_id: str) -> tuple[dict, int]:
+        """Build an O(1) save snapshot under self.lock without copying finalized historical turns."""
+        history = self.histories.get(thread_id)
+        if history is None:
+            history = {"id": thread_id, "turns": []}
+        meta = {key: copy.deepcopy(value) for key, value in history.items() if key != "turns"}
+        turns = list(history.get("turns") or [])
+        if turns:
+            active_id = self.active.get(thread_id)
+            turns = [
+                copy.deepcopy(turn)
+                if idx == len(turns) - 1 or turn.get("status") == "inProgress" or (active_id and turn.get("id") == active_id)
+                else turn
+                for idx, turn in enumerate(turns)
+            ]
+        meta["turns"] = turns
+        return meta, self.history_revisions.get(thread_id, 0)
+
     def _history(self, thread_id: str) -> dict:
         if thread_id not in self.histories:
             saved = read_history(self.store, thread_id)
-            self.histories[thread_id] = saved if saved is not None else {"id": thread_id, "turns": []}
-            restore_timing(self.store, self.histories[thread_id])
+            loaded = saved if saved is not None else {"id": thread_id, "turns": []}
+            restore_timing(self.store, loaded)
+            self.histories[thread_id] = loaded
             if saved is None:
                 self._dirty_history(thread_id)
         return self.histories[thread_id]
@@ -1083,82 +1178,70 @@ class BrowserSessions:
         self._dirty_history(thread_id)
         from .browser_persistence import capturing_writes
         if capturing_writes():
-            return  # The projection publishes history with its cursor.
+            return  # The projection publishes history with its boundary commit.
         self.persistence.submit(lambda: self._persist_history(thread_id), key=thread_id, coalesce="history")
 
     def _persist_history(self, thread_id):
+        self._load_history_unlocked(thread_id)
         with self.store._writer.measure_request("history.snapshot"), self.lock:
-            # Several item completions may queue while SQLite is busy. The first
-            # successful retry saves the latest mirror for all of them.
             if thread_id not in self.dirty_histories:
                 return
-            snapshot = copy.deepcopy(self._history(thread_id))
-            revision = self.history_revisions[thread_id]
+            snapshot, revision = self._snapshot_for_save_locked(thread_id)
         yield from self.history_persistence.save_steps(thread_id, snapshot)
         with self.lock:
-            if self.history_revisions[thread_id] == revision:
+            if self.history_revisions.get(thread_id) == revision:
                 self.dirty_histories.discard(thread_id)
         terminal_turns = {turn["id"]: turn["status"] for turn in snapshot.get("turns", [])
                           if turn.get("status") in {"completed", "failed", "interrupted"}}
-        # Completion callbacks precede the history commit. Preserve recovery
-        # until this terminal outcome is durable; acquire adapter locks outside
-        # self.lock so completion callbacks keep their existing lock order.
         for provider in (self.claude, self.antigravity):
             discard = getattr(provider, "discard_persisted_completion", None)
             if discard is not None:
                 discard(thread_id, terminal_turns)
 
-    def _seed_history_search(self, thread_id, prepared):
-        from dataclasses import replace
-        from types import SimpleNamespace
-        from .conversation_search import _active_turn_positions, seed_prepared_history_steps
-        # Keep only new item values/references, never encoded archive payloads.
-        # A derived search cache cannot delay this conversation's save barrier.
-        documents = {position: replace(document, chunks={})
-                     for position, document in prepared.documents.items()
-                     if len(position) == 2 and not document.committed and document.value is not None}
-        if documents:
-            projection = SimpleNamespace(documents=documents,
-                                         active_turn_positions=_active_turn_positions(prepared))
-            self.persistence.submit(lambda: seed_prepared_history_steps(self.store, projection),
-                                    key=("history_search", thread_id), required=False)
+    def _seed_history_search(self, thread_id, history):
+        # TranscriptStore.save_turns enqueues finalized turns directly onto SearchStore's
+        # isolated writer queue without acquiring state.sqlite3's writer lock.
+        del thread_id, history
 
     def _remember_thread(self, thread: dict) -> dict:
+        thread_id = thread["id"]
+        self._load_history_unlocked(thread_id)
         with self.lock:
-            saved = self._history(thread["id"])
-            preserve_timing(thread, saved)
-            # Recover timing only for previously unseen history, not on every poll.
-            known_turns = {turn.get("id") for turn in saved.get("turns", [])}
-            if any(turn.get("id") not in known_turns for turn in thread.get("turns", [])):
-                restore_timing(self.store, thread)
-            for key, value in thread.items():
+            known_turns = {turn.get("id") for turn in self.histories[thread_id].get("turns", [])}
+        needs_timing = any(turn.get("id") not in known_turns for turn in thread.get("turns", []))
+        working = copy.deepcopy(thread)
+        if needs_timing:
+            restore_timing(self.store, working)
+        with self.lock:
+            saved = self.histories[thread_id]
+            preserve_timing(working, saved)
+            for key, value in working.items():
                 if key != "turns" and (key not in saved or saved[key] != value):
-                    saved[key] = copy.deepcopy(value)
-                    self._dirty_history(thread["id"])
-            if thread.get("turns"):
-                if saved.get("turns") != thread["turns"]:
-                    saved["turns"] = copy.deepcopy(thread["turns"])
-                    self._dirty_history(thread["id"])
-            elif thread.get("status", {}).get("type") in {"idle", "notLoaded"} and thread["id"] not in self.active:
+                    saved[key] = value
+                    self._dirty_history(thread_id)
+            if working.get("turns"):
+                if saved.get("turns") != working["turns"]:
+                    saved["turns"] = working["turns"]
+                    self._dirty_history(thread_id)
+            elif working.get("status", {}).get("type") in {"idle", "notLoaded"} and thread_id not in self.active:
                 for turn in saved.get("turns", []):
                     if turn.get("status") == "inProgress":
                         turn["status"] = "interrupted"
-                        self._dirty_history(thread["id"])
-            # Reads still reconcile provider history, but an unchanged transcript
-            # need not be copied into the mirror or rewritten to SQLite.
-            if thread["id"] in self.dirty_histories:
-                self._save_history(thread["id"])
-            return copy.deepcopy(saved)
+                        self._dirty_history(thread_id)
+            if thread_id in self.dirty_histories:
+                self._save_history(thread_id)
+            snap, _ = self._snapshot_for_save_locked(thread_id)
+        return copy.deepcopy(snap)
 
-    def _capture_history(self, method: str, params: dict) -> None:
-        """Keep a display mirror for Codex builds without stored-turn queries."""
+    def _capture_history(self, method: str, params: dict) -> dict | None:
+        """Keep a display mirror for active turns; flush to SQLite only on turn completion."""
         if not method.startswith(("turn/", "item/")):
-            return
+            return None
         thread = self._history(params["threadId"])
         incoming_turn = params.get("turn", {})
         turn_id = params.get("turnId") or incoming_turn.get("id")
         if not turn_id:
-            return
+            return None
         self._dirty_history(params["threadId"])
         turns = thread.setdefault("turns", [])
         turn = next((t for t in turns if t["id"] == turn_id), None)
@@ -1192,8 +1275,10 @@ class BrowserSessions:
                 item[field] = (item.get(field) or "") + params["delta"]
         if method in {"turn/started", "turn/completed"}:
             thread["status"] = {"type": "active" if method == "turn/started" else "idle"}
-        if method in {"item/completed", "turn/completed"}:
+        if method == "turn/completed" or (method == "item/completed" and turn.get("status") != "inProgress" and params["threadId"] not in self.active):
             self._save_history(params["threadId"])
+            return None
+        return {"method": method, "params": params}
 
     TOOL_ITEMS = {"commandExecution": "run", "fileChange": "edit", "mcpToolCall": "tool", "webSearch": "read"}
 
@@ -1261,15 +1346,16 @@ class BrowserSessions:
                 # Adapter state supplies outcomes not yet delivered as events;
                 # reading its older SQLite copy would require an unnecessary
                 # save barrier and a second full transcript decode.
+                self._load_history_unlocked(thread_id)
                 with self.lock:
-                    thread = copy.deepcopy(self._history(thread_id))
-                    revision = self.history_revisions.get(thread_id, 0)
-                thread = reconcile(thread_id, thread)
+                    snap, revision = self._snapshot_for_save_locked(thread_id)
+                thread = reconcile(thread_id, copy.deepcopy(snap))
                 with self.lock:
-                    if revision != self.history_revisions.get(thread_id, 0):
-                        return copy.deepcopy(self._history(thread_id))
-                    thread["historyUnavailable"] = False
-                    return self._remember_thread(thread)
+                    current_rev = self.history_revisions.get(thread_id, 0)
+                if revision != current_rev:
+                    return self.history_snapshot(thread_id)
+                thread["historyUnavailable"] = False
+                return self._remember_thread(thread)
             # Normalized provider histories read our SQLite mirror. Flush this
             # conversation before that read so a completed live turn cannot be
             # replaced by its older saved in-progress version. Browser snapshot
@@ -1279,10 +1365,11 @@ class BrowserSessions:
             self._await_persistence(thread_id)
             thread = self._query_thread(provider, thread_id, include_turns=True)
             with self.lock:
-                if revision != self.history_revisions.get(thread_id, 0):
-                    return copy.deepcopy(self._history(thread_id))
-                thread["historyUnavailable"] = False
-                return self._remember_thread(thread)
+                current_rev = self.history_revisions.get(thread_id, 0)
+            if revision != current_rev:
+                return self.history_snapshot(thread_id)
+            thread["historyUnavailable"] = False
+            return self._remember_thread(thread)
         with self.lock:
             revision = self.history_revisions.get(thread_id, 0)
         try:
@@ -1297,28 +1384,28 @@ class BrowserSessions:
             except CoordinationError:
                 thread["historyUnavailable"] = True
                 return self._remember_thread(thread)
+            self._load_history_unlocked(thread_id)
             with self.lock:
                 turns = copy.deepcopy(stored.get("turns", []))
                 by_id = {turn["id"]: turn for turn in turns}
-                for cached in self._history(thread_id).get("turns", []):
+                for cached in self.histories[thread_id].get("turns", []):
                     persisted = by_id.get(cached["id"])
                     if persisted is None:
                         turns.append(copy.deepcopy(cached))
                     elif persisted.get("status") == "inProgress" or self.active.get(thread_id) == cached["id"]:
-                        # Disk can lag behind a streamed item or completion.
                         items = {item["id"]: item for item in persisted.get("items", [])}
                         items.update({item["id"]: copy.deepcopy(item) for item in cached.get("items", [])})
                         persisted.update(copy.deepcopy(cached))
                         persisted["items"] = list(items.values())
                 thread["turns"] = turns
                 thread["historyUnavailable"] = False
-                return self._remember_thread(thread)
+            return self._remember_thread(thread)
+        self._load_history_unlocked(thread_id)
         with self.lock:
             if revision != self.history_revisions.get(thread_id, 0):
-                return copy.deepcopy(self._history(thread_id))
-            # Native history can contain only the accepted prompt until the
-            # turn finishes. A read does not prove streamed items were deleted.
-            cached = {turn["id"]: turn for turn in self._history(thread_id).get("turns", [])}
+                snap, _ = self._snapshot_for_save_locked(thread_id)
+                return copy.deepcopy(snap)
+            cached = {turn["id"]: turn for turn in self.histories[thread_id].get("turns", [])}
             for turn in thread.get("turns", []):
                 current = cached.get(turn["id"])
                 if current is not None and turn.get("status") == "inProgress":
@@ -1326,8 +1413,8 @@ class BrowserSessions:
                     items.update({item["id"]: copy.deepcopy(item) for item in current.get("items", [])})
                     turn.update(copy.deepcopy(current))
                     turn["items"] = list(items.values())
-            thread["historyUnavailable"] = False
-            return self._remember_thread(thread)
+        thread["historyUnavailable"] = False
+        return self._remember_thread(thread)
 
     def events_after(self, sequence: int, timeout=15) -> dict:
         # Stream readers need only committed events and their cursor. An unrelated
@@ -1906,6 +1993,14 @@ class BrowserSessions:
                                   **({"domain": body["domain"]} if "domain" in body else {}),
                                   **{key: body[key] for key in ("snoozed_until", "resume_snooze") if key in body},
                                   **{key: body[key] for key in ("pinned", "quiet") if key in body}, **associations)
+        if "title" in body or "domain" in body:
+            updated_meta = self.store.threads.get(thread_id, history=False)
+            self.store.search_store.enqueue_metadata(
+                thread_id,
+                title=updated_meta.get("title") or "",
+                domain=updated_meta.get("domain") or "",
+                body=updated_meta.get("original_request") or "",
+            )
         self._publish("browser/changed", {"threadId": thread_id})
         return {"seen": True} if minimal_receipt else self.work_thread(thread_id)
 
@@ -2134,8 +2229,7 @@ class BrowserSessions:
                             result.get("reasoningEffort", record.get("effort")), int(record["yolo"]), now, now, source["client"],
                             result.get("serviceTier") or record.get("service_tier"), selected_mode(record)))
             self._capture_settings(child_id, result)
-            with self.lock:
-                self._remember_thread(result["thread"])
+            self._remember_thread(result["thread"])
             self.store.end_session(child_id)
             # Leave the fork saved locally. Opening/sending uses read() to resume
             # with the fork hook identity before any turn. A failed resume
@@ -2443,8 +2537,8 @@ class BrowserSessions:
                 logging.getLogger(__name__).warning("Could not remove incomplete browser session %s", thread_id)
             raise
         self.store.threads.update(thread_id, **associations)
+        self._remember_thread(result["thread"])
         with self.lock:
-            self._remember_thread(result["thread"])
             self.loaded.add(thread_id)
             self.loaded_clients[thread_id] = client
             self.last_used[thread_id] = time.monotonic()
@@ -2482,20 +2576,35 @@ class BrowserSessions:
             if not callable(getattr(self._rpc(thread_id), "reconcile_history", None)):
                 self._remember_thread(result["thread"])
 
-    def read(self, thread_id: str, *, recent: bool = False, snapshot: bool = False) -> dict:
-        """Read a conversation; ``recent`` returns only the view for opening it."""
+    def read(
+        self,
+        thread_id: str,
+        *,
+        recent: bool = False,
+        snapshot: bool = False,
+        before_seq: int | None = None,
+        limit: int = RECENT_TURNS,
+    ) -> dict:
+        """Read a conversation; ``recent`` / ``before_seq`` returns a bounded window."""
         if not self.store.threads.is_browser_session(thread_id):
-            return self._read_external_snapshot(self.work_thread(thread_id), recent=recent)
-        if recent or snapshot:
-            return self._read_snapshot(thread_id, recent=recent)
+            return self._read_external_snapshot(
+                self.work_thread(thread_id),
+                recent=recent or before_seq is not None,
+                before_seq=before_seq,
+                limit=limit,
+            )
+        if recent or snapshot or before_seq is not None:
+            return self._read_snapshot(
+                thread_id,
+                recent=recent or before_seq is not None,
+                before_seq=before_seq,
+                limit=limit,
+            )
         with self._thread_lock(thread_id):
             with self.lock:
                 revision = self.turn_revisions.get(thread_id, 0)
                 self.last_used[thread_id] = time.monotonic()
             record = self._record(thread_id)
-            # Admission needs only saved placement. Projecting the full card
-            # here duplicates usage, ownership, supervision and checkpoint
-            # reads; the response projects it after reconciliation below.
             if record["archived"] or self.store.threads.is_archived(thread_id):
                 thread = self._read_thread(thread_id)
             elif thread_id not in self.loaded:
@@ -2509,9 +2618,7 @@ class BrowserSessions:
                 active_turn = self.active.get(thread_id)
                 running = thread_id in self.active
             if recent:
-                thread = recent_view(thread, live_turn=active_turn)
-            # Read-side recovery may have changed the live turn. Project the card
-            # after reconciliation so it agrees with the conversation status.
+                thread = recent_view(thread, live_turn=active_turn, before_seq=before_seq, limit=limit)
             thread = self.reviews.public_history(thread_id, thread)
             return {"session": record, "thread": thread, "work_thread": self.work_thread(thread_id), "requests": self.pending_requests(thread_id),
                     "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
@@ -2522,14 +2629,39 @@ class BrowserSessions:
                     "reviews": self.reviews.list(thread_id),
                     "queuedMessages": self.queue.list(thread_id)}
 
-    def _read_external_snapshot(self, work_thread: dict, *, recent: bool) -> dict:
+    def read_turn_full(self, thread_id: str, turn_id: str) -> dict | None:
+        """Read one complete turn (full tool outputs) from resident state or turns.full.jsonl."""
+        self.work_thread(thread_id, history=False)
+        with self.lock:
+            resident = self.histories.get(thread_id)
+            if resident is not None:
+                found = next((t for t in reversed(resident.get("turns") or []) if t.get("id") == turn_id), None)
+                if found is not None:
+                    return copy.deepcopy(found)
+        full_turn = self.store.transcripts.read_turn_full(thread_id, turn_id)
+        if full_turn is not None:
+            return full_turn
+        if not self.store.transcripts.has_thread(thread_id):
+            fallback = read_history(self.store, thread_id)
+            if isinstance(fallback, dict):
+                found = next((t for t in reversed(fallback.get("turns") or []) if t.get("id") == turn_id), None)
+                if found is not None:
+                    return found
+        return None
+
+    def _read_external_snapshot(
+        self,
+        work_thread: dict,
+        *,
+        recent: bool,
+        before_seq: int | None = None,
+        limit: int = RECENT_TURNS,
+    ) -> dict:
         """Read native history without acquiring execution or changing metadata."""
         thread_id = work_thread["thread_id"]
         thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if work_thread["client"] == "codex":
             try:
-                # The HTTP observer stays query-only. Its serialized provider
-                # reader owns the durable transport command and receipt.
                 with self.lock:
                     if self.closed:
                         raise CoordinationError("Browser sessions are closed.")
@@ -2538,22 +2670,23 @@ class BrowserSessions:
                 thread["historyUnavailable"] = False
             except (CoordinationError, OSError) as exc:
                 thread["historyError"] = "Saved conversation history could not be read: " + str(exc)
-        if recent:
-            thread = recent_view(thread)
+        if recent or before_seq is not None:
+            thread = recent_view(thread, before_seq=before_seq, limit=limit)
         return {"session": {"thread_id": thread_id, "cwd": work_thread["cwd"], "client": work_thread["client"]},
                 "thread": thread, "work_thread": work_thread, "requests": [], "running": False, "activeTurn": None,
                 "coordinationMessages": message_timeline(self.store, thread_id, self.cwd),
                 "dispatchRequests": [], "reviews": [], "queuedMessages": []}
 
-    def _read_snapshot(self, thread_id: str, *, recent: bool = True, synchronized: bool = False) -> dict:
-        """Open from saved history and received events, without provider admission.
-
-        Full reads and sends reconcile native execution. Opening a window must
-        remain available while another request resumes a provider or saves a
-        turn, so it does not take that conversation's operation lock or wait
-        for persistence. The mirror may lag a provider event not yet received;
-        the event stream and watchdog retain their existing recovery roles.
-        """
+    def _read_snapshot(
+        self,
+        thread_id: str,
+        *,
+        recent: bool = True,
+        before_seq: int | None = None,
+        limit: int = RECENT_TURNS,
+        synchronized: bool = False,
+    ) -> dict:
+        """Open from saved history and received events, without provider admission."""
         record = self._record(thread_id)
         projection = getattr(self, "projection", None)
         observation = None if synchronized else getattr(projection, "unloaded_observation", None)
@@ -2561,6 +2694,7 @@ class BrowserSessions:
             observation = None
         unloaded = observation is not None and thread_id not in observation["excluded"]
         omitted_turns = 0
+        resident = None
         if unloaded:
             runtime_state = ({}, False, False, None)
             thread, active_turn = None, None
@@ -2569,49 +2703,73 @@ class BrowserSessions:
             with self.lock:
                 self.last_used[thread_id] = time.monotonic()
                 resident = self.histories.get(thread_id)
-                if recent and resident and len(turns := resident.get("turns") or []) > RECENT_TURNS:
-                    # Detach only the displayed turns under the provider lock. A full
-                    # transcript copy here serializes every sender behind this read.
-                    omitted_turns = len(turns) - RECENT_TURNS
-                    thread = copy.deepcopy({**resident, "turns": turns[-RECENT_TURNS:]})
-                else:
-                    thread = copy.deepcopy(resident)
                 active_turn = self.active.get(thread_id)
                 runtime_state = self._thread_runtime_state(thread_id)
                 revision = self.turn_revisions.get(thread_id, 0)
+                if resident is not None:
+                    turns = resident.get("turns") or []
+                    if recent or before_seq is not None:
+                        end = len(turns) if before_seq is None else max(0, min(len(turns), before_seq))
+                        start = max(0, end - limit)
+                        omitted_turns = start
+                        meta = {k: copy.deepcopy(v) for k, v in resident.items() if k != "turns"}
+                        meta["turns"] = copy.deepcopy(turns[start:end])
+                        thread = meta
+                    else:
+                        snap, _ = self._snapshot_for_save_locked(thread_id)
+                        thread = snap
+                else:
+                    thread = None
+            if thread is not None and not (recent or before_seq is not None):
+                thread = copy.deepcopy(thread)
         waiting, running, _, _ = runtime_state
         work_thread = self.work_thread(thread_id, _runtime=runtime_state)
         if not running and work_thread["status"] == "running":
-            # A live lifecycle hook can precede the provider subscription.
             active_turn, running = work_thread["turn_id"], True
-        # A pending lifecycle recovery can require a terminal turn outside
-        # the recent window. Use the complete history for that observation.
-        needs_outcome = work_thread["turn_id"] and (work_thread["turn_active"] or not work_thread["turn_completion"])
-        saved_window = thread is None and recent and not needs_outcome
+        needs_outcome = (
+            before_seq is None
+            and work_thread["turn_id"]
+            and (work_thread["turn_active"] or not work_thread["turn_completion"])
+        )
+        saved_window = thread is None and (recent or before_seq is not None) and not needs_outcome
         if thread is None:
-            thread = read_history(self.store, thread_id, windows=self.saved_history_windows if saved_window else None,
-                                  live_turn=active_turn)
+            thread = read_history(
+                self.store,
+                thread_id,
+                windows=self.saved_history_windows if saved_window else None,
+                live_turn=active_turn,
+                before_seq=before_seq,
+                limit=limit,
+            )
             if thread is None:
                 saved_window = False
                 thread = {"id": thread_id, "turns": [], "historyUnavailable": True}
         if unloaded and projection.unloaded_observation is not observation:
-            # A commit or rollback overtook the database read. Recheck live
-            # ownership and input once before returning the new history.
-            return self._read_snapshot(thread_id, recent=recent, synchronized=True)
+            return self._read_snapshot(
+                thread_id,
+                recent=recent,
+                before_seq=before_seq,
+                limit=limit,
+                synchronized=True,
+            )
         if not saved_window:
-            if omitted_turns and needs_outcome and not any(
-                    turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]):
-                # Recovery needs only the recorded turn's terminal metadata. The
-                # history and lifecycle fence must still identify the same mirror.
-                with self.lock:
-                    if (self.histories.get(thread_id) is resident
-                            and self.turn_revisions.get(thread_id, 0) == revision):
-                        self._schedule_saved_completion(thread_id, resident, work_thread, revision)
-            else:
-                self._schedule_saved_completion(thread_id, thread, work_thread, revision)
-            if recent:
+            if before_seq is None:
+                if omitted_turns and needs_outcome and not any(
+                    turn.get("id") == work_thread["turn_id"] for turn in thread["turns"]
+                ):
+                    with self.lock:
+                        if (
+                            self.histories.get(thread_id) is resident
+                            and self.turn_revisions.get(thread_id, 0) == revision
+                        ):
+                            self._schedule_saved_completion(thread_id, resident, work_thread, revision)
+                else:
+                    self._schedule_saved_completion(thread_id, thread, work_thread, revision)
+            if recent or before_seq is not None:
                 thread = recent_view(thread, live_turn=active_turn)
                 thread["earlierTurns"] += omitted_turns
+                if thread["earlierTurns"] > 0:
+                    thread["beforeSeq"] = thread["earlierTurns"]
         thread = self.reviews.public_history(thread_id, thread)
         return {"session": record, "thread": thread,
                 "acceptedMessages": self.submissions.accepted(thread_id, thread, active_turn=active_turn),
@@ -2664,38 +2822,38 @@ class BrowserSessions:
         self._publish("browser/changed", {"threadId": thread_id})
 
     def _reconcile_turn(self, thread_id, thread, revision):
-        """Repair a missed completion in both live and durable state.
-
-        A status-only idle response cannot establish a turn's outcome. Keep
-        that uncertainty for the watchdog instead of inventing a completion.
-        """
+        """Repair a missed completion in both live and durable state."""
+        with self.store.reading():
+            current = self.store.threads.get(thread_id, history=False)
+            session = self.store.get_session(thread_id)
+        emit_completion = None
         with self.lock:
             if revision != self.turn_revisions.get(thread_id, 0):
                 return
             turns = thread.get("turns", [])
             latest = turns[-1] if turns else {}
             known = self.active.get(thread_id)
-            current = self.store.threads.get(thread_id, history=False)
             expected = known or current["turn_id"]
-            if (latest.get("id") == expected and latest.get("status") in {"completed", "failed", "interrupted"}):
-                # Use normal completion bookkeeping, including wake gates and
-                # failure notifications. Replaying persistence is idempotent.
-                if known or self.store.get_session(thread_id)["turn_active"] or not current["turn_completion"]:
-                    self._event({"method": "turn/completed", "params": {
-                        "threadId": thread_id, "turn": copy.deepcopy(latest)}})
-                return
-            status = thread.get("status", {}).get("type")
-            missing_live_turn = known and not any(t["id"] == known for t in turns)
-            if status in {"idle", "notLoaded"}:
-                self.active.pop(thread_id, None)
-            elif not missing_live_turn:
-                if latest.get("status") == "inProgress":
-                    self.active[thread_id] = latest["id"]
-                elif status != "active":
+            if latest.get("id") == expected and latest.get("status") in {"completed", "failed", "interrupted"}:
+                if known or session["turn_active"] or not current["turn_completion"]:
+                    emit_completion = copy.deepcopy(latest)
+            else:
+                status = thread.get("status", {}).get("type")
+                missing_live_turn = known and not any(t["id"] == known for t in turns)
+                if status in {"idle", "notLoaded"}:
                     self.active.pop(thread_id, None)
-            if self.active.get(thread_id) != known:
-                self.execution.capture(thread_id, state="unknown", source="provider_read",
-                                       turn_id=self.active.get(thread_id) or expected)
+                elif not missing_live_turn:
+                    if latest.get("status") == "inProgress":
+                        self.active[thread_id] = latest["id"]
+                    elif status != "active":
+                        self.active.pop(thread_id, None)
+                if self.active.get(thread_id) != known:
+                    self.execution.capture(thread_id, state="unknown", source="provider_read",
+                                           turn_id=self.active.get(thread_id) or expected)
+                return
+        if emit_completion is not None:
+            self._event({"method": "turn/completed", "params": {
+                "threadId": thread_id, "turn": emit_completion}})
 
     def submit(self, thread_id: str, body: dict, *, queued=False, transfer=False) -> dict:
         """User composer entry point. Internal deliveries bypass routing."""
@@ -2807,17 +2965,29 @@ class BrowserSessions:
         with self._thread_lock(thread_id):
             with self.lock:
                 self.last_used[thread_id] = time.monotonic()
-            record = self._record(thread_id)
+            with self.store.reading(), self.store._connection() as preflight_db:
+                session_row = preflight_db.execute(
+                    "SELECT * FROM browser_sessions WHERE thread_id = ?", (thread_id,)
+                ).fetchone()
+                thread_attention, has_active_review, has_review_steps = preflight_db.execute(
+                    """SELECT
+                        (SELECT attention FROM work_threads WHERE thread_id = ?),
+                        EXISTS (SELECT 1 FROM review_runs WHERE (owner_id = ? OR critic_id = ?) AND state IN ('active', 'creating')),
+                        EXISTS (SELECT 1 FROM review_steps WHERE actor_id = ? LIMIT 1)""",
+                    (thread_id, thread_id, thread_id, thread_id),
+                ).fetchone()
+            record = self._record_from_row(thread_id, session_row)
             if automatic:
                 # The wake worker has claimed the message durably. Closed is
                 # organization, while Stop/failure/queued user input remain gates.
                 if not self.inbox_wake.can_submit(thread_id):
                     raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
-            elif self.store.threads.is_archived(thread_id):
+            elif thread_attention == "archived":
                 raise CoordinationError("Reopen this thread before sending a message.")
-            if not automatic and not recovery and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
+            if not automatic and not recovery and has_active_review and self.reviews.cancel(thread_id, reason="New input superseded this review.", state="superseded"):
                 expected_turn = None
             loaded = thread_id in self.loaded
+            was_archived = bool(record["archived"])
             self._resume_thread(thread_id, record)
             with self.lock:
                 believed_running = thread_id in self.active
@@ -2828,19 +2998,25 @@ class BrowserSessions:
             targeted_steer = (record["client"] == "codex" and expected_turn and expected_turn == observed_turn
                               and not automatic and not recovery and completed_turn_id is None
                               and not message.lstrip().startswith("/"))
-            if not loaded or (believed_running and not targeted_steer):
+            reconciled = not loaded or (believed_running and not targeted_steer)
+            if reconciled:
                 with self.store._writer.measure_request("send.reconcile_history"):
                     self.read(thread_id)
-            record = self._record(thread_id)
+            if reconciled or was_archived:
+                record = self._record(thread_id)
             if recovery:
                 recovery()
             if automatic and not self.inbox_wake.can_submit(thread_id):
                 raise BrowserBusyError("Inbox wake paused or the conversation is no longer idle.")
-            if automatic and self.store.threads.is_archived(thread_id):
+            if automatic and thread_attention == "archived":
                 # Work queued before a subsequent Close is retained; reopen if
                 # it is now eligible to run. A stopped/uncertain wake cannot get here.
                 self.store.threads.update(thread_id, attention="now")
-            command = self._command(thread_id, message, reconciled_session=record) if message and not images and not literal else None
+            command = (
+                self._command(thread_id, message, reconciled_session=record)
+                if message and not images and not literal and message.lstrip().startswith("/")
+                else None
+            )
             if command is not None:
                 return command
             completion_handoff = False
@@ -2856,8 +3032,17 @@ class BrowserSessions:
                 if not completion_handoff:
                     raise BrowserTurnChangedError("The attempted turn did not complete successfully or is no longer current. Your message was not sent.")
             with self.lock:
+                candidate_turn_id = self.active.get(thread_id)
+            blocking_review_stage = (
+                self.reviews.stage_for(thread_id, candidate_turn_id)
+                if not automatic and candidate_turn_id and has_review_steps
+                else None
+            )
+            with self.lock:
                 turn_id = self.active.get(thread_id)
-                if not automatic and turn_id and self.reviews.stage_for(thread_id, turn_id):
+                if not automatic and turn_id and (
+                    blocking_review_stage if turn_id == candidate_turn_id else (has_review_steps and self.reviews.stage_for(thread_id, turn_id))
+                ):
                     raise BrowserBusyError("The previous review turn is still stopping. Wait for it to stop, then send your update again.")
                 if (start_only or automatic) and thread_id in self.active:
                     raise BrowserBusyError("A turn is already running. The queued message was not sent as steering.")
@@ -2875,11 +3060,10 @@ class BrowserSessions:
                 inputs.insert(0, {"type": "text", "text": dispatch_context["text"]})
             params = {"threadId": thread_id, "input": inputs}
             if accepted_input is not None:
-                # Capture a provider-history anchor before the native effect. A
-                # reconnect can distinguish this input from older identical text,
-                # even when its canonical item arrives before the receipt event.
+                if turn_id:
+                    self._load_history_unlocked(thread_id)
                 with self.lock:
-                    prior_turn = next((turn for turn in reversed(self._history(thread_id).get("turns", []))
+                    prior_turn = next((turn for turn in reversed(self.histories.get(thread_id, {}).get("turns", []))
                                        if turn.get("id") == turn_id), {}) if turn_id else {}
                     after_item = next((item["id"] for item in reversed(prior_turn.get("items", []))
                                        if item.get("type") == "userMessage"), None)
@@ -3104,8 +3288,15 @@ class BrowserSessions:
         try:
             self._close_components()
         finally:
+            if getattr(self.store, "_transcript_store", None) is not None:
+                self.store._transcript_store.close()
+            if getattr(self.store, "_search_store_instance", None) is not None:
+                self.store._search_store_instance.close()
             if self.database_checkpoint is not None:
                 self.database_checkpoint.close()
+            close_idle = getattr(self.store, "close_idle_connections", None)
+            if callable(close_idle):
+                close_idle()
 
     def _close_components(self) -> None:
         self.external_history_reader.shutdown()
@@ -3139,8 +3330,14 @@ class BrowserSessions:
             if self.history_rpc is not None:
                 self.history_rpc.close()
                 self.history_rpc = None
+        if projection is not None:
+            projection.flush_publications()
         self.shutdown_report = self.persistence.close(deadline=self.shutdown_deadline,
                                                       diagnostics=self._writer_diagnostics)
         if getattr(self.store, "conversation_barrier", None) is self.conversation_barrier:
             del self.store.conversation_barrier
         self.execution.close()
+        if getattr(self.store, "_transcript_store", None) is not None:
+            self.store._transcript_store.close()
+        if getattr(self.store, "_search_store_instance", None) is not None:
+            self.store._search_store_instance.close()

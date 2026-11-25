@@ -2241,18 +2241,65 @@ function earlierTurnsControl(count) {
   button.onclick = async () => {
     // Keep the reader's place while earlier turns are inserted above it.
     const el = $("timeline"), fromBottom = el.scrollHeight - el.scrollTop;
-    conversationEntry(state.selected).allTurns = true;
-    if (state.detail?.thread?.earlierTurns) await loadCompleteHistory(button, "Loading earlier turns…");
-    else renderTimeline();
+    const id = state.selected, entry = conversationEntry(id);
+    const beforeSeq = state.detail?.thread?.beforeSeq;
+    if (typeof api === "function" && typeof sessionPath === "function" && Number.isInteger(beforeSeq) && beforeSeq > 0) {
+      const label = button.textContent;
+      button.disabled = true; button.textContent = "Loading earlier turns…";
+      try {
+        await entry.pending?.catch(() => {});
+        const page = await api(sessionPath(id) + "?before_seq=" + encodeURIComponent(beforeSeq) + "&limit=40", undefined,
+          {headers: {"X-Agent-Coord-History-View": "recent"}});
+        if (state.selected === id && state.detail?.thread) {
+          const older = page.thread?.turns || [];
+          const existingIds = new Set((state.detail.thread.turns || []).map(t => t.id).filter(Boolean));
+          const uniqueOlder = older.filter(t => !t.id || !existingIds.has(t.id));
+          state.detail.thread.turns = [...uniqueOlder, ...(state.detail.thread.turns || [])];
+          state.detail.thread.earlierTurns = page.thread?.earlierTurns || 0;
+          if (page.thread?.beforeSeq != null) state.detail.thread.beforeSeq = page.thread.beforeSeq;
+          else delete state.detail.thread.beforeSeq;
+          entry.allTurns = true;
+          renderTimeline();
+        }
+      } catch (error) {
+        button.disabled = false; button.textContent = label;
+        showError(error);
+        return;
+      }
+    } else {
+      entry.allTurns = true;
+      if (state.detail?.thread?.earlierTurns) await loadCompleteHistory(button, "Loading earlier turns…");
+      else renderTimeline();
+    }
     if (state.timelineScroll) state.timelineScroll.restore(el.scrollHeight - fromBottom);
     else el.scrollTop = el.scrollHeight - fromBottom;
   };
   return button;
 }
-function completeOutputControl() {
+function completeOutputControl(turn) {
   const button = node("button", "Show full output", "quiet tool-complete");
   button.type = "button";
-  button.onclick = () => loadCompleteHistory(button, "Loading full output…");
+  button.onclick = async () => {
+    const id = state.selected;
+    const turnId = turn?.id;
+    if (typeof api === "function" && typeof sessionPath === "function" && turnId) {
+      const label = button.textContent;
+      button.disabled = true; button.textContent = "Loading full output…";
+      try {
+        const response = await api(sessionPath(id) + "/turns/" + encodeURIComponent(turnId) + "/full");
+        if (state.selected === id && response?.turn && state.detail?.thread?.turns) {
+          const index = state.detail.thread.turns.findIndex(t => t.id === turnId);
+          if (index >= 0) state.detail.thread.turns[index] = response.turn;
+          renderTimeline();
+        }
+      } catch (error) {
+        button.disabled = false; button.textContent = label;
+        showError(error);
+      }
+      return;
+    }
+    return loadCompleteHistory(button, "Loading full output…");
+  };
   return button;
 }
 function renderTimeline() {
@@ -2447,7 +2494,7 @@ function renderTimeline() {
           detail.append(summary);
           if (item.statusReason) detail.append(node("p", item.statusReason));
           detail.append(node("pre", text));
-          if (item.abridged) detail.append(completeOutputControl());
+          if (item.abridged) detail.append(completeOutputControl(turn));
         }
         if (["completed", "failed", "interrupted"].includes(turn.status)) {
           let group = workGroups.get(turn);

@@ -50,8 +50,8 @@ class DatabaseCheckpointTests(unittest.TestCase):
         self.addCleanup(sessions.close)
         identity = str(self.path)
         self.addCleanup(desktop_runtime._OWNED_DATABASES.discard, identity)
-        backfill = Mock(return_value=iter(()))
-        with patch.dict(sys.modules, {"agent_coord.conversation_substrings": SimpleNamespace(backfill_steps=backfill)}), \
+        backfill = Mock()
+        with patch.object(store.search_store, "_ensure_initialized", backfill), \
                 patch.object(sessions.persistence, "submit") as submit:
             self.assertFalse(sessions.start_search_index())
             desktop_runtime._OWNED_DATABASES.add(identity)
@@ -63,9 +63,9 @@ class DatabaseCheckpointTests(unittest.TestCase):
             self.assertTrue(sessions.start_search_index())
             self.assertFalse(sessions.start_search_index())
             submit.assert_called_once()
-            self.assertEqual(submit.call_args.kwargs, {"key": ("search_substrings",), "required": False})
+            self.assertEqual(submit.call_args.kwargs, {"key": ("search_index",), "required": False})
             submit.call_args.args[0]()
-            backfill.assert_called_once_with(store)
+            backfill.assert_called_once_with()
 
     def wait_for(self, predicate):
         deadline = time.monotonic() + 2
@@ -151,7 +151,7 @@ class DatabaseCheckpointTests(unittest.TestCase):
         self.addCleanup(desktop_runtime._OWNED_DATABASES.discard, identity)
         with store._connection() as writer:
             self.assertEqual(writer.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 1000)
-            self.assertEqual(writer.execute("PRAGMA synchronous").fetchone()[0], 2)
+            self.assertEqual(writer.execute("PRAGMA synchronous").fetchone()[0], 1)
         with store.reading(), store._connection() as reader:
             self.assertEqual(reader.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 1000)
         self.addCleanup(store._idle_connections.reader.discard)
@@ -160,7 +160,7 @@ class DatabaseCheckpointTests(unittest.TestCase):
         with store._connection() as reused:
             self.assertIs(reused, writer)
             self.assertEqual(reused.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 0)
-            self.assertEqual(reused.execute("PRAGMA synchronous").fetchone()[0], 2)
+            self.assertEqual(reused.execute("PRAGMA synchronous").fetchone()[0], 1)
             reused.execute("INSERT INTO records VALUES (2)")
         with store.reading(), store._connection() as reused_reader:
             self.assertIs(reused_reader, reader)
@@ -176,7 +176,7 @@ class DatabaseCheckpointTests(unittest.TestCase):
         with store._connection() as reused:
             self.assertIs(reused, writer)
             self.assertEqual(reused.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 1000)
-            self.assertEqual(reused.execute("PRAGMA synchronous").fetchone()[0], 2)
+            self.assertEqual(reused.execute("PRAGMA synchronous").fetchone()[0], 1)
         with store.reading(), store._connection() as reused_reader:
             self.assertIs(reused_reader, reader)
             self.assertEqual(reused_reader.execute("PRAGMA wal_autocheckpoint").fetchone()[0], 1000)

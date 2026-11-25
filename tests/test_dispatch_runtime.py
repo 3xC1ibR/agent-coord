@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
 from agent_coord.codex_app_server import BrowserSessions
-from agent_coord import conversation_search
+from agent_coord import history_window
 from agent_coord.dispatch_runtime import CONTEXT_PREFIX
 from agent_coord.dispatch_runtime import routing_history
 from agent_coord.dispatch_snapshot import read_snapshot
@@ -106,26 +106,27 @@ class DispatchRuntimeTests(unittest.TestCase):
         self.assertTrue(self.sessions.read(self.vendor)["running"])
 
     def test_dispatch_index_preparation_releases_writer_admission(self):
-        with self.store._connection() as db:
-            db.execute("INSERT OR REPLACE INTO browser_history(thread_id,history_json) VALUES (?,?)",
-                       (self.vendor, json.dumps({"turns": [{"id": "turn", "items": [
-                           {"id": "item", "type": "agentMessage", "text": "Vendor history"}]}]})))
+        self.store.transcripts.save_turns(
+            self.vendor,
+            {"turns": [{"id": "turn", "status": "completed", "items": [
+                {"id": "item", "type": "agentMessage", "text": "Vendor history"}]}]},
+        )
         self.submit()
         entered, release, written = threading.Event(), threading.Event(), threading.Event()
-        messages = conversation_search.messages
+        original_routing = history_window.routing_history
 
         def delayed(history):
             entered.set()
             if not release.wait(5):
                 raise AssertionError("Dispatch preparation did not resume")
-            return messages(history)
+            return original_routing(history)
 
         def write():
             with self.store._connection() as db:
                 db.execute("UPDATE sessions SET name='Independent work' WHERE session_id=?", (self.vendor,))
             written.set()
 
-        with ThreadPoolExecutor(max_workers=2) as workers, patch.object(conversation_search, "messages", delayed):
+        with ThreadPoolExecutor(max_workers=2) as workers, patch("agent_coord.dispatch_snapshot.routing_history", side_effect=delayed):
             routing = workers.submit(self.plan)
             try:
                 self.assertTrue(entered.wait(5))

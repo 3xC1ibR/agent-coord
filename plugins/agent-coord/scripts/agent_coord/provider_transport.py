@@ -221,7 +221,7 @@ class Journal:
         os.chmod(self.path, 0o600)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         with self.db:
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS ownership (

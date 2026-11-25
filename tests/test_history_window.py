@@ -106,32 +106,27 @@ class RecentViewTransferTests(unittest.TestCase):
             return response.status, len(body), json.loads(body)
 
     def mirror(self):
-        with self.store._connection() as connection:
-            return json.loads(connection.execute("SELECT history_json FROM browser_history WHERE thread_id = ?",
-                                                 (self.thread,)).fetchone()[0])
+        return self.store.transcripts.read_full_history(self.thread)
 
     def test_reopening_a_large_saved_inline_history_reuses_only_the_matching_window(self):
         old = {"id": self.thread, "turns": history(4, output_size=120000)}
         self.sessions.histories.pop(self.thread, None)
         self.sessions.loaded.discard(self.thread)
-        def replace(value):
-            with self.store._connection() as db:
-                db.execute("UPDATE browser_history SET history_json=? WHERE thread_id=?",
-                           (json.dumps(value), self.thread))
-        replace(old)
         with patch.object(history_window, "_abridged_item", wraps=history_window._abridged_item) as abridge:
+            self.store.transcripts.save_turns(self.thread, old)
+            save_abridge_count = abridge.call_count
+            self.assertGreater(save_abridge_count, 0)
             first = self.sessions.read(self.thread, recent=True)["thread"]
+            self.assertEqual(abridge.call_count, save_abridge_count, "pre-abridged compact lines need zero read-time abridgement")
             first["turns"][0]["items"][0]["id"] = "local edit"
-            first_count = abridge.call_count
-            self.assertGreater(first_count, 0)
             reopened = self.sessions.read(self.thread, recent=True)["thread"]
             self.assertEqual(reopened["turns"][0]["items"][0]["id"], "user-0")
-            self.assertEqual(abridge.call_count, first_count)
+            self.assertEqual(abridge.call_count, save_abridge_count)
             old["turns"][0]["items"][0]["id"] = "user-X"
-            replace(old)
+            self.store.transcripts.save_turns(self.thread, old)
             changed = self.sessions.read(self.thread, recent=True)["thread"]
             self.assertEqual(changed["turns"][0]["items"][0]["id"], "user-X")
-            self.assertGreater(abridge.call_count, first_count)
+            self.assertGreater(abridge.call_count, save_abridge_count)
 
     def test_opening_transfers_the_recent_view_and_the_complete_history_stays_available(self):
         status, complete_size, complete = self.get()

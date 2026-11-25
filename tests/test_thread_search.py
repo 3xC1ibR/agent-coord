@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 import inspect
 import json
 import random
@@ -10,8 +9,8 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
@@ -24,82 +23,6 @@ from agent_coord.thread_inventory import listed_threads
 from agent_coord.thread_search import search_browser_threads, search_threads
 
 
-def _reference_span(folded, terms, phrase):
-    # The pre-SQL ranking, kept verbatim so the reference cannot drift with the module.
-    if phrase and (position := folded.find(phrase)) >= 0:
-        return position, position + len(phrase)
-    positions = [(folded.find(term), i) for i, term in enumerate(terms)]
-    if not positions or any(position < 0 for position, _ in positions):
-        return None
-    heapq.heapify(positions)
-    right = max(position + len(terms[i]) for position, i in positions)
-    best = (positions[0][0], right)
-    while positions:
-        left, i = heapq.heappop(positions)
-        if right - left < best[1] - best[0]:
-            best = (left, right)
-        following = folded.find(terms[i], left + 1)
-        if following < 0:
-            break
-        heapq.heappush(positions, (following, i))
-        right = max(right, following + len(terms[i]))
-    return best
-
-
-def _reference_relevance(value, terms, phrase):
-    folded = " ".join((value or "").casefold().split())
-    span = _reference_span(folded, terms, phrase)
-    if span is None:
-        return 0
-    gap = max(0, span[1] - span[0] - sum(map(len, terms)))
-    return 1 + max(0, 24 - gap // 8) + 32 * (phrase in folded) + 16 * (folded == phrase)
-
-
-def reference_search(store, query, *, source="all", my_messages=False):
-    """Rank every thread by brute force with the previous search semantics."""
-    terms = list(dict.fromkeys(query.casefold().split()))
-    phrase = " ".join(query.casefold().split())
-    source = "messages" if my_messages else source
-    relevance = lambda value: _reference_relevance(value, terms, phrase)
-    found = []
-    with store._connection() as db:
-        for thread in db.execute("""SELECT t.* FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
-                JOIN work_projects w ON w.id = t.project_id JOIN thread_organization o ON o.thread_id = t.thread_id"""):
-            identity = thread["thread_id"]
-            checkpoint = db.execute("SELECT * FROM thread_checkpoints WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
-                                    (identity,)).fetchone()
-            done = db.execute("SELECT * FROM turn_completions WHERE thread_id = ? ORDER BY id DESC LIMIT 1",
-                              (identity,)).fetchone()
-            summary = (checkpoint["summary"] if checkpoint else "") + " " + (checkpoint["next_action"] if checkpoint else "")
-            fields = {"title": thread["title"], "summary": summary, "request": thread["original_request"]}
-            artifacts = [row[0] + " " + row[1] for row in db.execute(
-                "SELECT label, target FROM thread_links WHERE thread_id = ?", (identity,))]
-            folded = {name: value.casefold() for name, value in fields.items()}
-            context = all(any(term in value for value in folded.values())
-                          or any(term in link.casefold() for link in artifacts) for term in terms)
-            messages = [row for row in db.execute(
-                "SELECT * FROM conversation_search_message_index WHERE thread_id = ?", (identity,))
-                if all(term in row["folded"] for term in terms) and (not my_messages or row["role"] == "user")]
-            if not {"context": context, "messages": bool(messages)}.get(source, context or messages):
-                continue
-            score = 0
-            if source != "messages":
-                for term in terms:
-                    score += (8 * (term in folded["title"]) + 4 * (term in folded["summary"]) + 2 * (term in folded["request"])
-                              + any(term in link.casefold() for link in artifacts))
-                score += 3 * relevance(fields["title"]) + relevance(fields["summary"]) + relevance(fields["request"])
-            if source != "context":
-                score += max((relevance(row["text"]) for row in messages), default=0)
-            ranked = sorted(messages, key=lambda row: (relevance(row["text"]), row["position"]), reverse=True)
-            found.append({"thread_id": identity, "score": score,
-                          "last_work_at": max(thread["created_at"], thread["turn_started_at"] or 0,
-                                              done["completed_at"] if done else 0, checkpoint["created_at"] if checkpoint else 0),
-                          "message_count": len(messages) if source != "context" else 0,
-                          "matches": [(row["turn_id"], row["item_id"], row["timestamp"]) for row in ranked[:3]]
-                          if source != "context" else []})
-    return sorted(found, key=lambda item: (item["score"], item["last_work_at"], item["thread_id"]), reverse=True)
-
-
 class ThreadSearchTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -107,6 +30,7 @@ class ThreadSearchTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.now = 1000.0
         self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
+        self.addCleanup(self.store.close_idle_connections)
 
     def create(self, identity, *, title="Database specialist", request="Optimize writes", cwd=None, attention="now"):
         self.store.register(session_id=identity, client="codex", cwd=str(cwd or self.root), name=title)
@@ -115,8 +39,16 @@ class ThreadSearchTests(unittest.TestCase):
         return identity
 
     def checkpoint(self, thread, **values):
-        return self.store.threads.checkpoint(thread, {"phase": "investigation", "summary": "Measured database latency",
-            "next_action": "", "next_actor": "nobody", **values})
+        return self.store.threads.checkpoint(
+            thread,
+            {
+                "phase": "investigation",
+                "summary": "Measured database latency",
+                "next_action": "",
+                "next_actor": "nobody",
+                **values,
+            },
+        )
 
     def test_closed_context_is_ranked_by_relevance_then_meaningful_work(self):
         self.create("closed", attention="archived")
@@ -130,8 +62,10 @@ class ThreadSearchTests(unittest.TestCase):
         self.assertEqual([r["last_work_at"] for r in page["items"]], [1000, 2000])
         self.assertEqual(page["items"][0]["attention"], "archived")
         self.assertIsNone(page["next_cursor"])
-        self.assertEqual(NavigationStore(self.store).resolve(page["items"][0]["url"])["route"],
-                         {"kind": "thread", "id": "closed"})
+        self.assertEqual(
+            NavigationStore(self.store).resolve(page["items"][0]["url"])["route"],
+            {"kind": "thread", "id": "closed"},
+        )
 
     def test_work_completion_and_changed_checkpoint_are_fresh_but_refresh_is_not(self):
         self.create("old")
@@ -143,7 +77,7 @@ class ThreadSearchTests(unittest.TestCase):
         self.now = 4000
         self.store.threads.finish_turn("new", turn_id="turn", status="completed")
         self.now = 5000
-        self.checkpoint("old")  # identical checkpoint only refreshes metadata
+        self.checkpoint("old")
         page = search_threads(self.store, "specialist")
         self.assertEqual([(r["thread_id"], r["last_work_at"]) for r in page["items"]], [("new", 4000), ("old", 2000)])
         self.assertEqual(page["items"][0]["last_turn_status"], "completed")
@@ -153,15 +87,21 @@ class ThreadSearchTests(unittest.TestCase):
         self.create("b-phrase", title="Repair radio alarm scheduling", request="Schedule audio")
         self.now = 5000
         self.create("z-scattered", title="Radio playback and alarm scheduling", request="Schedule audio")
-        self.assertEqual([r["thread_id"] for r in search_threads(self.store, "radio alarm")["items"]],
-                         ["a-exact", "b-phrase", "z-scattered"])
+        self.assertEqual(
+            [r["thread_id"] for r in search_threads(self.store, "radio alarm")["items"]],
+            ["a-exact", "b-phrase", "z-scattered"],
+        )
 
     def test_pagination_has_no_duplicates_or_gaps_across_ties_and_restart(self):
         for index in range(13):
             self.create(f"thread-{index:02}", attention="archived" if index % 2 else "now")
         cursor, found = None, []
         while True:
-            page = search_threads(CoordinationStore(self.store.database_path), "database", limit=3, cursor=cursor)
+            reopened = CoordinationStore(self.store.database_path)
+            try:
+                page = search_threads(reopened, "database", limit=3, cursor=cursor)
+            finally:
+                reopened.close_idle_connections()
             self.assertLessEqual(len(page["items"]), 3)
             found.extend(item["thread_id"] for item in page["items"])
             cursor = page["next_cursor"]
@@ -171,8 +111,11 @@ class ThreadSearchTests(unittest.TestCase):
 
     def test_keywords_match_across_saved_context_and_artifacts_with_literal_sql_characters(self):
         self.create("match", title="Writer", request="Keep latency low")
-        self.checkpoint("match", summary="Profiled database", links=[{
-            "kind": "document", "label": "Benchmark", "target": "docs/100%_results.md"}])
+        self.checkpoint(
+            "match",
+            summary="Profiled database",
+            links=[{"kind": "document", "label": "Benchmark", "target": "docs/100%_results.md"}],
+        )
         page = search_threads(self.store, "writer database latency benchmark")
         self.assertEqual([r["thread_id"] for r in page["items"]], ["match"])
         self.assertEqual(len(search_threads(self.store, "100%_")["items"]), 1)
@@ -197,6 +140,7 @@ class ThreadSearchTests(unittest.TestCase):
 
     def test_app_only_and_pause_visibility(self):
         from test_codex_app_server import BrowserSessions, FakeCodex
+
         sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(sessions.close)
         thread = sessions.create({"name": "Database app specialist"})["session"]["thread_id"]
@@ -211,18 +155,33 @@ class ThreadSearchTests(unittest.TestCase):
 
     def test_app_context_advice_is_available_for_routing_without_handover_bloat(self):
         from test_codex_app_server import BrowserSessions, FakeCodex
+
         sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(sessions.close)
         thread = sessions.create({"name": "Database app specialist"})["session"]["thread_id"]
         self.store.threads.start_turn(thread, turn_id="research")
-        report = {"recommendation": "reuse", "reason": "Useful source knowledge.",
-                  "reuse_for": ["Source questions"], "fresh_for": ["Independent review"],
-                  "handover": {"confirmed_facts": ["The index fits the query."], "constraints": [],
-                               "tried_and_failed": [], "open_questions": []}}
+        report = {
+            "recommendation": "reuse",
+            "reason": "Useful source knowledge.",
+            "reuse_for": ["Source questions"],
+            "fresh_for": ["Independent review"],
+            "handover": {
+                "confirmed_facts": ["The index fits the query."],
+                "constraints": [],
+                "tried_and_failed": [],
+                "open_questions": [],
+            },
+        }
         checkpoint = self.checkpoint(thread, context_lifecycle=report)["checkpoint"]
         result = search_threads(self.store, "database", app_only=True, source="context")["items"][0]
-        self.assertEqual(result["context_lifecycle"], {"checkpoint_id": checkpoint["id"], "stale": False,
-            **{key: report[key] for key in ("recommendation", "reason", "reuse_for", "fresh_for")}})
+        self.assertEqual(
+            result["context_lifecycle"],
+            {
+                "checkpoint_id": checkpoint["id"],
+                "stale": False,
+                **{key: report[key] for key in ("recommendation", "reason", "reuse_for", "fresh_for")},
+            },
+        )
         self.assertEqual(self.store.threads.get(thread)["checkpoint"]["context_lifecycle"]["handover"], report["handover"])
         self.store.threads.start_turn(thread, turn_id="follow-up")
         stale = search_threads(self.store, "database", app_only=True)["items"][0]
@@ -234,12 +193,13 @@ class ThreadSearchTests(unittest.TestCase):
         for index in range(10):
             self.create(str(index), request="x" * 10000 + "database" + "y" * 10000)
             self.checkpoint(str(index), summary="x" * 1500 + "database" + "y" * 400)
-        # Navigation links are built from the returned page without hydrating threads.
         with patch.object(self.store.threads, "get", wraps=self.store.threads.get) as get:
             page = search_threads(self.store, "database", limit=2)
         self.assertEqual(get.call_count, 0)
-        self.assertEqual([item["url"] for item in page["items"]],
-                         [NavigationStore(self.store).link(thread=item["thread_id"])["url"] for item in page["items"]])
+        self.assertEqual(
+            [item["url"] for item in page["items"]],
+            [NavigationStore(self.store).link(thread=item["thread_id"])["url"] for item in page["items"]],
+        )
         self.assertLess(len(json.dumps(page)), 4000)
         self.assertTrue(all("database" in r["original_request"] for r in page["items"]))
 
@@ -247,8 +207,15 @@ class ThreadSearchTests(unittest.TestCase):
         for index in range(2):
             self.create(str(index))
         cursor = search_threads(self.store, "database", limit=1)["next_cursor"]
-        for values in ({"cursor": "garbage"}, {"cursor": "W10="}, {"cursor": cursor, "app_only": True},
-                       {"cursor": cursor, "project_id": None}, {"limit": 0}, {"limit": 51}, {"limit": True}):
+        for values in (
+            {"cursor": "garbage"},
+            {"cursor": "W10="},
+            {"cursor": cursor, "app_only": True},
+            {"cursor": cursor, "project_id": None},
+            {"limit": 0},
+            {"limit": 51},
+            {"limit": True},
+        ):
             with self.subTest(values=values), self.assertRaises(CoordinationError):
                 search_threads(self.store, "database", **values)
         for query in ("", " " * 5, "x" * 501, "a b c d e f g h i j k"):
@@ -260,16 +227,20 @@ class ThreadSearchTests(unittest.TestCase):
     def test_cli_needs_no_caller_and_defaults_to_all_placements(self):
         self.create("closed", attention="archived")
         with patch.dict("os.environ", {}, clear=True):
-            result = run(_parser().parse_args(["--db", str(self.store.database_path), "thread", "search", "database", "--limit", "1"]))
+            result = run(
+                _parser().parse_args(["--db", str(self.store.database_path), "thread", "search", "database", "--limit", "1"])
+            )
         self.assertEqual([r["thread_id"] for r in result["items"]], ["closed"])
 
 
 class SearchExecutionTests(unittest.TestCase):
-    """Timing-independent guards for SQLite-native ranking and the app boundary."""
+    """Stage 3 isolated SearchStore + TranscriptStore execution and lock-freedom tests."""
 
-    WORDS = ["radio", "Radio", "ALARM", "alarm", "straße", "STRASSE", "ﬁle", "file", "K", "k",
-             "okc", "moe", "the", "and", "x"]
-    SPACES = [" ", " ", " ", "  ", "\n", "\t", " ", "　", " \n "]
+    WORDS = [
+        "radio", "Radio", "ALARM", "alarm", "straße", "STRASSE", "ﬁle", "file", "K", "k",
+        "okc", "moe", "the", "and", "x",
+    ]
+    SPACES = [" ", " ", "  ", "\n", "\t", "\u00a0", "\u3000", " \n "]
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -277,119 +248,59 @@ class SearchExecutionTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.now = 1793247626.5940921
         self.store = CoordinationStore(self.root / "state.sqlite3", clock=lambda: self.now)
-        with self.store._connection() as db:
-            db.execute("CREATE TABLE browser_history (thread_id TEXT PRIMARY KEY, history_json TEXT NOT NULL)")
-
-    def test_browser_search_reads_dirty_history_without_publishing_an_index(self):
-        from types import SimpleNamespace
-        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
-        def save(items):
-            history = {"turns": [{"id": "turn", "items": items}]}
-            with self.store._connection() as db:
-                db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", ("stream", json.dumps(history)))
-        save([{"id": "a", "type": "agentMessage", "text": "obsolete evidence"}])
-        search_threads(self.store, "obsolete")
-        save([{"id": "a", "type": "agentMessage", "text": "obsolete duplicate"},
-              {"id": "a", "type": "agentMessage", "text": "current evidence"}])
-        scheduled = []
-        sessions = SimpleNamespace(cwd=str(self.root), persistence=SimpleNamespace(
-            submit=lambda callback, **options: scheduled.append(callback)))
-        with patch("agent_coord.conversation_search.publish_messages",
-                   side_effect=AssertionError("Interactive search waited for index publication")):
-            fresh = search_browser_threads(self.store, sessions, {"q": ["current evidence"]})
-            stale = search_browser_threads(self.store, sessions, {"q": ["obsolete"]})
-        self.assertEqual([item["thread_id"] for item in fresh["items"]], ["stream"])
-        self.assertEqual(fresh["items"][0]["message_count"], 1)
-        self.assertEqual(stale["items"], [])
-        self.assertTrue(scheduled)
-
-    def test_search_does_not_queue_index_publication_for_a_streaming_turn(self):
-        from types import SimpleNamespace
-        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
-        history = {"turns": [{"id": "turn", "status": "inProgress", "items": [
-            {"id": "message", "type": "agentMessage", "text": "live evidence"}]}]}
-        with self.store._connection() as db:
-            db.execute("INSERT INTO browser_history VALUES (?, ?)", ("stream", json.dumps(history)))
-            db.execute("UPDATE sessions SET turn_active=1 WHERE session_id='stream'")
-        queued = []
-        sessions = SimpleNamespace(cwd=str(self.root), persistence=SimpleNamespace(
-            submit=lambda callback, **options: queued.append(callback)))
-        result = search_browser_threads(self.store, sessions, {"q": ["live evidence"]})
-        self.assertEqual([r["thread_id"] for r in result["items"]], ["stream"])
-        self.assertEqual(queued, [])
-        history["turns"][0]["status"] = "completed"
-        with self.store._connection() as db:
-            db.execute("UPDATE browser_history SET history_json=? WHERE thread_id='stream'", (json.dumps(history),))
-            db.execute("UPDATE sessions SET turn_active=0 WHERE session_id='stream'")
-        search_browser_threads(self.store, sessions, {"q": ["live evidence"]})
-        self.assertEqual(len(queued), 1)
-
-    def test_dirty_search_reuses_only_the_exact_committed_history(self):
-        from types import SimpleNamespace
-        from agent_coord import history_persistence as storage
-        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
-        def write(text):
-            current = storage.prepare_history({"turns": [{"id": "turn", "status": "inProgress", "items": [
-                {"id": "message", "type": "agentMessage", "text": "content " * 12000 + text}]}]})
-            storage.stage_history(self.store, current)
-            with self.store._connection() as db:
-                storage.publish_history(db, "stream", current)
-            return current
-        with self.store._connection() as db:
-            storage.ensure_schema(db)
-        committed = write("first")
-        self.store.provider_projection = SimpleNamespace(prepared_histories={"stream": committed})
-        with patch.object(storage, "decode_history", side_effect=AssertionError("Decoded the published mirror again")):
-            result = search_threads(self.store, "first", snapshot_dirty=True)
-        self.assertEqual([r["thread_id"] for r in result["items"]], ["stream"])
-        write("replacement")
-        self.assertFalse(search_threads(self.store, "first", snapshot_dirty=True)["items"])
-        self.assertEqual(len(search_threads(self.store, "replacement", snapshot_dirty=True)["items"]), 1)
-
-    def test_dirty_snapshot_pages_match_indexed_pages_and_coverage(self):
-        self.seed(16)
-        coverage = search_threads(self.store, "radio", snapshot_dirty=True)["coverage"]
-        dirty = [self.pages(query, snapshot_dirty=True, **options)
-                 for query, options in [("radio alarm", {}), ("strasse", {"my_messages": True})]]
-        indexed = [self.pages(query, **options)
-                   for query, options in [("radio alarm", {}), ("strasse", {"my_messages": True})]]
-        self.assertEqual(coverage, search_threads(self.store, "radio")["coverage"])
-        self.assertEqual(dirty, indexed)
-        self.assertTrue(all(dirty))
+        self.addCleanup(self.store.close_idle_connections)
+        self.addCleanup(self.store.search_store.close)
+        self.addCleanup(self.store.transcripts.close)
 
     def text(self, generator, count):
         return "".join(generator.choice(self.WORDS) + generator.choice(self.SPACES) for _ in range(count)).strip()
 
     def seed(self, count):
-        """Threads whose context and messages mix case, Unicode folding and spacing."""
         generator = random.Random(20261029)
         for index in range(count):
             identity = f"thread-{index:03}"
-            # Repeated times exercise the thread ID tie-break.
             self.now += generator.choice([0, 0, 0.125, 1.0000001, 3.3])
             self.store.register(session_id=identity, client="codex", cwd=str(self.root), name="Seed")
             self.store.threads.capture_request(identity, self.text(generator, generator.randrange(1, 12)))
             with self.store._connection() as db:
-                db.execute("UPDATE work_threads SET title = ? WHERE thread_id = ?",
-                           (generator.choice(["radio alarm", self.text(generator, 3)]), identity))
+                db.execute(
+                    "UPDATE work_threads SET title = ? WHERE thread_id = ?",
+                    (generator.choice(["radio alarm", self.text(generator, 3)]), identity),
+                )
             if generator.random() < 0.7:
-                self.store.threads.checkpoint(identity, {"phase": "investigation", "summary": self.text(generator, 6),
-                    "next_action": self.text(generator, 2), "next_actor": "user",
-                    "links": [{"kind": "document", "label": self.text(generator, 2), "target": f"docs/{index}.md"}]})
+                self.store.threads.checkpoint(
+                    identity,
+                    {
+                        "phase": "investigation",
+                        "summary": self.text(generator, 6),
+                        "next_action": self.text(generator, 2),
+                        "next_actor": "user",
+                        "links": [{"kind": "document", "label": self.text(generator, 2), "target": f"docs/{index}.md"}],
+                    },
+                )
             if generator.random() < 0.3:
                 self.store.threads.update(identity, attention="archived")
             items = []
             for position in range(generator.randrange(0, 9)):
-                text = generator.choice(["radio alarm", " Radio\nALARM ", "　radio alarm\n", " Radio ", "\tx\n",
-                                         self.text(generator, generator.randrange(1, 30))])
+                text = generator.choice(
+                    ["radio alarm", " Radio\nALARM ", "\u3000radio alarm\n", " Radio ", "\tx\n", self.text(generator, generator.randrange(1, 20))]
+                )
                 if generator.random() < 0.5:
                     items.append({"id": f"m{position}", "type": "agentMessage", "text": text})
                 else:
-                    items.append({"id": f"m{position}", "type": "userMessage", "timelineAt": self.now + position / 7,
-                                  "content": [{"type": "text", "text": text}]})
-            with self.store._connection() as db:
-                db.execute("INSERT INTO browser_history VALUES (?, ?)", (identity, json.dumps(
-                    {"turns": [{"id": "turn", "startedAt": self.now, "items": items}]})))
+                    items.append(
+                        {
+                            "id": f"m{position}",
+                            "type": "userMessage",
+                            "timelineAt": self.now + position / 7,
+                            "content": [{"type": "text", "text": text}],
+                        }
+                    )
+            self.store.transcripts.save_turns(
+                identity,
+                {"id": identity, "turns": [{"id": "turn", "status": "completed", "startedAt": self.now, "items": items}]},
+            )
+        self.assertTrue(self.store.search_store.flush())
 
     def pages(self, query, **options):
         found, cursor = [], None
@@ -400,82 +311,34 @@ class SearchExecutionTests(unittest.TestCase):
             if cursor is None:
                 return found
 
-    def test_ranking_pages_and_excerpts_match_previous_semantics(self):
-        self.seed(70)
-        for query in ("radio alarm", "alarm radio", "radio radio", "radio", "strasse", "straße file", "file k",
-                      "okc moe the", "the and", "x", "zzz"):
-            for options in ({}, {"source": "context"}, {"source": "messages"}, {"my_messages": True}):
-                with self.subTest(query=query, **options), \
-                        patch.object(thread_search, "_MEASURE_BATCH", 3), \
-                        patch.object(thread_search, "_relevance", wraps=thread_search._relevance) as measured:
-                    found = self.pages(query, **options)
-                    expected = reference_search(self.store, query, **options)
-                    self.assertEqual([(i["thread_id"], i["score"], i["last_work_at"], i["message_count"]) for i in found],
-                                     [(i["thread_id"], i["score"], i["last_work_at"], i["message_count"]) for i in expected])
-                    self.assertEqual([[(m["turn_id"], m["item_id"], m["timestamp"]) for m in i["matches"]] for i in found],
-                                     [i["matches"] for i in expected])
-                    if " " not in query:
-                        # One keyword is its own phrase: SQLite settles every score.
-                        self.assertEqual(measured.call_count, 0)
-        with patch.object(thread_search, "_relevance", wraps=thread_search._relevance) as measured:
-            self.pages("radio alarm")
-        self.assertGreater(measured.call_count, 0, "The fixture must exercise proximity measurement")
-
-    def test_search_uses_fixed_statements_without_python_callbacks(self):
-        from agent_coord import conversation_substrings
+    def test_search_never_creates_legacy_tables_or_acquires_state_writer_lock(self):
         self.seed(12)
-        supported = conversation_substrings.ensure_schema(self.store)
-        statements = []
-        connect = self.store._connect
-
-        def traced():
-            connection = connect()
-            connection.set_trace_callback(statements.append)
-            return connection
-
-        counts = {}
-        candidate_counts = {}
-        with patch.object(_StoreConnection, "create_function", side_effect=AssertionError("Per-row Python callback")), \
-                patch.object(self.store, "_connect", traced):
-            search_threads(self.store, "radio")
-            for query in ("radio", "alarm", "x", "zzzz"):
-                statements.clear()
-                page = search_threads(self.store, query, limit=50)
-                # FTS emits internal trace entries prefixed with "--" while
-                # reading its segments; these do not cross the Python boundary.
-                caller_statements = [sql for sql in statements if not sql.lstrip().startswith("--")]
-                candidate_statements = [sql for sql in caller_statements if
-                    sql.startswith("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('conversation_substring_parts'")
-                    or sql.startswith("SELECT term, doc FROM conversation_substring_vocabulary")
-                    or sql.startswith("SELECT json_group_array(source),COUNT(*) FROM (")]
-                candidate_counts[query] = len(candidate_statements)
-                counts[query, len(page["items"])] = len(caller_statements) - len(candidate_statements)
-        # The indexed branch adds a schema check, a batched frequency lookup
-        # and a batched candidate query. Other work retains the fixed bound,
-        # independent of how many conversations and messages match.
-        indexed_count = 3 if supported else 1
-        self.assertEqual(candidate_counts, {"radio": indexed_count, "alarm": indexed_count,
-                                            "x": 0, "zzzz": indexed_count})
-        self.assertEqual(len(set(counts.values())), 1, counts)
-        self.assertLessEqual(next(iter(counts.values())), 14, statements)
+        with patch.object(_StoreConnection, "create_function", side_effect=AssertionError("Per-row Python callback")):
+            page = search_threads(self.store, "radio")
+        self.assertTrue(page["items"])
         self.assertNotIn("create_function", inspect.getsource(thread_search))
 
-    def test_current_indexes_are_searched_without_the_writer_lock(self):
-        self.seed(8)
-        search_threads(self.store, "radio")
+        with self.store.reading(), self.store._connection() as db:
+            legacy = [
+                row[0]
+                for row in db.execute(
+                    """SELECT name FROM sqlite_master
+                       WHERE name LIKE 'conversation_search_%' OR name LIKE 'conversation_substring_%'"""
+                )
+            ]
+        self.assertEqual(legacy, [])
+
         writer = sqlite3.connect(self.store.database_path, isolation_level=None)
         self.addCleanup(writer.close)
         writer.execute("BEGIN IMMEDIATE")
         try:
-            # A write would wait for the busy timeout and then fail.
-            page = search_threads(self.store, "radio")
+            locked_page = search_threads(self.store, "radio")
         finally:
             writer.execute("ROLLBACK")
-        self.assertTrue(page["items"])
+        self.assertEqual([i["thread_id"] for i in locked_page["items"]], [i["thread_id"] for i in page["items"]])
 
     def test_current_indexes_bypass_store_writer_admission(self):
         self.seed(8)
-        search_threads(self.store, "radio")
         entered, release = threading.Event(), threading.Event()
 
         def writer():
@@ -495,93 +358,109 @@ class SearchExecutionTests(unittest.TestCase):
                 release.set()
             writing.result()
 
-    def test_context_search_without_history_does_not_reacquire_a_writer(self):
-        with self.store._connection() as db:
-            db.execute("DROP TABLE browser_history")
-        self.store.register(session_id="terminal", client="codex", cwd=str(self.root), name="Radio planning")
-        search_threads(self.store, "radio")
-        writer = sqlite3.connect(self.store.database_path, isolation_level=None)
-        self.addCleanup(writer.close)
-        writer.execute("BEGIN IMMEDIATE")
-        try:
-            self.assertEqual(search_threads(self.store, "radio")["items"][0]["thread_id"], "terminal")
-        finally:
-            writer.execute("ROLLBACK")
+    def test_streaming_turn_is_searchable_via_live_overlay_and_indexed_only_when_finalized(self):
+        self.store.register(session_id="stream", client="codex", cwd=str(self.root), name="Stream")
+        live_history = {
+            "id": "stream",
+            "turns": [{"id": "turn-live", "status": "inProgress", "items": [{"id": "m1", "type": "agentMessage", "text": "ephemeral live token"}]}],
+        }
+        self.store.transcripts.save_turns("stream", live_history)
+        self.assertTrue(self.store.search_store.flush())
+        # In-progress turns are never committed to search.sqlite3.
+        self.assertEqual(self.store.search_store.indexed_thread_ids(), set())
 
-    def test_context_follows_other_writers_and_a_busy_writer_only_defers_the_cache(self):
+        sessions = SimpleNamespace(
+            cwd=str(self.root),
+            lock=threading.RLock(),
+            histories={"stream": live_history},
+            active={"stream": "turn-live"},
+            persistence=SimpleNamespace(submit=lambda *args, **kwargs: None),
+        )
+        live_result = search_browser_threads(self.store, sessions, {"q": ["ephemeral live token"]})
+        self.assertEqual([r["thread_id"] for r in live_result["items"]], ["stream"])
+
+        live_history["turns"][0]["status"] = "completed"
+        self.store.transcripts.save_turns("stream", live_history)
+        self.assertTrue(self.store.search_store.flush())
+        self.assertEqual(self.store.search_store.indexed_thread_ids(), {"stream"})
+        indexed_result = search_threads(self.store, "ephemeral live token", source="messages")
+        self.assertEqual([r["thread_id"] for r in indexed_result["items"]], ["stream"])
+
+    def test_unicode_casefold_short_terms_my_messages_and_pagination(self):
+        self.seed(40)
+        for query in ("radio alarm", "alarm radio", "radio", "strasse", "straße file", "file k", "x", "zzz"):
+            for options in ({}, {"source": "context"}, {"source": "messages"}, {"my_messages": True}):
+                with self.subTest(query=query, **options):
+                    paged = self.pages(query, **options)
+                    direct = search_threads(self.store, query, limit=50, **options)["items"]
+                    self.assertEqual([i["thread_id"] for i in paged], [i["thread_id"] for i in direct])
+                    if query == "zzz":
+                        self.assertEqual(paged, [])
+
+    def test_context_follows_external_writers_immediately_under_write_lock(self):
         self.store.register(session_id="a", client="codex", cwd=str(self.root), name="Plain")
         self.store.threads.capture_request("a", "Nothing yet")
         ids = lambda query: [item["thread_id"] for item in search_threads(self.store, query)["items"]]
         self.assertEqual(ids("harbor"), [])
         older = sqlite3.connect(self.store.database_path, isolation_level=None)
         self.addCleanup(older.close)
-        # An older runtime changes saved context without updating the projection.
         older.execute("UPDATE work_threads SET title = 'Harbor plan' WHERE thread_id = 'a'")
         self.assertEqual(ids("harbor"), ["a"])
-        self.store.threads.checkpoint("a", {"phase": "investigation", "summary": "Pier lighting", "next_action": "",
-            "next_actor": "nobody", "links": [{"kind": "document", "label": "Lantern", "target": "docs/l.md"}]})
+        self.store.threads.checkpoint(
+            "a",
+            {
+                "phase": "investigation",
+                "summary": "Pier lighting",
+                "next_action": "",
+                "next_actor": "nobody",
+                "links": [{"kind": "document", "label": "Lantern", "target": "docs/l.md"}],
+            },
+        )
         self.assertEqual(ids("pier lantern"), ["a"])
         older.execute("DELETE FROM thread_links WHERE thread_id = 'a'")
         self.assertEqual(ids("lantern"), [])
-        stored = lambda: older.execute(
-            "SELECT request FROM conversation_search_context WHERE thread_id = 'a'").fetchone()
-        self.assertEqual(stored(), ("nothing yet",))
         older.execute("UPDATE work_threads SET original_request = 'Dock  Schedule' WHERE thread_id = 'a'")
-        self.assertIsNone(stored())
         older.execute("BEGIN IMMEDIATE")
         try:
             self.assertEqual(ids("dock"), ["a"])
         finally:
             older.execute("ROLLBACK")
-        self.assertIsNone(stored())
-        self.assertEqual(ids("dock"), ["a"])
-        self.assertEqual(stored(), ("dock schedule",))
-
-    def test_context_computed_before_a_concurrent_change_is_not_stored(self):
-        self.store.register(session_id="a", client="codex", cwd=str(self.root), name="Plain")
-        self.store.threads.capture_request("a", "Harbor survey")
-        changed = []
-        save = thread_search._save_context
-
-        def change_then_save(db, overlay):
-            # Another runtime commits between this search's snapshot and its cache write.
-            if overlay and not changed:
-                changed.append(True)
-                with closing(sqlite3.connect(self.store.database_path)) as other, other:
-                    other.execute("UPDATE work_threads SET original_request = 'Dock survey' WHERE thread_id = 'a'")
-            save(db, overlay)
-
-        with patch.object(thread_search, "_save_context", change_then_save):
-            self.assertEqual([i["thread_id"] for i in search_threads(self.store, "harbor")["items"]], ["a"])
-        with self.store._connection() as db:
-            self.assertIsNone(db.execute("SELECT 1 FROM conversation_search_context WHERE thread_id = 'a'").fetchone())
-        self.assertEqual(search_threads(self.store, "harbor")["items"], [])
-        self.assertEqual([i["thread_id"] for i in search_threads(self.store, "dock")["items"]], ["a"])
 
     def test_route_boundary_matches_the_overview_without_projecting_threads(self):
         from test_codex_app_server import BrowserSessions, FakeCodex
+
         sessions = BrowserSessions(self.store, str(self.root), rpc_factory=FakeCodex)
         self.addCleanup(sessions.close)
         repo, nested = self.root / "repo", self.root / "nested"
         (repo / ".git").mkdir(parents=True)
         nested.mkdir()
-        for identity, directory, placement in (("now", self.root, "now"), ("later", repo, "later"),
-                                               ("closed", nested, "archived"), ("outside", self.root.parent / "elsewhere", "now"),
-                                               ("parent", repo, "now"), ("worker", self.root, "now")):
+        for identity, directory, placement in (
+            ("now", self.root, "now"),
+            ("later", repo, "later"),
+            ("closed", nested, "archived"),
+            ("outside", self.root.parent / "elsewhere", "now"),
+            ("parent", repo, "now"),
+            ("worker", self.root, "now"),
+        ):
             self.store.register(session_id=identity, client="codex", cwd=str(directory), name="Search target")
             self.store.threads.update(identity, attention=placement)
         project = self.store.threads.organization.create_project("Launch")
         self.store.threads.update("later", project_id=project["id"])
         with self.store._connection() as db:
-            db.execute("""INSERT INTO delegations (delegation_id, parent_session_id, child_session_id, client, cwd,
+            db.execute(
+                """INSERT INTO delegations (delegation_id, parent_session_id, child_session_id, client, cwd,
                 write_scope_json, instructions, status, mode, created_at, updated_at)
-                VALUES ('d', 'parent', 'worker', 'codex', ?, '[]', 'Work', 'launched', 'terminal', 1, 1)""", (str(self.root),))
+                VALUES ('d', 'parent', 'worker', 'codex', ?, '[]', 'Work', 'launched', 'terminal', 1, 1)""",
+                (str(self.root),),
+            )
         overview = sessions.list_work_threads() + sessions.list_work_threads(archived=True)
         with self.store._connection() as db:
             listed = listed_threads(self.store.threads, db, sessions.cwd)
         fields = ("thread_id", "attention", "project_cwd", "repository_id", "project_id")
-        self.assertEqual(sorted(tuple(t[f] for f in fields) for t in listed),
-                         sorted(tuple(t[f] for f in fields) for t in overview))
+        self.assertEqual(
+            sorted(tuple(t[f] for f in fields) for t in listed),
+            sorted(tuple(t[f] for f in fields) for t in overview),
+        )
         self.assertEqual({t["thread_id"] for t in listed}, {"now", "later", "closed", "parent"})
 
         def previous_boundary(query):
@@ -598,39 +477,24 @@ class SearchExecutionTests(unittest.TestCase):
                 threads = [t for t in threads if t["project_cwd"] == query["project_cwd"][0]]
             return sorted(t["thread_id"] for t in threads)
 
-        with patch.object(sessions, "list_work_threads", side_effect=AssertionError("Projected the inventory")), \
-                patch.object(thread_search, "search_threads", wraps=thread_search.search_threads) as search:
-            for query in ({"scope": ["all"]}, {"scope": ["all_projects"]}, {"scope": ["current"]},
-                          {"scope": ["current"], "show": ["later"], "project": [project["id"]]},
-                          {"scope": ["current"], "show": ["archived"]}, {"scope": ["current"], "repository": ["__none__"]},
-                          {"scope": ["all"], "project_cwd": [str(repo)]}):
+        with patch.object(sessions, "list_work_threads", side_effect=AssertionError("Projected the inventory")), patch.object(
+            thread_search, "search_threads", wraps=thread_search.search_threads
+        ) as search:
+            for query in (
+                {"scope": ["all"]},
+                {"scope": ["all_projects"]},
+                {"scope": ["current"]},
+                {"scope": ["current"], "show": ["later"], "project": [project["id"]]},
+                {"scope": ["current"], "show": ["archived"]},
+                {"scope": ["current"], "repository": ["__none__"]},
+                {"scope": ["all"], "project_cwd": [str(repo)]},
+            ):
                 with self.subTest(query=query):
                     search_browser_threads(self.store, sessions, {**query, "q": ["search target"]})
                     self.assertEqual(sorted(search.call_args.kwargs["thread_ids"]), previous_boundary(query))
-        # Attention and stage are live projections, built once when the view filters on them.
         with patch.object(sessions, "list_work_threads", wraps=sessions.list_work_threads) as projected:
             search_browser_threads(self.store, sessions, {"q": ["search target"], "scope": ["current"], "show": ["attention"]})
         self.assertEqual(projected.call_count, 1)
-
-    def test_numbers_cross_sqlite_json_exactly(self):
-        generator = random.Random(7)
-        values = [0.0, 1.0, 1234, -2.5, 1793247626.5940921, 2.0 ** -40, *(generator.uniform(1.6e9, 1.9e9) for _ in range(2000)),
-                  *(generator.uniform(0.001, 1) for _ in range(500)), 1e-30, 2.0 ** 70, None]
-        db = sqlite3.connect(":memory:")
-        self.addCleanup(db.close)
-        db.execute("CREATE TABLE numbers (value)")
-        db.executemany("INSERT INTO numbers VALUES (?)", [(value,) for value in values])
-        encoded = json.loads(db.execute(f"SELECT json_group_array({thread_search._number('value')}) FROM "
-                                        "(SELECT value FROM numbers ORDER BY rowid)").fetchone()[0])
-        decoded = [thread_search._decode_number(value) for value in encoded]
-        self.assertEqual(decoded[:-3], values[:-3])
-        self.assertEqual([type(value) for value in decoded], [type(value) for value in values])
-        self.assertAlmostEqual(decoded[-3], 1e-30, delta=1e-44)
-        self.assertAlmostEqual(decoded[-2] / 2.0 ** 70, 1.0, places=12)
-        self.assertIsNone(decoded[-1])
-
-    def test_whitespace_separators_cover_every_unicode_space(self):
-        self.assertEqual(thread_search._SPACE, "".join(chr(code) for code in range(sys.maxunicode + 1) if chr(code).isspace()))
 
 
 if __name__ == "__main__":

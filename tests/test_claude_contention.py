@@ -97,8 +97,9 @@ class ClaudeContentionTests(unittest.TestCase):
             self.assertFalse(self.sessions.persistence.flush(timeout=.02))
         self.assertTrue(self.sessions.claude.persistence.flush(timeout=3))
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        from agent_coord.history_persistence import read_history
+        history = read_history(self.store, self.thread)
         with self.store._connection() as db:
-            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (self.thread,)).fetchone()[0])
             self.assertEqual(db.execute("SELECT started FROM claude_sessions WHERE thread_id=?", (self.thread,)).fetchone()[0], 1)
             self.assertEqual([r[0] for r in db.execute("SELECT status FROM turn_completions WHERE thread_id=?", (self.thread,))], ["completed"])
             self.assertFalse(db.execute("SELECT 1 FROM browser_inbox_wake WHERE thread_id=? AND paused=1", (self.thread,)).fetchone())

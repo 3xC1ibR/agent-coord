@@ -1067,8 +1067,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(len(detail["thread"]["turns"]), 1)
         self.assertEqual(detail["thread"]["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
-        with self.store._connection() as db:
-            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        history = read_history(self.store, thread_id)
         self.assertEqual(history["turns"][0]["items"][-1]["content"][0]["text"], "New direction")
 
     def test_steering_the_observed_codex_turn_does_not_fetch_its_transcript(self):
@@ -1487,8 +1486,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(result["thread"]["status"], {"type": "idle"})
         self.assertEqual(reader.calls, [("thread/read", {"threadId": thread_id, "includeTurns": True})] * 2)
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
-        with self.store._connection() as db:
-            saved = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        saved = read_history(self.store, thread_id)
         self.assertEqual(saved["turns"], turns)
         self.sessions.close()
         self.assertTrue(reader.closed)
@@ -1523,8 +1521,7 @@ class BrowserSessionTests(unittest.TestCase):
             self.sessions.read(thread_id)
             save.assert_called_once_with(thread_id)
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
-        with self.store._connection() as db:
-            persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        persisted = read_history(self.store, thread_id)
         self.assertEqual(persisted["turns"][0]["items"][0]["text"], "changed answer")
 
     def test_read_flushes_unsaved_stream_deltas_even_when_provider_matches_mirror(self):
@@ -1543,8 +1540,7 @@ class BrowserSessionTests(unittest.TestCase):
             self.sessions.read(thread_id)
             save.assert_called_once_with(thread_id)
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
-        with self.store._connection() as db:
-            persisted = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        persisted = read_history(self.store, thread_id)
         self.assertEqual(persisted["turns"][0]["items"][0]["text"], "Partial update")
 
     def test_stream_deltas_append_to_nullable_initial_text_and_output(self):
@@ -1565,9 +1561,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.sessions._event({"method": "turn/completed", "params": {
             "threadId": thread_id, "turn": {"id": turn["id"], "status": "completed", "items": []}}})
         self.assertTrue(self.sessions.persistence.flush(timeout=3, key=thread_id))
-        with self.store._connection() as db:
-            persisted = json.loads(db.execute(
-                "SELECT history_json FROM browser_history WHERE thread_id = ?", (thread_id,)).fetchone()[0])
+        persisted = read_history(self.store, thread_id)
         items = {item["id"]: item for item in persisted["turns"][-1]["items"]}
         for item_id, _, field, _ in cases:
             self.assertEqual(items[item_id][field], "First second")
@@ -1995,7 +1989,7 @@ class BrowserSessionTests(unittest.TestCase):
         native = self.prepare_stale_terminal()
         before = self.store.get_session("terminal")
         with self.store._connection() as db:
-            db.execute("""CREATE TRIGGER reject_handoff BEFORE INSERT ON browser_history
+            db.execute("""CREATE TRIGGER reject_handoff BEFORE INSERT ON thread_turns
                 BEGIN SELECT RAISE(ABORT, 'Storage failed.'); END""")
         with patch.object(self.sessions, "_stored_thread", return_value=native), \
                 patch("agent_coord.codex_app_server.verify_terminal_handoff"):
@@ -2076,12 +2070,14 @@ class BrowserSessionTests(unittest.TestCase):
         stale_link = self.create()
         for identity in (complete, missing_directory, missing_request, missing_link, stale_link):
             self.store.threads.capture_request(identity, "Saved assignment.")
+        self.store.transcripts.save_turns(
+            missing_request,
+            {"id": missing_request, "turns": [{"id": "recovered", "status": "completed", "items": [
+                {"type": "userMessage", "content": [{"text": "Recovered assignment."}]}]}]},
+        )
         with self.store._connection() as db:
             db.execute("UPDATE work_threads SET project_cwd = NULL WHERE thread_id = ?", (missing_directory,))
             db.execute("UPDATE work_threads SET original_request = '' WHERE thread_id = ?", (missing_request,))
-            db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)",
-                       (missing_request, json.dumps({"id": missing_request, "turns": [{"items": [
-                           {"type": "userMessage", "content": [{"text": "Recovered assignment."}]}]}]})))
             db.execute("UPDATE browser_sessions SET archived = 1 WHERE thread_id = ?", (missing_request,))
             db.executemany("UPDATE sessions SET bead_id = 'work-a' WHERE session_id = ?", [(missing_link,), (stale_link,)])
             db.execute("""INSERT INTO thread_links(thread_id,kind,label,target,project_id)
@@ -2121,7 +2117,7 @@ class DatabaseContentionTests(unittest.TestCase):
         blocker.execute("BEGIN IMMEDIATE")
         try:
             started = time.monotonic()
-            self.sessions._remember_thread({"id": identity, "turns": [], "status": {"type": "idle"}})
+            self.sessions._remember_thread({"id": identity, "turns": [{"id": "t1", "status": "completed", "items": []}], "status": {"type": "idle"}})
             with ThreadPoolExecutor(max_workers=1) as executor:
                 executor.submit(self.sessions._thread_lock, "unrelated").result(timeout=.5)
             self.assertLess(time.monotonic() - started, .8)
@@ -2279,8 +2275,7 @@ class DatabaseContentionTests(unittest.TestCase):
         self.store.touch(identity, turn_active=True)
         history = {"id": identity, "turns": [{"id": "recorded-turn", "status": status,
                                              "startedAt": 100, "completedAt": 120, "items": []}]}
-        with self.store._connection() as db:
-            db.execute("INSERT OR REPLACE INTO browser_history VALUES (?, ?)", (identity, json.dumps(history)))
+        self.store.transcripts.save_turns(identity, history)
         # Model a crash after the history commit but before lifecycle completion:
         # the new runtime starts with no loaded provider or in-memory event queue.
         self.sessions.loaded.clear()
@@ -2430,8 +2425,8 @@ for line in sys.stdin:
             self.assertNotIn(identity, self.sessions.active)
             self.assertFalse(self.sessions.persistence.flush(timeout=.02))
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        history = read_history(self.store, identity)
         with self.store._connection() as db:
-            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
             completions = db.execute("SELECT status FROM turn_completions WHERE thread_id=?", (identity,)).fetchall()
         self.assertEqual([row[0] for row in completions], ["completed"])
         self.assertEqual([i["text"] for i in history["turns"][0]["items"] if i["type"] == "agentMessage"], ["Saved once"])
@@ -2499,9 +2494,9 @@ for line in sys.stdin:
                 self.sessions._event({"method": "turn/completed", "params": {
                     "threadId": identity, "turn": {"id": turn, "status": "completed"}}})
         self.assertTrue(self.sessions.persistence.flush(timeout=3))
+        history = read_history(self.store, identity)
         with self.store._connection() as db:
             completions = db.execute("SELECT turn_key FROM turn_completions WHERE thread_id=? ORDER BY id", (identity,)).fetchall()
-            history = json.loads(db.execute("SELECT history_json FROM browser_history WHERE thread_id=?", (identity,)).fetchone()[0])
         self.assertEqual([r[0] for r in completions], ["first", "second"])
         self.assertEqual([t["items"][0]["text"] for t in history["turns"]], ["once", "once"])
 

@@ -122,6 +122,8 @@ class DatabaseWriter:
         self.slow_writer_scopes = []
         self.slow_writer_scope_capacity = 16
         self.admission_timeout_records = deque(maxlen=16)
+        self.commit_condition = threading.Condition()
+        self.commit_revision = 0
 
     def _next(self):
         foreground = [entry for entry in self.queue if entry[1] == "foreground"]
@@ -216,6 +218,10 @@ class DatabaseWriter:
                     self.active_scope_id = None
                     self.active_slow_phase_durations = None
                     self.condition.notify_all()
+            if not nested and not failed:
+                with self.commit_condition:
+                    self.commit_revision += 1
+                    self.commit_condition.notify_all()
 
     def record_slow_operation(self, phase, operation, duration_ms, *, read_only=0,
                               failed=0, error_code=0, transaction_open=0,
@@ -307,7 +313,7 @@ class DatabaseWriter:
 
 
 def performance_snapshot(sessions, *, refresh_coverage=True):
-    from .conversation_search import search_metrics
+    from .search_store import search_metrics
     persistence = sessions.persistence.status()
     failures = persistence.pop("failures", {})
     checkpoint = getattr(sessions, "database_checkpoint", None)

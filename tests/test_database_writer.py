@@ -467,7 +467,7 @@ class DatabaseWriterTests(unittest.TestCase):
                                    persistence=SimpleNamespace(status=lambda: {'failures': {'private-thread': 'private failure'}}))
         system = {'host': {'logical_cpu_count': 8}, 'process': {'cpu_seconds': 1.5}}
         with patch.object(writer_module, 'system_performance_snapshot', return_value=system), \
-                patch('agent_coord.conversation_search.search_metrics', return_value={}):
+                patch('agent_coord.search_store.search_metrics', return_value={}):
             metrics = writer_module.performance_snapshot(sessions)
         self.assertEqual(metrics['host'], system['host'])
         self.assertEqual(metrics['process'], system['process'])

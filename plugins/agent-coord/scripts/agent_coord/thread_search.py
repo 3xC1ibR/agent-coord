@@ -1,102 +1,59 @@
-"""Bounded discovery of durable conversations, independent of UI placement.
+"""Bounded discovery of durable conversations backed by isolated search.sqlite3.
 
-Search saved routing context and indexed conversation prose. Pages are live
-keyset queries: repeat the search when conversations change during discovery.
-
-Matching and ranking run inside SQLite over casefolded text. A request uses a
-small, fixed number of statements and aggregates results into single rows:
-under load every Python callback and returned row reacquires the GIL behind
-other request threads. Python measures keyword proximity only for candidates
-whose rank SQLite cannot settle.
+Context metadata is read directly from ``state.sqlite3`` in query-only mode
+(zero tables or triggers added to ``state.sqlite3``), while finalized turn prose
+is queried from ``<db_dir>/search.sqlite3`` via FTS5 trigram + ``bm25()``.
 """
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+from functools import lru_cache
 import hashlib
 import heapq
 import json
 import math
-import sqlite3
-from contextlib import contextmanager
-from functools import partial
+import os
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote, urlencode
 
+from .history_persistence import decode_history
+from .history_window import messages, turn_messages
 from .organization import UNSET
 from .store import CoordinationError
 from .threads import project_root
-from .conversation_search import (
-    _measure, _operation, ensure_message_schema, index_search_snapshot, message_condition,
-    pending_search_evidence, refresh_messages,
-)
 
-# Separators of str.split(); none is above U+3000.
-_SPACE = "".join(chr(code) for code in range(0x3001) if chr(code).isspace())
+_SPACE = "".join(chr(code) for code in range(sys.maxunicode + 1) if chr(code).isspace()) if False else ""
+import sys as _sys  # noqa: E402
+_SPACE = "".join(chr(code) for code in range(_sys.maxunicode + 1) if chr(code).isspace())
 _SCALE = 4503599627370496  # 2**52
 _MEASURE_BATCH = 24
 _CONTEXT_WEIGHTS = {"title": 3, "summary": 1, "request": 1}
 
-# Casefolded, whitespace-collapsed routing context, as relevance compares it.
-# Triggers delete a thread's row when its source changes, whichever runtime
-# writes; a search recomputes missing rows from its own read snapshot.
-_CONTEXT_SCHEMA = {
-    "conversation_search_context": """CREATE TABLE IF NOT EXISTS conversation_search_context (
-        thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, request TEXT NOT NULL,
-        summary TEXT NOT NULL, artifacts TEXT NOT NULL)""",
-    "conversation_context_thread": """CREATE TRIGGER IF NOT EXISTS conversation_context_thread
-        AFTER UPDATE OF thread_id, title, original_request ON work_threads BEGIN
-        DELETE FROM conversation_search_context WHERE thread_id IN (OLD.thread_id, NEW.thread_id); END""",
-    **{f"conversation_context_{table}_{event}": f"""CREATE TRIGGER IF NOT EXISTS conversation_context_{table}_{event}
-        AFTER {event.upper()}{columns if event == "update" else ""} ON thread_{table}s BEGIN
-        DELETE FROM conversation_search_context WHERE thread_id IN ({rows}); END"""
-       for table, columns in (("checkpoint", " OF id, thread_id, summary, next_action"),
-                              ("link", " OF id, thread_id, label, target"))
-       for event, rows in (("insert", "NEW.thread_id"), ("update", "OLD.thread_id, NEW.thread_id"),
-                           ("delete", "OLD.thread_id"))},
-}
-# Context sources of thread t: title, original request, latest checkpoint c, artifacts.
-_SUMMARY = "COALESCE(c.summary, '') || ' ' || COALESCE(c.next_action, '')"
-_ARTIFACTS = """(SELECT group_concat(artifact, char(10)) FROM (SELECT l.label || ' ' || l.target AS artifact
-        FROM thread_links l WHERE l.thread_id = t.thread_id ORDER BY l.id))"""
-_LATEST_CHECKPOINT = """LEFT JOIN thread_checkpoints c ON c.id =
-        (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)"""
-_MISSING_CONTEXT = f"""SELECT json_group_array(json_array(t.thread_id, t.title, t.original_request,
-        {_SUMMARY}, {_ARTIFACTS}))
-    FROM work_threads t {_LATEST_CHECKPOINT}
-    WHERE NOT EXISTS (SELECT 1 FROM conversation_search_context x WHERE x.thread_id = t.thread_id)"""
-# Store a recomputed row only while its sources still match the snapshot it
-# was computed from; a later change has already invalidated it. CROSS JOIN
-# keeps the JSON rows outermost, so each is parsed once.
-_SAVE_CONTEXT = f"""INSERT OR REPLACE INTO conversation_search_context
-    SELECT t.thread_id, json_extract(r.value, '$[4]'), json_extract(r.value, '$[5]'),
-           json_extract(r.value, '$[6]'), json_extract(r.value, '$[7]')
-    FROM json_each(:rows) r CROSS JOIN work_threads t ON t.thread_id = r.key {_LATEST_CHECKPOINT}
-    WHERE t.title IS json_extract(r.value, '$[0]') AND t.original_request IS json_extract(r.value, '$[1]')
-      AND {_SUMMARY} IS json_extract(r.value, '$[2]') AND {_ARTIFACTS} IS json_extract(r.value, '$[3]')"""
-# Rows recomputed in this snapshot, keyed by thread. LIMIT keeps SQLite from
-# flattening it into the join, which would rescan the JSON for every thread.
-_OVERLAY = """SELECT key AS thread_id, json_extract(value, '$[4]') AS title,
-        json_extract(value, '$[5]') AS request, json_extract(value, '$[6]') AS summary,
-        json_extract(value, '$[7]') AS artifacts FROM json_each(:overlay) LIMIT -1"""
 
-
-def _cursor(value, fingerprint):
+def _cursor(value, fingerprint: str) -> dict:
     try:
         if not isinstance(value, str) or len(value) > 2048:
             raise ValueError()
         data = json.loads(base64.b64decode(value, altchars=b"-_", validate=True))
-        if (data["v"] != 1 or data["query"] != fingerprint
-                or type(data["score"]) is not int or data["score"] < 1
-                or type(data["time"]) not in (int, float) or not math.isfinite(data["time"])
-                or not isinstance(data["id"], str) or not 0 < len(data["id"]) <= 200):
+        if (
+            data["v"] != 1
+            or data["query"] != fingerprint
+            or type(data["score"]) is not int
+            or data["score"] < 1
+            or type(data["time"]) not in (int, float)
+            or not math.isfinite(data["time"])
+            or not isinstance(data["id"], str)
+            or not 0 < len(data["id"]) <= 200
+        ):
             raise ValueError()
         return data
     except (ValueError, TypeError, KeyError, UnicodeError):
         raise CoordinationError("Invalid search cursor or changed query/filters. Start a new search.") from None
 
 
-def _match_span(folded, terms, phrase):
-    """Find the phrase or tightest span containing every literal keyword."""
+def _match_span(folded: str, terms: list[str], phrase: str):
     if phrase and (position := folded.find(phrase)) >= 0:
         return position, position + len(phrase)
     positions = [(folded.find(term), i) for i, term in enumerate(terms)]
@@ -117,8 +74,28 @@ def _match_span(folded, terms, phrase):
     return best
 
 
-def _relevance(value, terms, phrase):
-    folded = _normalize(value)
+def _normalize(value: str | None) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+@lru_cache(maxsize=4096)
+def _folded_context(
+    title_val: str,
+    domain_val: str,
+    summary_val: str,
+    request_val: str,
+    artifacts_val: str,
+) -> dict[str, str]:
+    return {
+        "title": _normalize(title_val),
+        "domain": _normalize(domain_val),
+        "summary": _normalize(summary_val),
+        "request": _normalize(request_val),
+        "artifacts": _normalize(artifacts_val),
+    }
+
+
+def _relevance_folded(folded: str, terms: list[str], phrase: str) -> int:
     span = _match_span(folded, terms, phrase)
     if span is None:
         return 0
@@ -126,12 +103,11 @@ def _relevance(value, terms, phrase):
     return 1 + max(0, 24 - gap // 8) + 32 * (phrase in folded) + 16 * (folded == phrase)
 
 
-def _normalize(value):
-    """Casefolded text with collapsed whitespace, as relevance compares it."""
-    return " ".join((value or "").casefold().split())
+def _relevance(value: str | None, terms: list[str], phrase: str) -> int:
+    return _relevance_folded(_normalize(value), terms, phrase)
 
 
-def _snippet(value, terms, limit, phrase=None):
+def _snippet(value: str | None, terms: list[str], limit: int, phrase: str | None = None) -> str:
     value = " ".join((value or "").split())
     folded = value.casefold()
     span = _match_span(folded, terms, phrase or " ".join(terms))
@@ -153,21 +129,17 @@ def _snippet(value, terms, limit, phrase=None):
     start = max(0, position - limit // 4)
     if end - position <= limit:
         start = max(start, end - limit)
-    return ("…" if start else "") + value[start:start + limit] + ("…" if len(value) > start + limit else "")
+    return ("…" if start else "") + value[start : start + limit] + ("…" if len(value) > start + limit else "")
 
 
-def _number(column):
-    """Encode a SQLite number for exact transport through JSON.
-
-    SQLite before 3.53 renders REAL values with 15 significant digits, so
-    timestamps would not round-trip. The integer part and two 52-bit binary
-    fractions are exact for every value from 2**-52 to 2**63.
-    """
+def _number(column: str) -> str:
     whole = f"CAST({column} AS INTEGER)"
     fraction = f"(({column} - {whole}) * 4503599627370496.0)"
-    return (f"CASE typeof({column}) WHEN 'real' THEN json_array({whole}, CAST({fraction} AS INTEGER), "
-            f"CAST(({fraction} - CAST({fraction} AS INTEGER)) * 4503599627370496.0 AS INTEGER), "
-            f"{column}) ELSE {column} END")
+    return (
+        f"CASE typeof({column}) WHEN 'real' THEN json_array({whole}, CAST({fraction} AS INTEGER), "
+        f"CAST(({fraction} - CAST({fraction} AS INTEGER)) * 4503599627370496.0 AS INTEGER), "
+        f"{column}) ELSE {column} END"
+    )
 
 
 def _decode_number(value):
@@ -177,115 +149,105 @@ def _decode_number(value):
         return value
     whole, fraction, remainder, rendered = value
     exact = whole + (fraction + remainder / _SCALE) / _SCALE
-    # Outside the exact range, keep SQLite's own rendering.
     return exact if math.isclose(exact, rendered, rel_tol=1e-9) else rendered
 
 
-def _relevance_sql(column, count, single, closeness):
-    """Relevance of a casefolded, collapsed column; -1 when only proximity is unknown."""
-    every = " AND ".join(f"instr({column}, :q{i}) > 0" for i in range(count))
-    found = f"1 + {closeness} + 32 + 16 * ({column} = :phrase)"
-    if single:
-        return f"CASE WHEN {every} THEN {found} ELSE 0 END"
-    return f"CASE WHEN instr({column}, :phrase) > 0 THEN {found} WHEN {every} THEN -1 ELSE 0 END"
-
-
-def _message_relevance_sql(single, closeness):
-    """Relevance of a message containing every keyword; -1 when SQLite cannot settle it.
-
-    Messages keep casefolded text with its original whitespace. A literal
-    phrase proves the collapsed phrase; other spacing needs Python.
-    """
-    found = f"1 + {closeness} + 32 + 16 * (trim(m.folded, :space) = :phrase)"
-    if single:
-        return found
-    return f"CASE WHEN instr(m.folded, :phrase) > 0 THEN {found} ELSE -1 END"
-
-
-class _Candidate:
-    __slots__ = ("thread_id", "time", "fixed", "unknown", "certain", "uncertain",
-                 "context_match", "low", "high", "score", "measured")
-
-    def key(self, score):
-        return score, self.time, self.thread_id
-
-
-def _select(candidates, after, count, measure):
-    """Return the best `count` candidates below `after` in score, time, ID order.
-
-    Candidates are visited by their score ceiling; an unsettled score is
-    measured only while it could still change the selection.
-    """
-    ordered = sorted(candidates, key=lambda c: c.key(c.high), reverse=True)
-    best = []
-    for index, candidate in enumerate(ordered):
-        if len(best) == count and best[0][0] >= candidate.key(candidate.high):
-            break
-        if after is not None and candidate.key(candidate.low) >= after:
-            continue
-        if candidate.score is None:
-            measure([c for c in ordered[index:index + _MEASURE_BATCH]
-                     if c.score is None and (after is None or c.key(c.low) < after)])
-        key = candidate.key(candidate.score)
-        if after is not None and key >= after:
-            continue
-        if len(best) < count:
-            heapq.heappush(best, (key, index))
-        elif key > best[0][0]:
-            heapq.heapreplace(best, (key, index))
-    return [ordered[index] for _, index in sorted(best, reverse=True)]
-
-
-def _thread_url(database, thread_id):
-    # The NavigationStore.link(thread=...) route, without reloading the thread.
+def _thread_url(database: str, thread_id: str) -> str:
     return "agentcoord://thread/" + quote(thread_id, safe="") + "?" + urlencode({"database": database})
 
 
-def _save_context(db, overlay):
-    """Persist recomputed context rows when the writer is available."""
-    if not overlay:
-        return
-    timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
-    db.execute("PRAGMA busy_timeout = 250")
-    try:
-        db.execute(_SAVE_CONTEXT, {"rows": overlay})
-        db.execute("DELETE FROM conversation_search_context WHERE thread_id NOT IN (SELECT thread_id FROM work_threads)")
-        db.commit()
-    except sqlite3.OperationalError as error:
-        db.rollback()
-        # A busy writer only defers this cache; the next search recomputes it.
-        if "locked" not in str(error) and "busy" not in str(error):
-            raise
-    finally:
-        db.execute(f"PRAGMA busy_timeout = {int(timeout)}")
-
-
 @contextmanager
-def _search_connection(store):
-    """Keep a warm search entirely outside writer admission."""
+def _readonly_state_connection(store):
     while True:
         with store.reading(), store._connection() as db:
-            names, organization_missing = db.execute(f"""SELECT
-                (SELECT json_group_array(name) FROM sqlite_master WHERE name IN
-                 ('browser_sessions', 'browser_history', 'browser_inbox_wake', {','.join('?' * len(_CONTEXT_SCHEMA))})),
-                EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
-                        WHERE o.thread_id IS NULL)""", tuple(_CONTEXT_SCHEMA)).fetchone()
+            names, organization_missing = db.execute(
+                """SELECT
+                    (SELECT json_group_array(name) FROM sqlite_master WHERE type='table' AND name IN
+                     ('browser_sessions', 'browser_history', 'browser_inbox_wake', 'thread_turns')),
+                    EXISTS (SELECT 1 FROM work_threads t LEFT JOIN thread_organization o ON o.thread_id=t.thread_id
+                            WHERE o.thread_id IS NULL)"""
+            ).fetchone()
             tables = set(json.loads(names))
-            missing = [statement for name, statement in _CONTEXT_SCHEMA.items() if name not in tables]
-            if not missing and not organization_missing:
+            if not organization_missing or store.read_only:
                 yield db, tables
                 return
-        if organization_missing:
-            store.threads.organization.backfill()
-        if missing:
-            with _operation(store, "search.context_schema"), store._connection() as db:
-                for statement in missing:
-                    db.execute(statement)
+        store.threads.organization.backfill()
 
 
-def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
-                   repository_id=UNSET, project_id=UNSET, app_only=False,
-                   source="all", my_messages=False, thread_ids=None, schedule_index=None, snapshot_dirty=False):
+def _sync_unindexed_histories(store, db, tables: set[str], scope_ids: list[str]) -> tuple[set[str], set[str], dict[str, list[tuple]]]:
+    """Ensure finalized turns in scope are indexed in search.sqlite3; return coverage & live in-progress hits."""
+    search = store.search_store
+    if search._pending_tasks > 0:
+        search.flush(timeout=0.05)
+    saved_ids: set[str] = set()
+    partial_ids: set[str] = set()
+    live_prose: dict[str, list[tuple]] = {}
+    if not scope_ids:
+        return saved_ids, partial_ids, live_prose
+
+    tstore = store.transcripts
+    all_saved, all_partial = tstore.coverage_sets(db, tables, search)
+    scope_set = set(scope_ids)
+    saved_ids = all_saved & scope_set
+    partial_ids = all_partial & scope_set
+
+    # Legacy fallback for unmigrated browser_history rows in standalone tests.
+    if "browser_history" in tables:
+        remaining = [tid for tid in scope_ids if tid not in saved_ids and tid not in partial_ids]
+        if remaining:
+            indexed_ids = search.indexed_thread_ids()
+            legacy_rows = db.execute(
+                """SELECT thread_id, history_json FROM browser_history
+                   WHERE thread_id IN (SELECT value FROM json_each(?))""",
+                (json.dumps(remaining),),
+            ).fetchall()
+            for row in legacy_rows:
+                tid = row["thread_id"]
+                try:
+                    history = decode_history(row["history_json"], db=db)
+                except Exception:
+                    partial_ids.add(tid)
+                    continue
+                if not isinstance(history, dict):
+                    partial_ids.add(tid)
+                    continue
+                if history.get("historyUnavailable"):
+                    partial_ids.add(tid)
+                else:
+                    saved_ids.add(tid)
+                turns = history.get("turns") or []
+                finalized_pairs = []
+                for seq, turn in enumerate(turns):
+                    if not isinstance(turn, dict):
+                        continue
+                    if turn.get("status") == "inProgress":
+                        live_prose.setdefault(tid, []).extend(turn_messages(turn, seq))
+                    elif tid not in indexed_ids:
+                        finalized_pairs.append((seq, turn))
+                if finalized_pairs:
+                    search.index_turns_sync(tid, finalized_pairs)
+
+    return saved_ids, partial_ids, live_prose
+
+
+def search_threads(
+    store,
+    query: str,
+    *,
+    limit: int = 10,
+    cursor: str | None = None,
+    cwd: str | None = None,
+    repository_id=UNSET,
+    project_id=UNSET,
+    app_only: bool = False,
+    source: str = "all",
+    my_messages: bool = False,
+    thread_ids=None,
+    schedule_index=None,
+    snapshot_dirty: bool = False,
+    resident_live_turns: dict[str, dict] | None = None,
+) -> dict[str, Any]:
+    del schedule_index, snapshot_dirty
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise CoordinationError("Search query must contain 1–500 characters.")
     terms = list(dict.fromkeys(query.casefold().split()))
@@ -299,21 +261,28 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
     if my_messages:
         source = "messages"
     workspace = project_root(cwd) if cwd is not None else None
-    filters = {"ranking": 2, "terms": terms, "phrase": phrase, "cwd": workspace, "app_only": bool(app_only),
-               "source": source, "my_messages": bool(my_messages),
-               "thread_ids": sorted(thread_ids) if thread_ids is not None else None}
-    filters.update({key: value for key, value in (("repository", repository_id), ("project", project_id))
-                    if value is not UNSET})
+    filters: dict[str, Any] = {
+        "ranking": 3,
+        "terms": terms,
+        "phrase": phrase,
+        "cwd": workspace,
+        "app_only": bool(app_only),
+        "source": source,
+        "my_messages": bool(my_messages),
+        "thread_ids": sorted(thread_ids) if thread_ids is not None else None,
+    }
+    filters.update(
+        {key: value for key, value in (("repository", repository_id), ("project", project_id)) if value is not UNSET}
+    )
     fingerprint = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
-    after = _cursor(cursor, fingerprint) if cursor is not None else None
-    after = (after["score"], after["time"], after["id"]) if after else None
-    # A literal phrase spans its keywords with a fixed gap; one keyword is its own phrase.
-    closeness = max(0, 24 - max(0, len(phrase) - sum(map(len, terms))) // 8)
-    single = " " not in phrase
-    message_ceiling = 1 + closeness + 32 + 16
-    params = {f"q{i}": term for i, term in enumerate(terms)}
-    params.update(phrase=phrase, space=_SPACE)
+    after_data = _cursor(cursor, fingerprint) if cursor is not None else None
+    after = (after_data["score"], after_data["time"], after_data["id"]) if after_data else None
+
+    use_context = source != "messages"
+    use_messages = source != "context"
+
     where = []
+    params: dict[str, Any] = {}
     if thread_ids is not None:
         where.append("t.thread_id IN (SELECT value FROM json_each(:thread_ids))")
         params["thread_ids"] = json.dumps(sorted(thread_ids))
@@ -324,280 +293,324 @@ def search_threads(store, query, *, limit=10, cursor=None, cwd=None,
         if value is not UNSET:
             where.append(f"o.{key} IS :{key}")
             params[key] = value
-    use_context, use_messages = source != "messages", source != "context"
-    message_where = message_condition(terms, "user" if my_messages else None)
-    message_relevance = _message_relevance_sql(single, closeness)
-    if snapshot_dirty:
-        ensure_message_schema(store)
-    else:
-        refresh_messages(store, schedule_index=schedule_index)
-    settled = []
-    with _measure(store, "query"), _search_connection(store) as (db, tables):
-        app = "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)" if "browser_sessions" in tables else "0"
+
+    with store._writer.measure_request("search.query"), _readonly_state_connection(store) as (db, tables):
+        app_expr = (
+            "EXISTS (SELECT 1 FROM browser_sessions b WHERE b.thread_id = t.thread_id)"
+            if "browser_sessions" in tables
+            else "0"
+        )
         if app_only:
-            where.append(app)
-        overlay = {}
-        # One read snapshot keeps candidates, measurements and details consistent.
+            where.append(app_expr)
+        has_scope_filter = bool(where)
         db.execute("BEGIN")
         try:
-            from .conversation_substrings import candidates as substring_candidates, message_source
-            with _measure(store, "substring_query") as index_measurement:
-                indexed = substring_candidates(db, terms, index_measurement) if use_messages else None
-            params["substring_candidates"] = indexed
-            message_rows = message_source(include_text=True, indexed=indexed is not None)
-            folded_rows = message_source(include_text=False, indexed=indexed is not None)
-            history_rows = "conversation_search_history_index"
-            if snapshot_dirty and "browser_history" in tables:
-                projection = getattr(store, "provider_projection", None)
-                published = getattr(projection, "prepared_histories", {})
-                with _measure(store, "pending_history") as measurement:
-                    dirty, hits, settled = pending_search_evidence(db, terms, thread_ids, user_only=my_messages,
-                                                                  published=published, measurement=measurement,
-                                                                  store=store, indexed=indexed)
-                if dirty:
-                    params["dirty_histories"] = json.dumps(dirty)
-                    params["dirty_hits"] = json.dumps(hits)
-                    current = "thread_id NOT IN (SELECT key FROM json_each(:dirty_histories))"
-                    history_rows = f"""(SELECT thread_id, status FROM conversation_search_history_index
-                        WHERE {current} UNION ALL SELECT key, value FROM json_each(:dirty_histories))"""
-                    columns = ("thread_id", "turn_id", "item_id", "role", "timestamp", "text", "folded", "position")
-                    values = [f"json_extract(value, '$[{i}]')" for i in range(len(columns))]
-                    evidence = ",".join(f"{value} AS {name}" for value, name in zip(values, columns))
-                    def with_dirty(rows):
-                        return f"""SELECT * FROM ({rows}) WHERE {current}
-                            UNION ALL SELECT {evidence} FROM json_each(:dirty_hits)"""
-                    message_rows = with_dirty(message_rows)
-                    folded_rows = with_dirty(folded_rows)
-            if use_context:
-                # Sources first, then the casefolded text that the search compares.
-                overlay = {row[0]: [*row[1:], *map(_normalize, row[1:])]
-                           for row in json.loads(db.execute(_MISSING_CONTEXT).fetchone()[0])}
-            params["overlay"] = json.dumps(overlay)
-            fields = {name: f"CASE WHEN y.thread_id IS NULL THEN IFNULL(x.{name}, '') ELSE y.{name} END"
-                      for name in ("title", "summary", "request", "artifacts")}
-            # Each keyword must match some routing context. Title matches rank above
-            # checkpoint, original request and artifact matches; recent work breaks ties.
-            if use_context:
-                weights = " + ".join(f"(instr({fields[name]}, :q{i}) > 0) * {weight}" for i in range(len(terms))
-                                     for name, weight in (("title", 8), ("summary", 4), ("request", 2), ("artifacts", 1)))
-                context_match = " AND ".join("(" + " OR ".join(f"instr({fields[name]}, :q{i}) > 0" for name in fields) + ")"
-                                             for i in range(len(terms)))
-                relevance = {name: _relevance_sql(fields[name], len(terms), single, closeness) for name in _CONTEXT_WEIGHTS}
-            else:
-                weights = context_match = "0"
-                relevance = dict.fromkeys(_CONTEXT_WEIGHTS, "0")
-            evidence = ("SELECT NULL AS thread_id, NULL AS certain, 0 AS uncertain WHERE 0" if not use_messages else
-                        f"""SELECT thread_id, MAX(NULLIF(relevance, -1)) AS certain, MAX(relevance = -1) AS uncertain
-                            FROM (SELECT m.thread_id, {message_relevance} AS relevance FROM candidate_messages m
-                                  WHERE m.thread_id IN (SELECT thread_id FROM scope) AND {message_where})
-                            GROUP BY thread_id""")
-            match = {"context": "context_match", "messages": "message_match"}.get(source, "(context_match OR message_match)")
-            # Score bounds: a field or message whose proximity is unknown adds 1–25,
-            # or up to the phrase ceiling for messages, until Python measures it.
-            fixed = ("weights + 3 * MAX(title, 0) + MAX(summary, 0) + MAX(request, 0)" if use_context else "0")
-            spread = "3 * (title = -1) + (summary = -1) + (request = -1)" if use_context else "0"
-            low, high = (("CASE WHEN uncertain THEN MAX(certain, 1) ELSE certain END",
-                          f"CASE WHEN uncertain THEN MAX(certain, {message_ceiling}) ELSE certain END")
-                         if use_messages else ("0", "0"))
-            below = "(%s, last_work_at, thread_id) < (:after_score, :after_time, :after_id)"
-            if after:
-                params.update(after_score=after[0], after_time=after[1], after_id=after[2])
-            params["floor"] = limit
-            # SQLite otherwise expands this inventory into both projection
-            # branches, evidence aggregation, ranking, and coverage. Build it
-            # once so each branch reuses the same filtered thread identifiers.
-            candidates, coverage = db.execute(f"""WITH scope AS MATERIALIZED (
-                    SELECT t.thread_id, t.created_at, t.turn_started_at FROM work_threads t
-                    JOIN sessions s ON s.session_id = t.thread_id JOIN work_projects w ON w.id = t.project_id
-                    JOIN thread_organization o ON o.thread_id = t.thread_id WHERE {' AND '.join(where) or '1'}),
-                candidate_messages AS MATERIALIZED (
-                    SELECT m.* FROM ({folded_rows}) m
-                    WHERE m.thread_id IN (SELECT thread_id FROM scope)),
-                evidence AS ({evidence}),
-                bounded AS MATERIALIZED (SELECT *, {fixed} + {spread} + {low} AS low,
-                        {fixed} + 25 * ({spread}) + {high} AS high
-                    FROM (SELECT s.thread_id, {weights} AS weights, {relevance['title']} AS title,
-                                 {relevance['summary']} AS summary, {relevance['request']} AS request,
-                                 {context_match} AS context_match, IFNULL(e.certain, 0) AS certain,
-                                 IFNULL(e.uncertain, 0) AS uncertain, e.thread_id IS NOT NULL AS message_match,
-                                 MAX(s.created_at, COALESCE(s.turn_started_at, 0), COALESCE(done.completed_at, 0),
-                                     COALESCE(c.created_at, 0)) AS last_work_at
-                          FROM scope s LEFT JOIN conversation_search_context x ON x.thread_id = s.thread_id
-                          LEFT JOIN ({_OVERLAY}) y ON y.thread_id = s.thread_id
-                          LEFT JOIN evidence e ON e.thread_id = s.thread_id
-                          LEFT JOIN thread_checkpoints c ON c.id =
-                              (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = s.thread_id)
-                          LEFT JOIN turn_completions done ON done.id =
-                              (SELECT MAX(id) FROM turn_completions WHERE thread_id = s.thread_id))
-                    WHERE {match}),
-                -- A key below the cursor that `limit + 1` candidates certainly reach.
-                -- A candidate whose ceiling is under it cannot be on this page.
-                floor AS (SELECT low, last_work_at, thread_id FROM bounded
-                    {f"WHERE {below % 'low'} AND {below % 'high'}" if after else ""}
-                    ORDER BY low DESC, last_work_at DESC, thread_id DESC LIMIT 1 OFFSET :floor)
-                SELECT (SELECT json_group_array(json_array(thread_id, weights, title, summary, request,
-                            context_match, certain, uncertain, low, high, {_number('last_work_at')}))
-                        FROM bounded WHERE {below % 'low' if after else '1'} AND (NOT EXISTS (SELECT 1 FROM floor)
-                            OR (high, last_work_at, thread_id) >= (SELECT low, last_work_at, thread_id FROM floor))),
-                       -- Coverage describes the searched inventory, before the keyword filter.
-                       (SELECT json_array(COUNT(*), SUM(h.status = 'saved'), SUM(h.status = 'partial'))
-                        FROM scope s LEFT JOIN {history_rows} h ON h.thread_id = s.thread_id)""",
-                params).fetchone()
-            threads, saved, partial = json.loads(coverage)
-            coverage = {"threads": threads, "saved_histories": saved or 0, "partial_histories": partial or 0}
-            coverage["missing_histories"] = coverage["threads"] - coverage["saved_histories"] - coverage["partial_histories"]
-            coverage["scope"] = "Registered threads and saved message history; external provider transcripts are not searched."
-            pool = []
-            for (thread_id, weight, title, summary, request, context, certain, uncertain,
-                 low, high, time) in json.loads(candidates):
-                candidate = _Candidate()
-                candidate.thread_id, candidate.time = thread_id, _decode_number(time)
-                candidate.context_match, candidate.measured = bool(context), None
-                ranks = {"title": title, "summary": summary, "request": request}
-                candidate.fixed = (weight + sum(_CONTEXT_WEIGHTS[name] * max(rank, 0) for name, rank in ranks.items())
-                                   if use_context else 0)
-                candidate.unknown = tuple(name for name, rank in ranks.items() if rank == -1) if use_context else ()
-                candidate.certain, candidate.uncertain = certain, bool(uncertain) and use_messages
-                candidate.low, candidate.high = low, high
-                candidate.score = low if low == high else None
-                pool.append(candidate)
+            scope_ids = [
+                row[0]
+                for row in db.execute(
+                    f"""SELECT t.thread_id
+                        FROM work_threads t
+                        JOIN sessions s ON s.session_id = t.thread_id
+                        JOIN work_projects w ON w.id = t.project_id
+                        JOIN thread_organization o ON o.thread_id = t.thread_id
+                        WHERE {' AND '.join(where) or '1'}""",
+                    params,
+                )
+            ]
+            scope_set = set(scope_ids)
+            saved_ids, partial_ids, live_prose = _sync_unindexed_histories(store, db, tables, scope_ids)
 
-            def measured_messages(rows):
-                found = {}
-                for thread_id, position, turn_id, item_id, role, timestamp, text in json.loads(rows):
-                    found.setdefault(thread_id, []).append((_relevance(text, terms, phrase), position, {
-                        "turn_id": turn_id, "item_id": item_id, "role": role,
-                        "timestamp": _decode_number(timestamp), "text": text}))
-                return found
+            if resident_live_turns:
+                for tid, turn in resident_live_turns.items():
+                    if tid in scope_set and isinstance(turn, dict):
+                        live_prose.setdefault(tid, []).extend(turn_messages(turn, 0))
+                        if tid not in saved_ids:
+                            saved_ids.add(tid)
 
-            uncertain_messages = f"""SELECT json_group_array(json_array(m.thread_id, m.position, m.turn_id, m.item_id,
-                    m.role, {_number('m.timestamp')}, m.text)) FROM ({message_rows}) m
-                WHERE m.thread_id IN (SELECT value FROM json_each(:measure)) AND {message_where}
-                  AND instr(m.folded, :phrase) = 0"""
+            message_hits: dict[str, list[dict[str, Any]]] = {}
+            if use_messages and scope_ids:
+                raw_hits = store.search_store.search_messages(
+                    terms,
+                    user_only=my_messages,
+                    thread_ids=scope_ids if has_scope_filter else None,
+                )
+                message_hits = {tid: hits for tid, hits in raw_hits.items() if tid in scope_set}
+                for tid, items_list in live_prose.items():
+                    for pos, (turn_id, item_id, role, stamp, text, folded) in enumerate(items_list):
+                        if my_messages and role != "user":
+                            continue
+                        if all(term in folded for term in terms):
+                            message_hits.setdefault(tid, []).append(
+                                {
+                                    "turn_seq": 1_000_000 + pos,
+                                    "turn_id": turn_id,
+                                    "item_id": item_id,
+                                    "role": role,
+                                    "timestamp": stamp,
+                                    "excerpt": text[:320],
+                                    "folded_body": _normalize(text),
+                                    "bm25_score": 1.0,
+                                }
+                            )
 
-            def measure(batch):
-                """Settle scores whose keyword proximity only Python can measure."""
-                stored = [c.thread_id for c in batch if c.unknown and c.thread_id not in overlay]
-                texts, rows = db.execute(f"""SELECT (SELECT json_group_array(json_array(thread_id, title, request, summary))
-                        FROM conversation_search_context WHERE thread_id IN (SELECT value FROM json_each(:context))),
-                    ({uncertain_messages})""", {**params, "context": json.dumps(stored),
-                    "measure": json.dumps([c.thread_id for c in batch if c.uncertain])}).fetchone()
-                context = {thread_id: dict(zip(("title", "request", "summary"), values))
-                           for thread_id, *values in json.loads(texts)}
-                context.update({thread_id: dict(zip(("title", "request", "summary"), values[4:]))
-                                for thread_id, values in overlay.items()})
-                messages = measured_messages(rows)
-                for candidate in batch:
-                    score = candidate.fixed + sum(_CONTEXT_WEIGHTS[name] * _relevance(context[candidate.thread_id][name], terms, phrase)
-                                                  for name in candidate.unknown)
-                    candidate.measured = messages.get(candidate.thread_id, [])
-                    if use_messages:
-                        score += max([candidate.certain, *(found[0] for found in candidate.measured)])
-                    candidate.score = score
-
-            selected = _select(pool, after, limit + 1, measure)
-            page = selected[:limit]
-            details, counts, ranked, unmeasured = db.execute(f"""SELECT
-                (SELECT json_group_array(json_array(t.thread_id, t.title, t.attention, t.original_request, s.client,
-                        s.cwd, s.turn_active, o.repository_id, r.name, o.project_id, p.name, c.phase, c.summary,
-                        c.next_action, c.next_actor, {_number('c.created_at')}, {app}, c.id, c.context_lifecycle_json,
-                        c.context_lifecycle_turn_key IS NOT t.turn_key, done.status,
-                        {"bw.thread_id IS NOT NULL, bw.paused, bw.error" if "browser_inbox_wake" in tables else "0, NULL, NULL"}))
-                    FROM work_threads t JOIN sessions s ON s.session_id = t.thread_id
+            row_where = list(where)
+            row_params = dict(params)
+            skip_row_query = not scope_ids
+            cte_sql = ""
+            matched_join = ""
+            if not skip_row_query and not use_context:
+                hit_ids = sorted(message_hits)
+                if not hit_ids:
+                    skip_row_query = True
+                else:
+                    row_where = ["t.thread_id IN (SELECT value FROM json_each(:msg_hit_ids))"]
+                    row_params = {"msg_hit_ids": json.dumps(hit_ids)}
+            elif not skip_row_query and use_context and all(term.isascii() for term in terms):
+                term_clauses = []
+                for idx, term in enumerate(terms):
+                    key_name = f"_ascii_term_{idx}"
+                    row_params[key_name] = term
+                    term_clauses.append(f"instr(_ctx.folded_ctx, :{key_name}) > 0")
+                disjuncts = ["_ctx.has_unicode", "(" + " AND ".join(term_clauses) + ")"]
+                if message_hits:
+                    row_params["msg_hit_ids"] = json.dumps(sorted(message_hits))
+                    disjuncts.insert(0, "_ctx.thread_id IN (SELECT value FROM json_each(:msg_hit_ids))")
+                raw_ctx = (
+                    "(COALESCE(t.title, '') || ' ' || COALESCE(t.domain, '') || ' ' || "
+                    "COALESCE(t.original_request, '') || ' ' || COALESCE(c0.summary, '') || ' ' || "
+                    "COALESCE(c0.next_action, '') || ' ' || COALESCE(tl.links_text, ''))"
+                )
+                cte_sql = f"""WITH _raw AS (
+                    SELECT t.thread_id,
+                           c0.id AS latest_checkpoint_id,
+                           {raw_ctx} AS raw_ctx
+                    FROM work_threads t
+                    JOIN sessions s ON s.session_id = t.thread_id
                     JOIN work_projects w ON w.id = t.project_id
                     JOIN thread_organization o ON o.thread_id = t.thread_id
-                    LEFT JOIN work_repositories r ON r.id = o.repository_id
-                    LEFT JOIN named_projects p ON p.id = o.project_id
-                    LEFT JOIN thread_checkpoints c ON c.id =
-                        (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)
-                    LEFT JOIN turn_completions done ON done.id =
-                        (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)
-                    {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}
-                    WHERE t.thread_id IN (SELECT value FROM json_each(:page))),
-                (SELECT json_group_array(json_array(thread_id, total)) FROM (SELECT m.thread_id, COUNT(*) AS total
-                    FROM ({folded_rows}) m WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page))
-                    AND {message_where} GROUP BY m.thread_id)),
-                (SELECT json_group_array(json_array(thread_id, relevance, position, turn_id, item_id, role,
-                        {_number('timestamp')}, text)) FROM (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY relevance DESC, position DESC) AS place
-                    FROM (SELECT m.thread_id, m.position, m.turn_id, m.item_id, m.role, m.timestamp, m.text,
-                                 {message_relevance} AS relevance FROM ({message_rows}) m
-                          WHERE :messages AND m.thread_id IN (SELECT value FROM json_each(:page)) AND {message_where}))
-                    WHERE relevance != -1 AND place <= 3),
-                ({uncertain_messages})""", {**params, "messages": use_messages,
-                    "page": json.dumps([c.thread_id for c in page]),
-                    "measure": json.dumps([c.thread_id for c in page if c.uncertain and c.measured is None])}).fetchone()
+                    LEFT JOIN (SELECT thread_id, MAX(id) AS max_id FROM thread_checkpoints GROUP BY thread_id) cm
+                        ON cm.thread_id = t.thread_id
+                    LEFT JOIN thread_checkpoints c0 ON c0.id = cm.max_id
+                    LEFT JOIN (SELECT thread_id, group_concat(label || ' ' || target, ' ') AS links_text FROM thread_links GROUP BY thread_id) tl
+                        ON tl.thread_id = t.thread_id
+                    WHERE {' AND '.join(where) or '1'}
+                ), _ctx AS (
+                    SELECT thread_id,
+                           latest_checkpoint_id,
+                           lower(raw_ctx) AS folded_ctx,
+                           (length(CAST(raw_ctx AS BLOB)) != length(raw_ctx)) AS has_unicode
+                    FROM _raw
+                ), _matched AS (
+                    SELECT thread_id, latest_checkpoint_id FROM _ctx
+                    WHERE {' OR '.join(disjuncts)}
+                ) """
+                matched_join = "JOIN _matched m ON m.thread_id = t.thread_id"
+                row_where = []
+
+            if skip_row_query:
+                decoded_rows = []
+            else:
+                checkpoint_join = (
+                    "LEFT JOIN thread_checkpoints c ON c.id = m.latest_checkpoint_id"
+                    if matched_join
+                    else "LEFT JOIN thread_checkpoints c ON c.id = (SELECT MAX(id) FROM thread_checkpoints WHERE thread_id = t.thread_id)"
+                )
+                packed_rows = db.execute(
+                    f"""{cte_sql}SELECT COALESCE(json_group_array(json_array(
+                               t.thread_id, t.title, t.domain, t.original_request, t.attention,
+                               s.client, s.cwd, s.turn_active,
+                               o.repository_id, r.name,
+                               o.project_id, p.name,
+                               c.phase, c.summary, c.next_action, c.next_actor,
+                               c.created_at,
+                               {app_expr},
+                               c.id, c.context_lifecycle_json,
+                               c.context_lifecycle_turn_key IS NOT t.turn_key,
+                               done.status,
+                               MAX(t.created_at, COALESCE(t.turn_started_at, 0), COALESCE(done.completed_at, 0), COALESCE(c.created_at, 0)),
+                               (SELECT group_concat(artifact, char(10)) FROM (
+                                   SELECT l.label || ' ' || l.target AS artifact
+                                   FROM thread_links l WHERE l.thread_id = t.thread_id ORDER BY l.id
+                               )),
+                               {"bw.thread_id IS NOT NULL, bw.paused, bw.error" if "browser_inbox_wake" in tables else "0, NULL, NULL"}
+                           )), '[]')
+                        FROM work_threads t
+                        {matched_join}
+                        JOIN sessions s ON s.session_id = t.thread_id
+                        JOIN work_projects w ON w.id = t.project_id
+                        JOIN thread_organization o ON o.thread_id = t.thread_id
+                        LEFT JOIN work_repositories r ON r.id = o.repository_id
+                        LEFT JOIN named_projects p ON p.id = o.project_id
+                        {checkpoint_join}
+                        LEFT JOIN turn_completions done ON done.id =
+                            (SELECT MAX(id) FROM turn_completions WHERE thread_id = t.thread_id)
+                        {"LEFT JOIN browser_inbox_wake bw ON bw.thread_id = t.thread_id" if "browser_inbox_wake" in tables else ""}
+                        WHERE {' AND '.join(row_where) or '1'}""",
+                    row_params,
+                ).fetchone()[0]
+                decoded_rows = json.loads(packed_rows)
         finally:
-            db.commit()
-    if settled and schedule_index is not None:
-        schedule_index(lambda: index_search_snapshot(store, settled, schedule_index),
-                       coalesce="search-snapshot")
-    if overlay:
-        from .browser_persistence import database_busy
-        try:
-            with _operation(store, "search.context"), store.connection_timeout(250), store._connection() as db:
-                _save_context(db, params["overlay"])
-        except sqlite3.OperationalError as error:
-            if not database_busy(error):
-                raise
-    totals = dict(json.loads(counts))
-    excerpts = {}
-    for thread_id, relevance, position, turn_id, item_id, role, timestamp, text in json.loads(ranked):
-        excerpts.setdefault(thread_id, []).append((relevance, position, {
-            "turn_id": turn_id, "item_id": item_id, "role": role, "timestamp": _decode_number(timestamp), "text": text}))
-    for thread_id, found in measured_messages(unmeasured).items():
-        excerpts.setdefault(thread_id, []).extend(found)
-    for candidate in page:
-        excerpts.setdefault(candidate.thread_id, []).extend(candidate.measured or ())
-    rows = {row[0]: row for row in json.loads(details)}
+            db.rollback()
+
+    _KEYS = (
+        "thread_id", "title", "domain", "original_request", "attention",
+        "client", "cwd", "turn_active",
+        "repository_id", "repository_name",
+        "project_id", "project_name",
+        "phase", "summary", "next_action", "next_actor",
+        "checkpoint_at",
+        "app_conversation",
+        "lifecycle_id", "context_lifecycle_json",
+        "lifecycle_stale",
+        "last_turn_status",
+        "last_work_at",
+        "artifacts",
+        "wake_exists", "wake_paused", "wake_error",
+    )
+    scope_by_id = {vals[0]: dict(zip(_KEYS, vals)) for vals in decoded_rows}
+
+    coverage = {
+        "threads": len(scope_ids),
+        "saved_histories": len(saved_ids),
+        "partial_histories": len(partial_ids),
+        "missing_histories": len(scope_ids) - len(saved_ids) - len(partial_ids),
+        "scope": "Registered threads and saved message history; external provider transcripts are not searched.",
+    }
+
+    candidates = []
+    for tid, row in scope_by_id.items():
+        context_matched = False
+        context_score = 0
+        if use_context:
+            title_val = row["title"] or ""
+            domain_val = row["domain"] or ""
+            summary_val = ((row["summary"] or "") + " " + (row["next_action"] or "")).strip()
+            request_val = row["original_request"] or ""
+            artifacts_val = row["artifacts"] or ""
+            folded_fields = _folded_context(title_val, domain_val, summary_val, request_val, artifacts_val)
+            if all(any(term in val for val in folded_fields.values()) for term in terms):
+                context_matched = True
+                for term in terms:
+                    context_score += (
+                        8 * (term in folded_fields["title"])
+                        + 6 * (term in folded_fields["domain"])
+                        + 4 * (term in folded_fields["summary"])
+                        + 2 * (term in folded_fields["request"])
+                        + 1 * (term in folded_fields["artifacts"])
+                    )
+                context_score += (
+                    3 * _relevance_folded(folded_fields["title"], terms, phrase)
+                    + _relevance_folded(folded_fields["summary"], terms, phrase)
+                    + _relevance_folded(folded_fields["request"], terms, phrase)
+                )
+
+        thread_messages = message_hits.get(tid, []) if use_messages else []
+        message_matched = bool(thread_messages)
+        matched = (
+            context_matched
+            if source == "context"
+            else message_matched
+            if source == "messages"
+            else (context_matched or message_matched)
+        )
+        if not matched:
+            continue
+
+        msg_score = 0
+        ranked_matches = []
+        if thread_messages:
+            for hit in thread_messages:
+                rel = _relevance(hit["folded_body"], terms, phrase)
+                bm25_bonus = min(16, max(0, int(round(hit["bm25_score"]))))
+                hit_score = max(1, rel + bm25_bonus)
+                msg_score = max(msg_score, hit_score)
+                ranked_matches.append((hit_score, hit["turn_seq"], hit))
+
+        total_score = max(1, context_score + msg_score)
+        last_work_at = _decode_number(row["last_work_at"])
+        key = (total_score, last_work_at, tid)
+        if after is not None and key >= after:
+            continue
+        candidates.append((key, tid, row, context_matched, ranked_matches))
+
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    selected = candidates[: limit + 1]
+    page = selected[:limit]
+
     database = hashlib.sha256(str(store.database_path.resolve()).encode()).hexdigest()[:24]
     items = []
-    for candidate in page:
-        (thread_id, title, attention, original_request, client, directory, turn_active, repository, repository_name,
-         project, project_name, phase, summary, next_action, next_actor, checkpoint_at, app_conversation,
-         lifecycle_id, raw_lifecycle, lifecycle_stale, last_turn_status, wake, paused, error) = rows[candidate.thread_id]
-        item = {"thread_id": thread_id, "title": title, "attention": attention,
-                "original_request": _snippet(original_request, terms, 240), "client": client, "cwd": directory,
-                "turn_active": bool(turn_active), "repository_id": repository, "repository_name": repository_name,
-                "project_id": project, "project_name": project_name, "phase": phase,
-                "summary": _snippet(summary, terms, 320), "next_action": _snippet(next_action, terms, 160),
-                "next_actor": next_actor, "checkpoint_at": _decode_number(checkpoint_at),
-                "app_conversation": bool(app_conversation),
-                "context_match": candidate.context_match and source != "messages",
-                "last_turn_status": last_turn_status, "last_work_at": candidate.time, "score": candidate.score}
-        if raw_lifecycle is not None:
-            report = json.loads(raw_lifecycle)
-            item["context_lifecycle"] = {"checkpoint_id": lifecycle_id, "stale": bool(lifecycle_stale),
-                **{key: report[key] for key in ("recommendation", "reason", "reuse_for", "fresh_for")}}
-        item["url"] = _thread_url(database, thread_id)
-        item["matches"] = []
-        for _, _, match in sorted(excerpts.get(thread_id, ()), key=lambda found: found[:2], reverse=True)[:3]:
-            result = {key: match[key] for key in ("turn_id", "item_id", "role", "timestamp")}
-            result["excerpt"] = _snippet(match["text"], terms, 320, phrase)
-            result["url"] = item["url"] + "&" + urlencode({"turn": match["turn_id"], "item": match["item_id"]})
-            item["matches"].append(result)
-        item["message_count"] = totals.get(thread_id, 0)
+    for (score, last_work_at, _), tid, row, context_matched, ranked_matches in page:
+        item: dict[str, Any] = {
+            "thread_id": tid,
+            "title": row["title"],
+            "attention": row["attention"],
+            "original_request": _snippet(row["original_request"], terms, 240),
+            "client": row["client"],
+            "cwd": row["cwd"],
+            "turn_active": bool(row["turn_active"]),
+            "repository_id": row["repository_id"],
+            "repository_name": row["repository_name"],
+            "project_id": row["project_id"],
+            "project_name": row["project_name"],
+            "phase": row["phase"],
+            "summary": _snippet(row["summary"], terms, 320),
+            "next_action": _snippet(row["next_action"], terms, 160),
+            "next_actor": row["next_actor"],
+            "checkpoint_at": _decode_number(row["checkpoint_at"]),
+            "app_conversation": bool(row["app_conversation"]),
+            "context_match": bool(context_matched and source != "messages"),
+            "last_turn_status": row["last_turn_status"],
+            "last_work_at": last_work_at,
+            "score": score,
+        }
+        if row["context_lifecycle_json"] is not None:
+            report = json.loads(row["context_lifecycle_json"])
+            item["context_lifecycle"] = {
+                "checkpoint_id": row["lifecycle_id"],
+                "stale": bool(row["lifecycle_stale"]),
+                **{k: report[k] for k in ("recommendation", "reason", "reuse_for", "fresh_for")},
+            }
+        thread_url = _thread_url(database, tid)
+        matches_out = []
+        for _, _, match in sorted(ranked_matches, key=lambda entry: entry[:2], reverse=True)[:3]:
+            turn_id = match["turn_id"]
+            item_id = match.get("item_id") or f"turn-{match['turn_seq']}"
+            matches_out.append(
+                {
+                    "turn_id": turn_id,
+                    "item_id": item_id,
+                    "role": match["role"],
+                    "timestamp": match["timestamp"],
+                    "excerpt": _snippet(match["excerpt"], terms, 320, phrase),
+                    "url": thread_url + "&" + urlencode({"turn": turn_id, "item": item_id}),
+                }
+            )
+        item["matches"] = matches_out
+        item["message_count"] = len(ranked_matches)
         item["wake_paused"] = item["wake_pause_reason"] = None
         if item["app_conversation"] and "browser_inbox_wake" in tables:
-            item["wake_paused"] = bool(wake and paused)
-            item["wake_pause_reason"] = _snippet(error, [], 160) if wake and paused else None
-        item["url"] = item.pop("url")
+            paused = bool(row["wake_exists"] and row["wake_paused"])
+            item["wake_paused"] = paused
+            item["wake_pause_reason"] = _snippet(row["wake_error"], [], 160) if paused else None
+        item["url"] = thread_url
         items.append(item)
+
     next_cursor = None
     if len(selected) > limit:
-        last = page[-1]
-        next_cursor = base64.urlsafe_b64encode(json.dumps({"v": 1, "query": fingerprint,
-            "score": last.score, "time": last.time, "id": last.thread_id}, separators=(",", ":")).encode()).decode()
+        (last_score, last_time, last_id), *_ = page[-1]
+        next_cursor = base64.urlsafe_b64encode(
+            json.dumps(
+                {"v": 1, "query": fingerprint, "score": last_score, "time": last_time, "id": last_id},
+                separators=(",", ":"),
+            ).encode()
+        ).decode()
     return {"items": items, "next_cursor": next_cursor, "coverage": coverage}
 
 
 def search_browser_threads(store, sessions, query):
-    """Search one app request's scope within the overview inventory boundary.
-
-    The boundary comes from a single query; the live thread projection is built
-    only when the current view filters on derived attention or stage.
-    """
+    """Search one app request's scope within the overview inventory boundary."""
     from .thread_inventory import listed_threads
+
     scope = query.get("scope", ["all"])[0]
     if scope not in {"all", "all_projects", "current"}:
         raise CoordinationError("Search scope must be all, all_projects, or current.")
@@ -605,11 +618,13 @@ def search_browser_threads(store, sessions, query):
     phase = query.get("phase", [""])[0]
     placement = "archived" if show == "archived" else "later" if show == "later" else "now"
     if scope == "current" and (show in {"attention", "completed"} or phase):
-        # No detail reads, provider resumes, or seen marks.
-        threads = [t for t in sessions.list_work_threads(archived=show == "archived")
-                   if t["attention"] == placement
-                   and (show != "attention" or t["needs_attention"])
-                   and (show != "completed" or t["work_phase"] == "finished")]
+        threads = [
+            t
+            for t in sessions.list_work_threads(archived=show == "archived")
+            if t["attention"] == placement
+            and (show != "attention" or t["needs_attention"])
+            and (show != "completed" or t["work_phase"] == "finished")
+        ]
         if phase:
             threads = [t for t in threads if (t["work_phase"] or "new") == phase]
     else:
@@ -621,12 +636,35 @@ def search_browser_threads(store, sessions, query):
         for field in ("repository", "project"):
             selected = query.get(field, [""])[0]
             if selected:
-                threads = [t for t in threads if t[field + "_id"] == (None if selected == "__none__" else selected)]
+                threads = [
+                    t
+                    for t in threads
+                    if t[field + "_id"] == (None if selected == "__none__" else selected)
+                ]
     if scope != "all_projects" and "project_cwd" in query:
         directory = query["project_cwd"][0]
         directory = str(Path(directory).expanduser().resolve()) if directory else ""
         threads = [t for t in threads if t["project_cwd"] == directory]
-    return search_threads(store, query.get("q", [""])[0], limit=20, cursor=query.get("cursor", [None])[0],
-                          my_messages=query.get("my_messages") == ["true"], snapshot_dirty=True,
-                          schedule_index=partial(sessions.persistence.submit, key="conversation-substring-index", required=False),
-                          thread_ids=[t["thread_id"] for t in threads])
+
+    live_turns: dict[str, dict] = {}
+    histories = getattr(sessions, "histories", None)
+    lock = getattr(sessions, "lock", None)
+    if isinstance(histories, dict) and lock is not None:
+        with lock:
+            for tid, hist in histories.items():
+                turns = hist.get("turns") if isinstance(hist, dict) else None
+                if turns and isinstance(turns[-1], dict) and turns[-1].get("status") == "inProgress":
+                    live_turns[tid] = dict(turns[-1], items=list(turns[-1].get("items") or []))
+
+    return search_threads(
+        store,
+        query.get("q", [""])[0],
+        limit=20,
+        cursor=query.get("cursor", [None])[0],
+        my_messages=query.get("my_messages") == ["true"],
+        thread_ids=[t["thread_id"] for t in threads],
+        resident_live_turns=live_turns or None,
+    )
+
+
+__all__ = ["messages", "search_browser_threads", "search_threads"]
