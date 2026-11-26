@@ -10,7 +10,8 @@ function setup(thread) {
     append(...children) { this.childNodes.push(...children); },
     replaceChildren(fragment) { this.childNodes = fragment.childNodes; },
     setAttribute(name, value) { this[name] = value; },
-    querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100});
+    querySelectorAll() { return []; }, scrollHeight: 100, scrollTop: 0, clientHeight: 100,
+    style: {}, listeners: [], addEventListener(name) { this.listeners.push(name); }});
   const timeline = element("div");
   const context = {state: {selected: "test-thread", detail: {thread, work_thread: {browser_session: true}}},
     $: () => timeline, node: element, document: {createDocumentFragment: () => element("fragment")},
@@ -57,4 +58,27 @@ test("terminal threads retain their continuation guidance", () => {
   c.state.detail.work_thread = {browser_session: false, client: "codex"};
   c.renderTimeline();
   assert.match(c.timeline.childNodes[0].textContent, /terminal session/);
+});
+
+// iOS cancels a touch scroll whenever the page assigns scrollTop. A transcript
+// re-sliced on every scroll frame, with anchor corrections after each render,
+// pinned long conversations to the bottom on iPhone (Nov 26, 2026).
+test("a long transcript renders every shown turn independently of the scroll position", () => {
+  const turns = Array.from({length: 80}, (_, index) => ({id: "turn-" + index, items: [
+    {type: "userMessage", content: [{text: "Question " + index}]},
+    {type: "agentMessage", text: "Answer " + index}]}));
+  const c = setup({turns});
+  c.conversationEntry().allTurns = true; // the reader chose Show earlier turns
+  c.timeline.clientHeight = 600; c.timeline.scrollHeight = 40000; c.timeline.scrollTop = 39400;
+  c.renderTimeline();
+  const atBottom = c.timeline.childNodes.map(child => child.className + ":" + (child.childNodes?.[0]?.textContent ?? child.textContent));
+  c.timeline.scrollTop = 12000;
+  c.renderTimeline();
+  const reading = c.timeline.childNodes.map(child => child.className + ":" + (child.childNodes?.[0]?.textContent ?? child.textContent));
+  assert.deepEqual(reading, atBottom, "rendered rows must not depend on where the reader has scrolled");
+  assert.equal(c.timeline.childNodes.filter(child => child.className === "message user").length, 80,
+    "every shown turn is rendered");
+  assert.equal(c.timeline.childNodes.some(child => child.className === "timeline-spacer"), false);
+  assert.deepEqual(c.timeline.listeners.filter(name => name === "scroll"), [],
+    "rendering must not attach a scroll-driven re-render to the transcript");
 });

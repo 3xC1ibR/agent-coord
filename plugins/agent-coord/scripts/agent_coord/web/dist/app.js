@@ -17030,8 +17030,7 @@ function conversationEntry(id) {
     following: position?.following ?? true,
     revision: 0,
     pending: null,
-    sidecars: null,
-    heights: /* @__PURE__ */ new Map()
+    sidecars: null
   };
   cache.delete(id);
   cache.set(id, entry);
@@ -17050,7 +17049,7 @@ function retainConversation() {
   const entry = conversationEntry(state.selected);
   entry.detail = state.detail;
   globalThis.OpenUIThread?.detach?.($("timeline"));
-  entry.nodes = state.timelineRender?.id === state.selected || state.responseActions?.pending || entry.virtualized ? null : [...$("timeline").childNodes];
+  entry.nodes = state.timelineRender?.id === state.selected || state.responseActions?.pending ? null : [...$("timeline").childNodes];
   if (!globalThis.OpenUIThread?.detach && entry.nodes?.some((item) => item.dataset?.openuiKey)) entry.nodes = null;
   entry.scroll = state.timelineScroll?.position() ?? $("timeline").scrollTop;
   entry.following = state.timelineScroll?.following ?? true;
@@ -18413,63 +18412,13 @@ function renderTimeline() {
   const hidden = conversation.allTurns ? 0 : Math.max(0, turns.length - TIMELINE_WINDOW_TURNS);
   const windowed = omitted > 0 || hidden > 0;
   const firstShown = windowed ? Math.max(0, allEntries.findIndex((entry) => entry.turn === turns[hidden])) : 0;
-  const fullEntries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
-  let entries = fullEntries, topSpacerHeight = 0, bottomSpacerHeight = 0, sliceStart = 0;
-  const canVirtualize = fullEntries.length > 60 && !state.searchTarget && !state.messageTarget && typeof el.clientHeight === "number" && el.clientHeight > 0;
-  conversation.virtualized = canVirtualize;
-  if (canVirtualize) {
-    const heights = conversation.heights ||= /* @__PURE__ */ new Map();
-    const defaultHeight = 128, overscan = 12;
-    const viewportTop = Math.max(0, el.scrollTop || 0), viewportBottom = viewportTop + el.clientHeight;
-    if (atBottom) {
-      sliceStart = Math.max(0, fullEntries.length - 40);
-      for (let i = 0; i < sliceStart; i++) topSpacerHeight += heights.get(i) || defaultHeight;
-      entries = fullEntries.slice(sliceStart);
-    } else {
-      let y = 0, start = 0, end = fullEntries.length;
-      let foundStart = false;
-      for (let i = 0; i < fullEntries.length; i++) {
-        const h = heights.get(i) || defaultHeight;
-        if (!foundStart && y + h >= viewportTop) {
-          start = Math.max(0, i - overscan);
-          foundStart = true;
-        }
-        if (foundStart && y > viewportBottom) {
-          end = Math.min(fullEntries.length, i + overscan);
-          break;
-        }
-        y += h;
-      }
-      sliceStart = start;
-      for (let i = 0; i < start; i++) topSpacerHeight += heights.get(i) || defaultHeight;
-      for (let i = end; i < fullEntries.length; i++) bottomSpacerHeight += heights.get(i) || defaultHeight;
-      entries = fullEntries.slice(start, end);
-    }
-    if (!el._virtualScrollBound) {
-      el._virtualScrollBound = true;
-      let scrollFrame = 0;
-      el.addEventListener("scroll", () => {
-        const activeConv = state.conversations?.get(state.selected);
-        if (!activeConv?.virtualized || scrollFrame) return;
-        scrollFrame = requestAnimationFrame(() => {
-          scrollFrame = 0;
-          if (state.conversations?.get(state.selected)?.virtualized) renderTimeline();
-        });
-      }, { passive: true });
-    }
-  }
+  const entries = firstShown > 0 ? allEntries.slice(firstShown) : allEntries;
   if (windowed) {
     for (const relation of pendingForks) {
       if (relation.boundary !== null && relation.boundary < hidden || omitted > 0 && relation.boundary === null)
         pendingForks.delete(relation);
     }
     fragment.append(earlierTurnsControl(omitted + hidden));
-  }
-  if (topSpacerHeight > 0) {
-    const topSpacer = node("div", null, "timeline-spacer");
-    topSpacer.style.height = topSpacerHeight + "px";
-    topSpacer.setAttribute("aria-hidden", "true");
-    fragment.append(topSpacer);
   }
   appendForks(-1);
   const previousTools = conversation.toolNodes || /* @__PURE__ */ new Map(), toolNodes = /* @__PURE__ */ new Map();
@@ -18648,12 +18597,6 @@ function renderTimeline() {
     if (!entry.item) appendForks(turnIndexes.get(turn));
   }
   appendForks(null, true);
-  if (bottomSpacerHeight > 0) {
-    const bottomSpacer = node("div", null, "timeline-spacer");
-    bottomSpacer.style.height = bottomSpacerHeight + "px";
-    bottomSpacer.setAttribute("aria-hidden", "true");
-    fragment.append(bottomSpacer);
-  }
   if (state.outgoing) {
     state.outgoing.settle(state.selected, state.detail);
     for (const old of el.querySelectorAll("article[data-outgoing]")) old.remove();

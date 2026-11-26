@@ -2058,11 +2058,6 @@ body.mobile-chat .thread-actions-trigger {
   overflow: auto;
   padding: var(--space-5) var(--space-7);
 }
-.timeline-spacer {
-  width: 100%;
-  flex-shrink: 0;
-  pointer-events: none;
-}
 .fork-marker {
   display: flex;
   align-items: center;
