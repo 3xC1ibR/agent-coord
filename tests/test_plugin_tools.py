@@ -179,14 +179,17 @@ class PluginToolsTests(unittest.TestCase):
         original_skill = source.read_text()
         for key in ("codex", "claude"):
             self.assertGreater(tools.verify(self.plugin, Path(result[key])), 10)
-        # With --prune, superseded version directories are removed from caches, keeping only active version.
+        # Compaction must preserve every path that an existing client can hold.
         retry = tools.dev_link(self.plugin, prune=True, **homes)
         self.assertEqual(retry["version"], result["version"])
         self.assertEqual(retry["repairedCodexDirectories"], 0)
-        self.assertEqual(retry["prunedDirectories"], 3)  # previous, second, and old_claude (0.1.0)
-        self.assertFalse(previous.exists())
-        self.assertFalse(second.exists())
-        self.assertFalse(Path(original_config["plugins"]["agent-coord@agent-coord"][0]["installPath"]).exists())
+        self.assertGreater(retry["deduplicatedBytes"], 0)
+        self.assertEqual(previous.stat().st_ino, old_directory)
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+        self.assertEqual(subprocess.check_output([second / "scripts/hook"]), b"second hook")
+        self.assertTrue((previous / "scripts/web/openui.js").samefile(second / "scripts/web/openui.js"))
+        self.assertEqual((previous / "scripts/web/openui.js").read_text(), "original assets")
+        self.assertTrue(Path(original_config["plugins"]["agent-coord@agent-coord"][0]["installPath"]).is_dir())
         self.assertTrue(Path(result["codex"]).is_dir())
         self.assertTrue(Path(result["claude"]).is_dir())
         source.write_text(source.read_text() + "\nUpdated development text.\n")
@@ -196,8 +199,10 @@ class PluginToolsTests(unittest.TestCase):
         updated = tools.dev_link(self.plugin, prune=True, **homes)
         self.assertNotEqual(updated["version"], result["version"])
         self.assertGreater(tools.verify(self.plugin, Path(updated["codex"])), 10)
-        self.assertFalse(Path(result["codex"]).exists())
-        self.assertFalse(Path(result["claude"]).exists())
+        self.assertEqual((Path(result["codex"]) / relative_skill).read_text(), original_skill)
+        self.assertTrue(Path(result["claude"]).is_dir())
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+        self.assertEqual(subprocess.check_output([second / "scripts/hook"]), b"second hook")
         self.assertFalse((Path(updated["codex"]) / openui_rel).exists())
         self.assertFalse(any(path.is_symlink() for path in Path(updated["codex"]).rglob("*")))
 
@@ -278,6 +283,7 @@ class PluginToolsTests(unittest.TestCase):
             ["codex", "exec", "--trust", "--skip-git-repo-check", "--sandbox", "read-only", "--json", "Hook execution fixture."],
             cwd=self.root,
             env={**os.environ, "CODEX_HOME": str(home)},
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -287,6 +293,7 @@ class PluginToolsTests(unittest.TestCase):
             stdout_text, stderr_text = exec_proc.communicate(timeout=30)
         finally:
             self._reap_process_group(exec_proc.pid)
+            exec_proc.wait(timeout=5)
             for stream in (exec_proc.stdout, exec_proc.stderr):
                 if stream is not None:
                     stream.close()
@@ -341,8 +348,9 @@ class PluginToolsTests(unittest.TestCase):
         self.assertEqual(subprocess.check_output([retained / "scripts/hook"]), b"original hook")
         self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
         pruned = tools.dev_link(self.plugin, prune=True, **homes)
-        self.assertFalse(previous.exists())
-        self.assertFalse(retained.exists())
+        self.assertEqual(subprocess.check_output([previous / "scripts/hook"]), b"original hook")
+        self.assertEqual(subprocess.check_output([retained / "scripts/hook"]), b"original hook")
+        self.assertEqual((retained / "scripts/web/openui.js").read_text(), "original assets")
         self.assertTrue(Path(pruned["codex"]).is_dir())
 
     def test_install_never_exposes_pinned_paths_to_installer_pruning(self):
