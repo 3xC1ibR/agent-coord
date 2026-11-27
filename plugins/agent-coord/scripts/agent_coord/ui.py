@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .codex_app_server import BrowserBusyError, BrowserSessions
+from .submission_receipts import SubmissionUncertainError
 from .image_inputs import MAX_MESSAGE_BODY_BYTES
 from .managed_pty import read_delegation_output
 from .navigation import NavigationStore
@@ -1699,6 +1700,8 @@ def _handler(
                     self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                     return
                 self._json(HTTPStatus.OK, result)
+            except SubmissionUncertainError as exc:
+                self._json(HTTPStatus.CONFLICT, {"error": str(exc), "code": "submission_uncertain"})
             except BrowserBusyError as exc:
                 self._json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except sqlite3.OperationalError as exc:

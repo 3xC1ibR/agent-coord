@@ -38,7 +38,7 @@
     const nodes = [...(container.childNodes || [])];
     for (const [id, record] of records) {
       const inContainer = nodes.some(node => node === record.block || node.contains?.(record.block) ||
-        (node.querySelectorAll?.(".openui-block") || []).includes(record.block));
+        [...(node.querySelectorAll?.(".openui-block") || [])].includes(record.block));
       if (!inContainer) continue;
       rememberState(id, record.source, record.state);
       dispose(record);

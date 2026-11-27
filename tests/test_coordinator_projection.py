@@ -20,7 +20,7 @@ from test_codex_app_server import FakeCodex
 from agent_coord.codex_app_server import BrowserSessions
 from agent_coord.coordinator_projection import CoordinatorProjection, pack, unpack
 from agent_coord.history_persistence import read_history
-from agent_coord.provider_transport import ProviderLaunchRejected
+from agent_coord.provider_transport import ProviderCommandRejected, ProviderLaunchRejected
 from agent_coord.store import CoordinationError, CoordinationStore
 
 
@@ -603,6 +603,18 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(calls, ["outcome"])
         with self.store.reading(), self.store._connection() as db:
             self.assertEqual(db.execute("SELECT outcome FROM coordinator_commands").fetchone()[0], "written")
+
+    def test_transport_refusal_is_terminal_and_is_not_replayed_after_recovery(self):
+        with patch.object(self.client, "call", side_effect=ProviderCommandRejected("Receipt capacity reached")):
+            with self.assertRaises(ProviderCommandRejected):
+                self.projection.write("codex", {"id": 9, "method": "turn/start", "params": {}})
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT outcome,value_json FROM coordinator_commands").fetchone()
+        self.assertEqual(row["outcome"], "rejected")
+        self.assertEqual(row["value_json"], "{}")
+        with patch.object(self.client, "call") as call:
+            self.projection.recover_commands()
+            call.assert_not_called()
 
     def test_failed_open_from_retained_transport_has_no_provider_input(self):
         error = "[Errno 2] No such file or directory: '/removed-worktree'"

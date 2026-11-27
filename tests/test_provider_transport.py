@@ -1,4 +1,5 @@
 import json
+import io
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/agent-coord/scripts"))
-from agent_coord.provider_transport import Journal, Owner, TransportError, event_size, retire_dead_owner
+from agent_coord.provider_transport import Client, Journal, Owner, ProviderCommandRejected, TransportError, event_size, retire_dead_owner
 from agent_coord.provider_transport import _darwin_child_observer, observe_child_exit
 
 
@@ -421,12 +422,24 @@ class TransportTests(unittest.TestCase):
         first = self.command("input", "write", {"data": "private-input\n"})
         with patch("agent_coord.provider_transport.MAX_RECEIPTS", 2):
             self.assertEqual(self.command("input", "write", {"data": "private-input\n"}), first)
-            with self.assertRaisesRegex(TransportError, "receipt capacity"):
+            with self.assertRaisesRegex(ProviderCommandRejected, "receipt capacity"):
                 self.command("new", "write", {"data": "new\n"})
         rows = self.owner.journal.db.execute("SELECT payload FROM commands").fetchall()
         self.assertTrue(all(row[0].startswith("sha256:") and len(row[0]) == 71 for row in rows))
         self.assertEqual(len(rows), 2)
         self.assertEqual(self.owner.channel_locks, {})
+
+    def test_client_distinguishes_known_capacity_refusal_from_unknown_delivery(self):
+        client = Client({"instance": "fixture", "token": "fixture", "url": "http://127.0.0.1:1/"}, "first", 1)
+        capacity = "Transport receipt capacity reached; no command was accepted. Retained receipts require maintenance."
+        for result in ({"error": capacity}, {"error": "Rejected before delivery", "code": "command_not_accepted"}):
+            with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(result).encode())):
+                with self.assertRaises(ProviderCommandRejected):
+                    client.call("command")
+        with patch("urllib.request.urlopen", side_effect=OSError("Connection lost")):
+            with self.assertRaises(TransportError) as raised:
+                client.call("command")
+            self.assertNotIsInstance(raised.exception, ProviderCommandRejected)
 
     def test_finished_channels_release_process_and_reader_handles(self):
         self.open()

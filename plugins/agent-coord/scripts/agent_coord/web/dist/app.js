@@ -4549,7 +4549,7 @@ else globalThis.PhoneNotifications = PhoneNotifications;
     if (!container) return [];
     const nodes = [...container.childNodes || []];
     for (const [id, record] of records) {
-      const inContainer = nodes.some((node2) => node2 === record.block || node2.contains?.(record.block) || (node2.querySelectorAll?.(".openui-block") || []).includes(record.block));
+      const inContainer = nodes.some((node2) => node2 === record.block || node2.contains?.(record.block) || [...node2.querySelectorAll?.(".openui-block") || []].includes(record.block));
       if (!inContainer) continue;
       rememberState(id, record.source, record.state);
       dispose(record);
@@ -17177,14 +17177,14 @@ async function select(id, { rollUp = false, dock = false, focus = true, stayInPr
     if (cached.nodes) {
       if (state.timelineThread !== id) {
         $("timeline").replaceChildren(...cached.nodes);
-        globalThis.OpenUIThread?.restore?.($("timeline"), {
-          thread: id,
-          theme: document.documentElement?.dataset.theme || "light",
-          disabled: !cached.detail?.work_thread?.browser_session || cached.detail.work_thread.attention === "archived" || state.closing?.has(id),
-          onAction: (text) => sendOpenUIResponse(id, text)
-        });
         state.timelineScroll?.afterRender(cached.following);
       }
+      globalThis.OpenUIThread?.restore?.($("timeline"), {
+        thread: id,
+        theme: document.documentElement?.dataset.theme || "light",
+        disabled: !cached.detail?.work_thread?.browser_session || cached.detail.work_thread.attention === "archived" || state.closing?.has(id),
+        onAction: (text) => sendOpenUIResponse(id, text)
+      });
       state.timelineThread = id;
     } else renderTimeline();
     if (state.timelineScroll) {
@@ -18028,6 +18028,12 @@ class OutgoingMessages {
   // Dispatcher requests settle by their durable request ID; other messages
   // settle when a user message that was not already present carries the text.
   add(id, { text, images = 0, requestId = null, submissionId = null, detail = null, transfer = false, preserveFailures = false }) {
+    const existing = submissionId && this.list(id).find((entry2) => entry2.submissionId === submissionId);
+    if (existing) {
+      existing.status = "sending";
+      existing.error = "";
+      return existing;
+    }
     const known = /* @__PURE__ */ new Set();
     for (const turn of detail?.thread?.turns || []) {
       for (const item of turn.items || []) if (item.type === "userMessage") known.add(item.id);
@@ -18189,7 +18195,7 @@ class OutgoingMessages {
       sent: "Sent",
       sending: "Sending…",
       queued: "Queued during update",
-      uncertain: "Delivery unconfirmed",
+      uncertain: "Delivery unconfirmed · Check the conversation before sending again.",
       failed: "Not sent · " + entry.error
     };
     status.textContent = statusText[entry.status];
@@ -20482,7 +20488,7 @@ async function sendMessage(mode = "send", { quiet = false } = {}) {
       console.warn("Dispatcher accepted request before UI refresh failed", error);
       throw new Error("Your request was received, but the view could not refresh. Do not send it again.");
     }
-    if (echo?.status === "sending" && state.config?.interactionContinuity && (error.status == null || error.status >= 500)) {
+    if (echo?.status === "sending" && (error.code === "submission_uncertain" || /unconfirmed outcome|receipt could not be saved|Could not confirm whether the message was accepted/.test(error.message || "") || error.status == null || error.status >= 500)) {
       echo.status = "uncertain";
       showOutgoing();
     } else if (echo?.status === "sending") {

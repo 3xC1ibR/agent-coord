@@ -114,6 +114,23 @@ test("switching conversations restores each retained transcript", async () => {
   assert.equal(c.renders, 2);
 });
 
+test("reopening from home restores interactive frames even when the same transcript stays mounted", async () => {
+  const c = setup(), restored = [];
+  c.document = {documentElement: {dataset: {theme: "dark"}}};
+  c.OpenUIThread = {detach() {}, restore(container, options) { restored.push({container, options}); }};
+  await c.select("one");
+  const original = c.$("timeline").childNodes[0];
+  c.goHome();
+  await c.select("one");
+  assert.equal(c.$("timeline").childNodes[0], original);
+  assert.equal(c.renders, 1);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].container, c.$("timeline"));
+  assert.equal(restored[0].options.thread, "one");
+  assert.equal(restored[0].options.theme, "dark");
+  assert.equal(restored[0].options.disabled, false);
+});
+
 test("agent-tree navigation swaps transcripts, drafts and scroll inside the original tab", async () => {
   const c = setup();
   c.state.threadTabs = new ThreadTabs({});

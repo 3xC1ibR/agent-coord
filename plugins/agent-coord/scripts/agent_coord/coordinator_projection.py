@@ -27,7 +27,7 @@ import zlib
 
 from .browser_persistence import capture_writes
 from .history_persistence import saved_turn_status
-from .provider_transport import ProviderLaunchRejected, TransportError
+from .provider_transport import ProviderCommandRejected, ProviderLaunchRejected, TransportError
 from .store import CoordinationError
 
 VERSION = 1
@@ -774,6 +774,12 @@ class CoordinatorProjection:
                 "command", command_id=identity, channel=channel, operation=operation, value=value
             )
             self.command_delivered.set()
+        except ProviderCommandRejected as error:
+            # A negative admission is terminal. Leaving it pending would replay
+            # a refused user command when capacity or the coordinator recovers.
+            self._record_outcome(identity, channel, operation,
+                                 {"outcome": "rejected", "result": {"error": str(error)}})
+            raise
         except Exception:
             self.delivery_error = (
                 "Provider command acknowledgement was lost; its retained outcome is being reconciled."
@@ -781,7 +787,8 @@ class CoordinatorProjection:
             raise
         state, detail = self._record_outcome(identity, channel, operation, result)
         if state == "rejected":
-            raise ProviderLaunchRejected(detail["error"])
+            rejection = ProviderLaunchRejected if operation == "open" else ProviderCommandRejected
+            raise rejection(detail["error"])
         if state != "written":
             self.delivery_error = "Provider delivery is uncertain; the command will not be replayed."
             raise TransportError(self.delivery_error)
@@ -813,7 +820,7 @@ class CoordinatorProjection:
                 unstarted_channels = self._unstarted_channels()
             if channel in unstarted_channels:
                 state = "rejected"
-        if state != "written" and not (state == "rejected" and operation == "open"):
+        if state not in {"written", "rejected"}:
             state = "uncertain"
         result_json = retained_result if retained_result is not None else json.dumps(detail)
         with self.store.database_operation("coordinator.command_outcome"), self.store._connection() as db:
@@ -824,7 +831,7 @@ class CoordinatorProjection:
             )
             if operation == "open" and state == "written":
                 db.execute("UPDATE coordinator_channels SET pid=? WHERE channel=?", (detail["pid"], channel))
-            elif state == "rejected":
+            elif operation == "open" and state == "rejected":
                 db.execute("DELETE FROM coordinator_channels WHERE channel=? AND pid IS NULL", (channel,))
         return state, detail
 

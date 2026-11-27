@@ -766,6 +766,13 @@ class BrowserHTTPTests(unittest.TestCase):
         self.assertEqual(len(self.request(path)[1]["thread"]["turns"]), 1)
         self.assertEqual(self.request(path + "/messages", {"message": "Next turn"})[0], 200)
 
+    def test_uncertain_submission_has_a_distinct_http_error_code(self):
+        from agent_coord.submission_receipts import SubmissionUncertainError
+        with patch.object(self.server.browser_sessions, "submit", side_effect=SubmissionUncertainError("Acceptance unknown")):
+            status, result = self.request("/api/browser/sessions/example/messages", {"message": "Keep this input"})
+        self.assertEqual(status, 409)
+        self.assertEqual(result, {"error": "Acceptance unknown", "code": "submission_uncertain"})
+
     def test_queue_messages_cancel_and_resume_over_http(self):
         status, created = self.request("/api/browser/sessions", {"name": "Queue"})
         self.assertEqual(status, 201)

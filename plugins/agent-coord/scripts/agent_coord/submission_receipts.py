@@ -13,6 +13,10 @@ import uuid
 from .store import CoordinationError
 
 
+class SubmissionUncertainError(CoordinationError):
+    """Provider acceptance cannot be confirmed; repeating input is unsafe."""
+
+
 class SubmissionReceipts:
     def __init__(self, store):
         self.store = store
@@ -62,7 +66,7 @@ class SubmissionReceipts:
                     if row["state"] == "completed":
                         return json.loads(row["result_json"])
                     if row["state"] != "rejected":
-                        raise CoordinationError("This submission has an unconfirmed outcome. Check the conversation before sending again; it has not been replayed.")
+                        raise SubmissionUncertainError("This submission has an unconfirmed outcome. Check the conversation before sending again; it has not been replayed.")
                     db.execute(
                         "UPDATE browser_submission_receipts SET state='accepted', error=NULL, updated_at=? WHERE thread_id=? AND request_id=?",
                         (now, thread_id, key),
@@ -85,6 +89,8 @@ class SubmissionReceipts:
                 # The durable accepted record already prevents a replay even
                 # when failure bookkeeping cannot be committed.
                 pass
+            if state == "uncertain" and not str(body.get("message", "")).lstrip().startswith("/"):
+                raise SubmissionUncertainError(str(error)) from error
             raise
         finally:
             if outermost:
@@ -121,8 +127,10 @@ class SubmissionReceipts:
                         if on_complete_db is not None:
                             on_complete_db(db, result)
         except Exception as error:
-            raise CoordinationError("Your submission may have been received, but its receipt could not be saved. Check the conversation before sending again.") from error
+            raise SubmissionUncertainError("Your submission may have been received, but its receipt could not be saved. Check the conversation before sending again.") from error
         if effect_failure:
+            if state == "uncertain":
+                raise SubmissionUncertainError(str(effect_failure[0])) from effect_failure[0]
             raise effect_failure[0]
         for _, after_commit in effects:
             if after_commit is not None:

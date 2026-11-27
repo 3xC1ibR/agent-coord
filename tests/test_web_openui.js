@@ -99,7 +99,7 @@ class Element {
     this.childNodes.splice(cursor ? this.childNodes.indexOf(cursor) : this.childNodes.length, 0, child);
     child.parentNode = this;
   }
-  querySelectorAll() { return []; }
+  querySelectorAll() { return {length: 0, *[Symbol.iterator]() {}}; }
 }
 
 test("refresh replaces surrounding rows without detaching an interactive message", () => {
@@ -253,7 +253,8 @@ test("frameUrl resolves a permanent loopback URL and detach/restore preserve int
       const block = new Element("div");
       block.ownerDocument = ownerDocument;
       block.querySelector = sel => sel === "code" ? code : sel === ".openui-preview" ? preview : sel === "details" ? details : null;
-      card.querySelectorAll = sel => sel === ".openui-block" ? [block] : [];
+      card.querySelectorAll = sel => ({length: sel === ".openui-block" ? 1 : 0,
+        *[Symbol.iterator]() { if (sel === ".openui-block") yield block; }});
       card.preview = preview;
       return card;
     };
@@ -262,7 +263,8 @@ test("frameUrl resolves a permanent loopback URL and detach/restore preserve int
     const cardA = makeBlockCard("thread-a/turn-1/msg-1", 'root = Card([TextContent("Alpha")])');
     const cardB = makeBlockCard("thread-b/turn-1/msg-1", 'root = Card([TextContent("Beta")])');
 
-    commit(timeline, {childNodes: [cardA]}, {thread: "thread-a", origin: "http://127.0.0.1:48120"});
+    const ordinary = new Element("ordinary-message");
+    commit(timeline, {childNodes: [ordinary, cardA]}, {thread: "thread-a", origin: "http://127.0.0.1:48120"});
     assert.equal(createdFrames.length, 1);
     assert.equal(createdFrames[0].src, "http://127.0.0.1:48120/openui-frame.html");
     createdFrames[0].onload();
@@ -271,7 +273,7 @@ test("frameUrl resolves a permanent loopback URL and detach/restore preserve int
 
     // Detach Thread A's timeline nodes when switching tabs, then commit Thread B.
     const cachedNodesA = detach(timeline);
-    assert.deepEqual(cachedNodesA, [cardA]);
+    assert.deepEqual(cachedNodesA, [ordinary, cardA]);
     assert.equal(channels[0].closed, true);
 
     commit(timeline, {childNodes: [cardB]}, {thread: "thread-b", origin: "http://127.0.0.1:48120"});

@@ -18,6 +18,8 @@ sys.path.insert(0, str(PLUGIN_SCRIPTS))
 
 from agent_coord.codex_app_server import BrowserBusyError, BrowserSessions, CodexRPC
 from agent_coord.store import CoordinationError, CoordinationStore
+from agent_coord.submission_receipts import SubmissionUncertainError
+from agent_coord.provider_transport import ProviderCommandRejected
 from agent_coord.history_persistence import read_history
 
 
@@ -180,7 +182,7 @@ class BrowserSessionTests(unittest.TestCase):
         self.store.threads.update(identity, attention="later")
         body = {"message": "A single provider input", "requestId": "original-request"}
         with patch.object(self.sessions.inbox_wake, "resume", side_effect=sqlite3.OperationalError("write failed")):
-            with self.assertRaisesRegex(sqlite3.OperationalError, "write failed"):
+            with self.assertRaisesRegex(SubmissionUncertainError, "write failed"):
                 self.sessions.submit(identity, body)
         with self.store.reading(), self.store._connection() as db:
             attention = db.execute("SELECT attention FROM work_threads WHERE thread_id=?", (identity,)).fetchone()[0]
@@ -1327,6 +1329,58 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
         self.assertEqual(self.sessions.rpc.threads[thread_id]["turns"][0]["items"][-1]["content"],
                          [{"type": "text", "text": "Correction"}])
+
+    def test_composer_pre_submission_failure_can_retry_the_same_receipt(self):
+        thread_id = self.create()
+        body = {"message": "New input", "requestId": "resume-failure"}
+        with patch.object(self.sessions, "_resume_thread", side_effect=CoordinationError("Provider unavailable")):
+            with self.assertRaisesRegex(CoordinationError, "Provider unavailable"):
+                self.sessions.submit(thread_id, body)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 0)
+        result = self.sessions.submit(thread_id, body)
+        self.assertIn("turn", result)
+        self.assertEqual(self.sessions.submit(thread_id, body), result)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+
+    def test_transport_capacity_refusal_does_not_poison_start_or_steering_receipts(self):
+        for running in (False, True):
+            with self.subTest(running=running):
+                thread_id = self.create()
+                if running:
+                    self.sessions.send(thread_id, {"message": "Initial work"})
+                request = self.sessions.rpc.request
+                body = {"message": "Follow up", "requestId": "capacity-refusal"}
+
+                def reject_submission(method, params=None):
+                    if method in {"turn/start", "turn/steer"}:
+                        raise ProviderCommandRejected("Transport receipt capacity reached; no command was accepted.")
+                    return request(method, params)
+
+                with patch.object(self.sessions.rpc, "request", side_effect=reject_submission):
+                    with self.assertRaisesRegex(CoordinationError, "receipt capacity"):
+                        self.sessions.submit(thread_id, body)
+                result = self.sessions.submit(thread_id, body)
+                self.assertIn("acceptedMessage", result)
+                self.assertEqual(self.sessions.submit(thread_id, body), result)
+                self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
+
+    def test_composer_lost_start_response_cannot_retry_the_same_receipt(self):
+        thread_id = self.create()
+        body = {"message": "New input", "requestId": "lost-start"}
+        request = self.sessions.rpc.request
+
+        def lose_response(method, params=None):
+            result = request(method, params)
+            if method == "turn/start":
+                raise CoordinationError("Connection lost after submission")
+            return result
+
+        with patch.object(self.sessions.rpc, "request", side_effect=lose_response):
+            with self.assertRaisesRegex(CoordinationError, "Connection lost"):
+                self.sessions.submit(thread_id, body)
+        with self.assertRaisesRegex(CoordinationError, "unconfirmed outcome"):
+            self.sessions.submit(thread_id, body)
+        self.assertEqual(len(self.sessions.rpc.threads[thread_id]["turns"]), 1)
 
     def test_failed_handoff_reconciliation_retains_a_retryable_rejection(self):
         thread_id = self.create()

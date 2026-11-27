@@ -47,7 +47,11 @@ class TransportError(RuntimeError):
     pass
 
 
-class ProviderLaunchRejected(TransportError, CoordinationError):
+class ProviderCommandRejected(TransportError, CoordinationError):
+    """The transport refused a command before accepting or writing it."""
+
+
+class ProviderLaunchRejected(ProviderCommandRejected):
     """The process launch failed before any provider input could be sent."""
 
 
@@ -520,7 +524,7 @@ class Owner:
             if operation not in {"open", "write", "close"}:
                 raise TransportError("Unsupported transport command.")
             if self.journal.receipt_count >= MAX_RECEIPTS:
-                raise TransportError("Transport receipt capacity reached; no command was accepted. Retained receipts require maintenance.")
+                raise ProviderCommandRejected("Transport receipt capacity reached; no command was accepted. Retained receipts require maintenance.")
             with self.journal.db:
                 self.journal.db.execute("INSERT INTO commands VALUES (?,?,?,?,?,NULL)",
                                         (identity, channel, operation, encoded, "writing"))
@@ -749,6 +753,8 @@ class Owner:
                     value = owner.dispatch(body)
                 except Exception as error:
                     value = {"error": str(error)}
+                    if isinstance(error, ProviderCommandRejected):
+                        value["code"] = "command_not_accepted"
                 data = encode(value).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
@@ -806,6 +812,11 @@ class Client:
         except (OSError, ValueError) as error:
             raise TransportError("Provider transport outcome unavailable; do not retry delivery blindly.") from error
         if "error" in result:
+            # Existing retained owners report this exact pre-admission refusal
+            # without a code. Never infer non-delivery from arbitrary failures.
+            if action == "command" and (result.get("code") == "command_not_accepted" or result["error"] ==
+                    "Transport receipt capacity reached; no command was accepted. Retained receipts require maintenance."):
+                raise ProviderCommandRejected(result["error"])
             raise TransportError(result["error"])
         return result
 

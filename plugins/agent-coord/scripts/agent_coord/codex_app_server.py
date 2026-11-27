@@ -60,6 +60,7 @@ from .workspaces import (
     workspace_choices,
 )
 from .activity_api import activity_context, record_accepted
+from .provider_transport import ProviderCommandRejected
 
 
 class BrowserBusyError(CoordinationError):
@@ -75,7 +76,7 @@ class BrowserTurnChangedError(BrowserBusyError):
 
 
 class BrowserNotSubmittedError(CoordinationError):
-    """Automatic input failed before the provider turn/start boundary."""
+    """Input failed before crossing the provider submission boundary."""
 
 
 class CodexRPC:
@@ -3326,7 +3327,11 @@ class BrowserSessions:
                             self.delivery_inflight.pop(thread_id, None)
                     if submission['started']:
                         self.message_delivery.failed(token, batch, str(exc))
-                if automatic and not submission["started"]:
+                message = body.get("message", "")
+                ordinary_input = isinstance(message, str) and not message.lstrip().startswith("/")
+                # Commands can have effects before turn/start. Ordinary input
+                # is retryable only while neither start nor steer was attempted.
+                if (automatic or ordinary_input) and not submission["started"]:
                     with self.lock:
                         if self.active.get(thread_id) is None:
                             self.active.pop(thread_id, None)
@@ -3516,7 +3521,10 @@ class BrowserSessions:
                 try:
                     with self.navigation.sending(thread_id, source_window):
                         with self.store._writer.measure_request("send.provider_steer"):
+                            submission["started"] = True
                             result = self._rpc(thread_id).request("turn/steer", {**params, "expectedTurnId": turn_id})
+                except ProviderCommandRejected as error:
+                    raise BrowserNotSubmittedError(str(error)) from error
                 except CoordinationError as error:
                     # These provider responses explicitly mean no input was
                     # submitted. Disconnects, timeouts and ambiguous native
@@ -3585,13 +3593,11 @@ class BrowserSessions:
                         with self.lock:
                             self.delivery_inflight[thread_id] = {'token': token, 'batch': batch, 'turn_id': None}
                     submission["started"] = True
-                    from .provider_transport import ProviderLaunchRejected
                     try:
                         with self.store._writer.measure_request("send.provider_start"):
                             result = rpc.request("turn/start", params)
-                    except ProviderLaunchRejected:
-                        if automatic and record["client"] == "claude":
-                            submission["started"] = False
+                    except ProviderCommandRejected:
+                        submission["started"] = False
                         raise
                     if coordination_delivery:
                         native_turn = result.get('turn', {}).get('id')

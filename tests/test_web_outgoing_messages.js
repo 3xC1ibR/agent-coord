@@ -339,12 +339,37 @@ for (const running of [false, true]) {
 
 test("a rejected send is marked not sent and its text returns to the composer", async () => {
   const c = composer();
-  c.api = async () => { throw new Error("Claude Code disconnected."); };
+  c.api = async () => { throw Object.assign(new Error("Claude Code disconnected."), {status: 400}); };
   await assert.rejects(c.sendMessage(), /disconnected/);
   assert.match(c.$("timeline").text, /Ship the fix Not sent · Claude Code disconnected\./);
   assert.equal(c.$("message").value, "Ship the fix");
   assert.equal(c.state.sending.size, 0);
 });
+
+for (const error of [
+  Object.assign(new Error("Provider acknowledgement lost."), {status: 409, code: "submission_uncertain"}),
+  Object.assign(new Error("This submission has an unconfirmed outcome."), {status: 400}),
+  new Error("Network connection lost."),
+  Object.assign(new Error("Gateway unavailable."), {status: 502}),
+]) {
+  test(`uncertain input is not labelled unsent or offered as a new draft: ${error.message}`, async () => {
+    const c = composer();
+    let requests = 0;
+    c.api = async () => { requests++; throw error; };
+    await assert.rejects(c.sendMessage(), error);
+    assert.equal(requests, 1);
+    assert.match(c.$("timeline").text, /Ship the fix Delivery unconfirmed/);
+    assert.doesNotMatch(c.$("timeline").text, /Not sent/);
+    assert.equal(c.$("message").value, "");
+    assert.equal(c.state.sending.size, 0);
+    c.$("message").value = "Ship the fix";
+    await assert.rejects(c.sendMessage(), error);
+    assert.equal(c.state.outgoing.list("one").length, 1, "manual retry retains one echo and the original receipt identity");
+    c.state.outgoing.confirm("one", [acceptance(c.state.outgoing.list("one")[0].submissionId,
+      "Ship the fix", {threadId: "one", afterItemId: null})]);
+    assert.equal(c.state.outgoing.list("one")[0].status, "sent", "a later durable receipt resolves uncertainty");
+  });
+}
 
 test("a committed acceptance event resolves a lost HTTP response without replaying", async () => {
   const c = composer();
