@@ -223,6 +223,7 @@ async function sends() {
         current = url;
       }
       await composing.locator("#message").fill(marker);
+      await composing.locator("#send:enabled").waitFor({state: "visible", timeout: 7000});
       if (profiles.length) await receiving.evaluate(token => {
         window.__releaseObservedMarker = token;
         window.__releaseStreamAt = null;

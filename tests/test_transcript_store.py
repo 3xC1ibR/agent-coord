@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -89,6 +91,48 @@ class TranscriptStoreTests(unittest.TestCase):
         self.addCleanup(self.store.search_store.close)
         self.addCleanup(self.store.transcripts.close)
         self.transcripts: TranscriptStore = self.store.transcripts
+
+    def test_concurrent_preparation_keeps_each_record_at_its_reserved_offset(self):
+        thread_id = "concurrent-preparation"
+        other = TranscriptStore(self.store)
+        self.addCleanup(other.close)
+        directory = self.transcripts.directory_for(thread_id)
+        directory.mkdir(parents=True)
+        full_path = directory / "turns.full.jsonl"
+        full_path.touch()
+        full_inode = full_path.stat().st_ino
+        competing_seeks = threading.Barrier(2)
+        seek = os.lseek
+
+        def overlap_end_positions(fd, offset, whence):
+            position = seek(fd, offset, whence)
+            if whence == os.SEEK_END and os.fstat(fd).st_ino == full_inode:
+                try:
+                    competing_seeks.wait(timeout=1)
+                except threading.BrokenBarrierError:
+                    pass  # A serialized writer cannot reach the other writer's seek.
+            return position
+
+        histories = [
+            {"id": thread_id, "turns": [_make_turn(0, tool_chars=3000)]},
+            {"id": thread_id, "turns": [_make_turn(1, tool_chars=100)]},
+        ]
+        with patch("agent_coord.transcript_store.os.lseek", side_effect=overlap_end_positions):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                pending = [
+                    executor.submit(writer.prepare_turns_write, thread_id, history)
+                    for writer, history in zip((self.transcripts, other), histories)
+                ]
+                plans = [future.result(timeout=5) for future in pending]
+
+        for plan, history in zip(plans, histories):
+            _, _, _, _, _, _, compact_offset, compact_length, full_offset, full_length = plan["upserts"][0]
+            with full_path.open("rb") as source:
+                source.seek(full_offset)
+                self.assertEqual(json.loads(source.read(full_length)), history["turns"][0])
+            with (directory / "turns.compact.jsonl").open("rb") as source:
+                source.seek(compact_offset)
+                self.assertEqual(json.loads(source.read(compact_length))["id"], history["turns"][0]["id"])
 
     def test_sharded_directory_layout_and_collision_safe_thread_ids(self):
         standard = "9f8e7d6c-1234-4abc-8def-001122334455"

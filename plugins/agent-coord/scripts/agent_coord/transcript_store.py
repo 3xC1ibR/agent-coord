@@ -12,6 +12,7 @@ Directory layout per conversation:
 from __future__ import annotations
 
 import copy
+import fcntl
 import hashlib
 import json
 import os
@@ -750,6 +751,10 @@ class TranscriptStore:
         full_fd = os.open(full_path, os.O_WRONLY | os.O_CREAT, 0o600)
         compact_fd = os.open(compact_path, os.O_WRONLY | os.O_CREAT, 0o600)
         try:
+            # Separate store instances can prepare records concurrently. Reserve
+            # offsets and append both files under one filesystem lock; closing
+            # full_fd releases it before any SQLite index transaction.
+            fcntl.flock(full_fd, fcntl.LOCK_EX)
             full_cursor = os.lseek(full_fd, 0, os.SEEK_END)
             compact_cursor = os.lseek(compact_fd, 0, os.SEEK_END)
             for seq in range(first_changed, len(turns)):
@@ -1197,7 +1202,6 @@ def migrate_database(
 ) -> dict[str, Any]:
     """Idempotently migrate legacy SQLite transcripts/search into Stage 3 JSONL + search.sqlite3."""
     from contextlib import closing
-    import fcntl
     import shutil
     from .history_persistence import decode_history
     from .search_store import SEARCH_SCHEMA, SearchStore, search_database_path
