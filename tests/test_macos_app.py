@@ -314,7 +314,9 @@ class DesktopPackagingTests(unittest.TestCase):
 
             def running_legacy(args, **kwargs):
                 if args[0] == "/usr/sbin/lsof":
-                    return subprocess.CompletedProcess(args, 0, stdout=b"123\n", stderr=b"")
+                    # Only an executing process maps the binary as program text.
+                    executing = args[1:5] == ["-t", "-a", "-d", "txt"]
+                    return subprocess.CompletedProcess(args, 0, stdout=b"123\n" if executing else b"48180\n", stderr=b"")
                 return run(args, **kwargs)
 
             with mock.patch.object(build.subprocess, "run", side_effect=running_legacy):
@@ -324,6 +326,24 @@ class DesktopPackagingTests(unittest.TestCase):
             self.assertTrue(executable.exists())
             self.assertEqual((legacy / "legacy.txt").read_text(), "legacy.txt")
 
+
+    def test_read_handles_after_quit_do_not_block_replacement(self):
+        # tccd keeps the executable open for reading after an ordinary Quit (Nov 26, 2026).
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / build.BUNDLE_NAME
+            executable = app / "Contents/MacOS" / build.EXECUTABLE_NAME
+            executable.parent.mkdir(parents=True)
+            executable.write_text("quit executable")
+            calls = []
+
+            def reader_only(args, **kwargs):
+                calls.append(args)
+                stdout = b"" if "txt" in args else b"48180\n"
+                return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr=b"")
+
+            with mock.patch.object(build.subprocess, "run", side_effect=reader_only):
+                build.check_not_running(app)
+            self.assertEqual(calls, [["/usr/sbin/lsof", "-t", "-a", "-d", "txt", str(executable)]])
 
 if __name__ == "__main__":
     unittest.main()

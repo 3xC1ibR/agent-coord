@@ -42,8 +42,10 @@ def check_destination(destination: Path) -> None:
 
 def check_not_running(app: Path) -> None:
     executable = app / "Contents/MacOS" / EXECUTABLE_NAME
+    # Only a process executing the binary (descriptor type "txt") is running the app.
+    # The macOS privacy daemon tccd keeps ordinary read handles open after Quit.
     if executable.exists() and subprocess.run(
-        ["/usr/sbin/lsof", "-t", str(executable)], capture_output=True,
+        ["/usr/sbin/lsof", "-t", "-a", "-d", "txt", str(executable)], capture_output=True,
     ).stdout.strip():
         raise ValueError(f"Quit the app before replacing it: {app}")
 
