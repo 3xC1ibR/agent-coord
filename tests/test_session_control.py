@@ -255,3 +255,17 @@ class InteractiveControlTests(unittest.TestCase):
         after_reads = len([m for m, _ in self.sessions.rpc.calls if m == "thread/read"])
         self.assertEqual(after_reads, initial_reads)
         self.assertEqual(observe_calls, [])
+
+        # Ended/unloaded watched threads must also avoid repeated live thread/read RPCs.
+        with self.sessions.lock:
+            self.sessions.loaded.discard(self.tid)
+            self.sessions.histories.pop(self.tid, None)
+        with self.store._connection() as db:
+            db.execute("UPDATE sessions SET ended_at=? WHERE session_id=?", (self.store.clock() - 60, self.tid))
+            db.execute("UPDATE interactive_bindings SET refreshed_at=? WHERE thread_id=?", (self.store.clock() - 5, self.tid))
+        for _ in range(5):
+            with self.store._connection() as db:
+                db.execute("UPDATE interactive_bindings SET refreshed_at=? WHERE thread_id=?", (self.store.clock() - 5, self.tid))
+            self.interactive.refresh(self.sessions)
+        ended_reads = len([m for m, _ in self.sessions.rpc.calls if m == "thread/read"])
+        self.assertEqual(ended_reads, initial_reads)

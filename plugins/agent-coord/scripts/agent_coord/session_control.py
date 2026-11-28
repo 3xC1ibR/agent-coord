@@ -223,23 +223,35 @@ class SessionControl:
                 continue
             with sessions.lock:
                 loaded = tid in sessions.loaded
-                has_history = tid in sessions.histories
             if not loaded and record["ended_at"] is None:
                 continue  # Another runtime owns the native connection.
+            client = record.get("client") or "codex"
             rpc = getattr(sessions, "rpc", None)
             rpc_proc = getattr(rpc, "process", None)
-            rpc_healthy = bool(getattr(rpc, "ready", False)) and (
-                rpc_proc is None or rpc_proc.poll() is None
-            )
-            use_snapshot = bool(
-                loaded and has_history and row["refreshed_at"] is not None and rpc_healthy
+            provider_healthy = (
+                bool(getattr(rpc, "ready", False)) and (rpc_proc is None or rpc_proc.poll() is None)
+                if client == "codex"
+                else True
             )
             try:
                 prev_snapshot = json.loads(row["snapshot_json"]) if row["snapshot_json"] else None
             except ValueError:
                 prev_snapshot = None
+            was_disconnected = isinstance(prev_snapshot, dict) and prev_snapshot.get("status") == "disconnected"
+            use_snapshot = bool(
+                row["refreshed_at"] is not None
+                and not was_disconnected
+                and (
+                    (loaded and provider_healthy)
+                    or (not loaded and record["ended_at"] is not None)
+                )
+            )
             try:
-                value = sessions.read(tid, snapshot=True) if use_snapshot else sessions.read(tid)
+                value = (
+                    sessions.read(tid, snapshot=True, recent=True, limit=10)
+                    if use_snapshot
+                    else sessions.read(tid)
+                )
                 turns = value.get("thread", {}).get("turns", [])
                 latest = turns[-1] if turns else {}
                 snapshot = {
