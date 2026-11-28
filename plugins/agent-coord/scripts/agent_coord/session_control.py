@@ -223,10 +223,23 @@ class SessionControl:
                 continue
             with sessions.lock:
                 loaded = tid in sessions.loaded
+                has_history = tid in sessions.histories
             if not loaded and record["ended_at"] is None:
                 continue  # Another runtime owns the native connection.
+            rpc = getattr(sessions, "rpc", None)
+            rpc_proc = getattr(rpc, "process", None)
+            rpc_healthy = bool(getattr(rpc, "ready", False)) and (
+                rpc_proc is None or rpc_proc.poll() is None
+            )
+            use_snapshot = bool(
+                loaded and has_history and row["refreshed_at"] is not None and rpc_healthy
+            )
             try:
-                value = sessions.read(tid)
+                prev_snapshot = json.loads(row["snapshot_json"]) if row["snapshot_json"] else None
+            except ValueError:
+                prev_snapshot = None
+            try:
+                value = sessions.read(tid, snapshot=True) if use_snapshot else sessions.read(tid)
                 turns = value.get("thread", {}).get("turns", [])
                 latest = turns[-1] if turns else {}
                 snapshot = {
@@ -240,13 +253,14 @@ class SessionControl:
                     "last_turn_id": latest.get("id"),
                     "error": None,
                 }
-                for turn in turns[-10:]:
-                    if turn.get("status") in {"completed", "interrupted", "failed"}:
-                        self.observe(
-                            "turn/completed",
-                            {"threadId": tid, "turn": turn},
-                            recovered=True,
-                        )
+                if prev_snapshot is None or snapshot != prev_snapshot:
+                    for turn in turns[-10:]:
+                        if turn.get("status") in {"completed", "interrupted", "failed"}:
+                            self.observe(
+                                "turn/completed",
+                                {"threadId": tid, "turn": turn},
+                                recovered=True,
+                            )
             except Exception as exc:
                 snapshot = {
                     "active_turn_id": None,

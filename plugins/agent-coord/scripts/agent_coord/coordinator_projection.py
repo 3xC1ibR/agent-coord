@@ -34,6 +34,8 @@ VERSION = 1
 SINGLE_PAYLOAD_FORMAT = 2
 PAYLOAD_FORMAT = 3
 WATERMARK_INTERVAL_SECONDS = 5.0
+RECEIPT_MAINTENANCE_INTERVAL_SECONDS = 10.0
+RETAINED_RECEIPT_TAIL = 2000
 
 BROWSER_FIELDS = (
     "sequence",
@@ -188,6 +190,9 @@ class CoordinatorProjection:
         self.durable_cursor = 0
         self._dirty_cursor = False
         self._last_watermark = time.monotonic()
+        self._last_receipt_maintenance = time.monotonic()
+        self._receipt_maintenance_requested = False
+        self._transport_supports_receipt_retirement: bool | None = None
         self.stopped = threading.Event()
         self.command_delivered = threading.Event()
         self.worker = None
@@ -731,14 +736,109 @@ class CoordinatorProjection:
                 ).rowcount
                 if not updated:
                     self._save(db, encoded, target_cursor)
-                db.execute(
-                    """DELETE FROM coordinator_commands
-                       WHERE operation = 'write' AND outcome = 'written'
-                         AND rowid <= COALESCE((SELECT MAX(rowid) - 2000 FROM coordinator_commands), 0)"""
-                )
             self._finish_checkpoint(completions, target_cursor)
         with self.store._writer.measure_request("provider.acknowledge_events"):
             self.client.call("acknowledge_events", cursor=self.durable_cursor, retain_after=self.durable_cursor)
+
+    def maintain_receipts(
+        self,
+        *,
+        force: bool = False,
+        retain_count: int = RETAINED_RECEIPT_TAIL,
+        max_batches: int = 4,
+    ) -> dict[str, int | bool]:
+        """Retire acknowledged terminal transport receipts and prune local command history in bounded batches."""
+        now = time.monotonic()
+        if (
+            not force
+            and not self._receipt_maintenance_requested
+            and (now - self._last_receipt_maintenance) < RECEIPT_MAINTENANCE_INTERVAL_SECONDS
+        ):
+            return {"remote_retired": 0, "local_retired": 0, "has_more": False}
+        self._receipt_maintenance_requested = False
+        remote_retired = 0
+        remote_has_more = False
+        if self._transport_supports_receipt_retirement is not False:
+            status = self.client.call("status")
+            if not isinstance(status, dict) or not status.get("receipt_retirement"):
+                self._transport_supports_receipt_retirement = False
+            else:
+                self._transport_supports_receipt_retirement = True
+                retention = status.get("retention") if isinstance(status.get("retention"), dict) else {}
+                receipt_count = retention.get("receipt_count", 0)
+                cutoff = retention.get("max_receipt_rowid", 0)
+                if (
+                    isinstance(receipt_count, int)
+                    and isinstance(cutoff, int)
+                    and receipt_count > retain_count
+                    and cutoff > retain_count
+                ):
+                    # Causality invariant: cutoff (M1) is observed from transport strictly before
+                    # reading pending coordinator_commands (M2). Since every command commits
+                    # 'pending' locally (T1) before inserting into transport (T2), every command
+                    # with transport rowid <= cutoff that still requires reconciliation is in pending_ids.
+                    with self.store.reading(), self.store._connection() as db:
+                        pending_ids = [
+                            row[0]
+                            for row in db.execute(
+                                "SELECT command_id FROM coordinator_commands WHERE outcome = 'pending'"
+                            ).fetchall()
+                        ]
+                    if len(pending_ids) <= 10_000:
+                        with self.store._writer.measure_request("provider.retire_receipts"):
+                            for _ in range(max_batches):
+                                result = self.client.call(
+                                    "retire_receipts",
+                                    up_to_rowid=cutoff,
+                                    retain_count=retain_count,
+                                    exclude_command_ids=pending_ids,
+                                    limit=512,
+                                )
+                                batch_retired = int(result.get("retired", 0))
+                                remote_retired += batch_retired
+                                remote_has_more = bool(result.get("has_more"))
+                                if not remote_has_more or batch_retired == 0:
+                                    break
+        local_retired = 0
+        local_has_more = False
+        local_limit = 2048
+        with self.store.reading(), self.store._connection() as db:
+            row = db.execute("SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM coordinator_commands").fetchone()
+            needs_local_prune = bool(row and row[0] > retain_count and row[1] > retain_count)
+        if needs_local_prune:
+            with self.store.database_operation("coordinator.prune_commands", priority="background"), self.store._connection() as db:
+                cursor = db.execute(
+                    """DELETE FROM coordinator_commands
+                       WHERE rowid IN (
+                           SELECT rowid FROM coordinator_commands
+                           WHERE rowid <= COALESCE((SELECT MAX(rowid) - ? FROM coordinator_commands), 0)
+                             AND outcome IN ('written', 'rejected')
+                             AND (
+                                 (operation = 'write' AND command_id NOT LIKE 'initialized:%')
+                                 OR NOT EXISTS (
+                                     SELECT 1 FROM coordinator_channels c
+                                     WHERE c.channel = coordinator_commands.channel
+                                       AND (c.closed = 0 OR c.pid IS NULL)
+                                 )
+                             )
+                           ORDER BY rowid ASC
+                           LIMIT ?
+                       )""",
+                    (retain_count, local_limit),
+                )
+                local_retired = max(0, cursor.rowcount)
+                local_has_more = local_retired >= local_limit
+        has_more = remote_has_more or local_has_more
+        done = time.monotonic()
+        if has_more:
+            self._last_receipt_maintenance = done - RECEIPT_MAINTENANCE_INTERVAL_SECONDS + 0.5
+        else:
+            self._last_receipt_maintenance = done
+        return {
+            "remote_retired": remote_retired,
+            "local_retired": local_retired,
+            "has_more": has_more,
+        }
 
     def write(self, channel, message):
         self.write_registered(channel, lambda: message)
@@ -779,6 +879,9 @@ class CoordinatorProjection:
             # a refused user command when capacity or the coordinator recovers.
             self._record_outcome(identity, channel, operation,
                                  {"outcome": "rejected", "result": {"error": str(error)}})
+            if "receipt capacity" in str(error).lower():
+                self._receipt_maintenance_requested = True
+                self.command_delivered.set()
             raise
         except Exception:
             self.delivery_error = (
@@ -1247,6 +1350,16 @@ class CoordinatorProjection:
                     and time.monotonic() - self._last_watermark >= WATERMARK_INTERVAL_SECONDS
                 ):
                     self._persist_watermark()
+                if (
+                    self._receipt_maintenance_requested
+                    or (time.monotonic() - self._last_receipt_maintenance) >= RECEIPT_MAINTENANCE_INTERVAL_SECONDS
+                ):
+                    try:
+                        urgent = self._receipt_maintenance_requested
+                        self.maintain_receipts(max_batches=16 if urgent else 4)
+                    except Exception:
+                        logging.getLogger(__name__).warning("Transport receipt maintenance deferred", exc_info=True)
+                        self._last_receipt_maintenance = time.monotonic()
                 self.error = None
                 if not events and not response.get("event_wait"):
                     self.command_delivered.wait(0.02)

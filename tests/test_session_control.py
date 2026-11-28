@@ -237,3 +237,21 @@ class InteractiveControlTests(unittest.TestCase):
             },
         )
         self.assertEqual(len(self.interactive.snapshot("ramble", tid)["events"]), 1)
+
+    def test_refresh_uses_snapshot_for_loaded_codex_thread_without_polling_thread_read(self):
+        self.sessions.read(self.tid)
+        self.interactive.refresh(self.sessions)
+        initial_reads = len([m for m, _ in self.sessions.rpc.calls if m == "thread/read"])
+        observe_calls = []
+        original_observe = self.interactive.observe
+
+        def counted_observe(*args, **kwargs):
+            observe_calls.append((args, kwargs))
+            return original_observe(*args, **kwargs)
+
+        self.interactive.observe = counted_observe
+        for _ in range(5):
+            self.interactive.refresh(self.sessions)
+        after_reads = len([m for m, _ in self.sessions.rpc.calls if m == "thread/read"])
+        self.assertEqual(after_reads, initial_reads)
+        self.assertEqual(observe_calls, [])

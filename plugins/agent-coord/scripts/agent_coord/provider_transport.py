@@ -261,6 +261,7 @@ class Journal:
             self.db.execute("UPDATE channels SET state='lost' WHERE state IN ('opening','running','write-uncertain')")
         self.event_bytes = self.db.execute("SELECT COALESCE(SUM(size),0) FROM events").fetchone()[0]
         self.receipt_count = self.db.execute("SELECT count(*) FROM commands").fetchone()[0]
+        self.max_receipt_rowid = self.db.execute("SELECT COALESCE(MAX(rowid), 0) FROM commands").fetchone()[0]
 
     def sequence(self):
         with self.lock:
@@ -271,7 +272,8 @@ class Journal:
         with self.lock:
             return {**dict(self.db.execute("SELECT acknowledged,retained_after FROM journal_bounds").fetchone()),
                     "event_bytes": self.event_bytes, "event_limit_bytes": MAX_JOURNAL_BYTES,
-                    "receipt_count": self.receipt_count, "receipt_limit": MAX_RECEIPTS}
+                    "receipt_count": self.receipt_count, "receipt_limit": MAX_RECEIPTS,
+                    "max_receipt_rowid": self.max_receipt_rowid}
 
     def ownership(self):
         with self.lock:
@@ -353,6 +355,66 @@ class Journal:
             self.event_bytes -= sum(row["size"] for row in rows)
             self.changed.notify_all()
             return self.bounds()
+
+    def retire_receipts(self, *, up_to_rowid, retain_count=2000, exclude_command_ids=(), limit=512):
+        """Retire coordinator-acknowledged terminal receipts without affecting in-flight or uncertain work.
+
+        The coordinator establishes up_to_rowid before reading its pending
+        commands, so every command with rowid <= up_to_rowid that still requires
+        reconciliation is in exclude_command_ids. Writing, uncertain, excluded,
+        recent-tail, and open-channel lifecycle receipts are always preserved.
+        """
+        if (type(up_to_rowid) is not int or up_to_rowid < 0
+                or type(retain_count) is not int or retain_count < 0
+                or type(limit) is not int or not 1 <= limit <= 2048):
+            raise TransportError("Invalid transport receipt retirement parameters.")
+        if not isinstance(exclude_command_ids, (list, tuple, set, frozenset)) or len(exclude_command_ids) > 10_000:
+            raise TransportError("Invalid excluded transport receipt list.")
+        excluded = set()
+        for item in exclude_command_ids:
+            if not isinstance(item, str) or not item:
+                raise TransportError("Invalid excluded transport command identity.")
+            excluded.add(item)
+        with self.changed:
+            cutoff = min(up_to_rowid, self.max_receipt_rowid - retain_count)
+            if cutoff <= 0:
+                return {**self.bounds(), "retired": 0, "has_more": False}
+            selected, has_more = [], False
+            cursor = self.db.execute(
+                """SELECT rowid, command_id FROM commands
+                   WHERE rowid <= ?
+                     AND outcome IN ('written', 'rejected')
+                     AND (
+                         (operation = 'write' AND command_id NOT LIKE 'initialized:%')
+                         OR EXISTS (
+                             SELECT 1 FROM channels c
+                             WHERE c.channel = commands.channel AND c.state = 'closed'
+                         )
+                     )
+                   ORDER BY rowid ASC""",
+                (cutoff,),
+            )
+            try:
+                for row in cursor:
+                    if row["command_id"] in excluded:
+                        continue
+                    if len(selected) >= limit:
+                        has_more = True
+                        break
+                    selected.append(row["rowid"])
+            finally:
+                cursor.close()
+            deleted = 0
+            if selected:
+                with self.db:
+                    for offset in range(0, len(selected), 256):
+                        chunk = selected[offset:offset + 256]
+                        placeholders = ",".join("?" for _ in chunk)
+                        res = self.db.execute(f"DELETE FROM commands WHERE rowid IN ({placeholders})", chunk)
+                        deleted += res.rowcount
+                self.receipt_count = max(0, self.receipt_count - deleted)
+                self.changed.notify_all()
+            return {**self.bounds(), "retired": deleted, "has_more": has_more}
 
     def stop_waits(self):
         with self.changed:
@@ -451,7 +513,7 @@ class Owner:
                             channel["pgid"] = os.getpgid(process.pid)
                         except ProcessLookupError:
                             pass
-                return {"protocol": PROTOCOL, "instance": self.instance, "pid": os.getpid(),
+                return {"protocol": PROTOCOL, "receipt_retirement": 1, "instance": self.instance, "pid": os.getpid(),
                         **self.journal.ownership(), "channels": channels,
                         "sequence": self.journal.sequence(), "retention": self.journal.bounds()}
         if action == "claim":
@@ -471,6 +533,13 @@ class Owner:
                 return {"events": events, "event_wait": True}
             if action == "acknowledge_events":
                 return self.journal.acknowledge_events(body["cursor"], body.get("retain_after", 0))
+            if action == "retire_receipts":
+                return self.journal.retire_receipts(
+                    up_to_rowid=body["up_to_rowid"],
+                    retain_count=body.get("retain_count", 2000),
+                    exclude_command_ids=body.get("exclude_command_ids", ()),
+                    limit=body.get("limit", 512),
+                )
             if action == "outcome":
                 row = self.journal.db.execute("SELECT outcome,result FROM commands WHERE command_id=?",
                                               (body["command_id"],)).fetchone()
@@ -526,9 +595,11 @@ class Owner:
             if self.journal.receipt_count >= MAX_RECEIPTS:
                 raise ProviderCommandRejected("Transport receipt capacity reached; no command was accepted. Retained receipts require maintenance.")
             with self.journal.db:
-                self.journal.db.execute("INSERT INTO commands VALUES (?,?,?,?,?,NULL)",
-                                        (identity, channel, operation, encoded, "writing"))
+                cursor = self.journal.db.execute("INSERT INTO commands VALUES (?,?,?,?,?,NULL)",
+                                                 (identity, channel, operation, encoded, "writing"))
             self.journal.receipt_count += 1
+            if cursor.lastrowid and cursor.lastrowid > self.journal.max_receipt_rowid:
+                self.journal.max_receipt_rowid = cursor.lastrowid
         try:
             result = self._command(channel, operation, value)
         except Exception as error:

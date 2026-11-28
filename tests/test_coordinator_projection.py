@@ -852,6 +852,121 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(observed_seqs, expected)
         self.assertEqual(len(observed_seqs), len(set(observed_seqs)))
 
+    def test_maintain_receipts_bounds_transport_and_local_commands_while_preserving_pending(self):
+        from agent_coord.provider_transport import Owner
+
+        transport_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(transport_dir.cleanup)
+        owner = Owner(transport_dir.name)
+        claim = owner.dispatch({"action": "claim", "expected_epoch": 0, "coordinator": "coord-1"})
+
+        def cleanup_owner():
+            for process in owner.processes.values():
+                process.kill()
+                process.wait(timeout=5)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    stream.close()
+            owner.journal.close()
+
+        self.addCleanup(cleanup_owner)
+
+        class DirectOwnerClient:
+            record = {"instance": owner.instance, "pid": os.getpid()}
+
+            def call(self, action, **values):
+                payload = {"action": action, **values}
+                if action != "status":
+                    payload.update(claim)
+                return owner.dispatch(payload)
+
+            def command(self, channel, operation, value, **_):
+                return self.call(
+                    "command",
+                    command_id=f"{operation}:{channel}",
+                    channel=channel,
+                    operation=operation,
+                    value=value,
+                )["result"]
+
+        import sys
+        projection = CoordinatorProjection(self.sessions, DirectOwnerClient())
+        projection.open(
+            "codex",
+            [sys.executable, "-u", "-c", "import sys\nfor line in sys.stdin: pass"],
+            dict(os.environ),
+            self.temporary.name,
+            lambda _: None,
+            provider="codex",
+        )
+        projection.write("codex", {"method": "initialized"})
+
+        # Seed a pending local command whose transport write already completed (simulating lost ack).
+        pending_id = "pending-awaiting-reconcile"
+        with self.store._connection() as db:
+            db.execute(
+                "INSERT INTO coordinator_commands VALUES (?,'codex','write',?,'pending',NULL)",
+                (pending_id, json.dumps({"data": "{\"id\":0}\n"})),
+            )
+        owner.dispatch({
+            "action": "command",
+            "command_id": pending_id,
+            "channel": "codex",
+            "operation": "write",
+            "value": {"data": "{\"id\":0}\n"},
+            **claim,
+        })
+
+        with patch("agent_coord.provider_transport.MAX_RECEIPTS", 15):
+            for idx in range(30):
+                projection.write("codex", {"id": idx + 1, "method": "ping", "params": {}})
+                if idx % 4 == 3:
+                    projection.maintain_receipts(force=True, retain_count=4, max_batches=4)
+
+        projection.maintain_receipts(force=True, retain_count=4, max_batches=8)
+
+        remote_ids = {
+            row[0] for row in owner.journal.db.execute("SELECT command_id FROM commands").fetchall()
+        }
+        self.assertLessEqual(len(remote_ids), 10)
+        self.assertIn("open:codex", remote_ids)
+        self.assertIn("initialized:codex", remote_ids)
+        self.assertIn(pending_id, remote_ids)
+
+        with self.store.reading(), self.store._connection() as db:
+            local_ids = {row[0] for row in db.execute("SELECT command_id FROM coordinator_commands").fetchall()}
+        self.assertLessEqual(len(local_ids), 10)
+        self.assertIn("open:codex", local_ids)
+        self.assertIn("initialized:codex", local_ids)
+        self.assertIn(pending_id, local_ids)
+
+    def test_maintain_receipts_degrades_gracefully_on_legacy_transport_and_prunes_local_commands(self):
+        legacy_client = ProviderOwner(self.projection, {"codex": "running"})
+        projection = CoordinatorProjection(self.sessions, legacy_client)
+        with self.store._connection() as db:
+            db.execute("INSERT INTO coordinator_channels VALUES ('codex','codex',NULL,'main',123,0)")
+            db.execute("INSERT INTO coordinator_commands VALUES ('open:codex','codex','open','{}','written','{}')")
+            db.execute("INSERT INTO coordinator_commands VALUES ('initialized:codex','codex','write','{}','written','{}')")
+            db.execute("INSERT INTO coordinator_commands VALUES ('uncertain-1','codex','write','{}','uncertain','{}')")
+            for idx in range(25):
+                db.execute(
+                    "INSERT INTO coordinator_commands VALUES (?,'codex','write','{}','written','{}')",
+                    (f"w-{idx}",),
+                )
+        result = projection.maintain_receipts(force=True, retain_count=5)
+        self.assertFalse(projection._transport_supports_receipt_retirement)
+        self.assertEqual(result["remote_retired"], 0)
+        self.assertGreater(result["local_retired"], 0)
+        with self.store.reading(), self.store._connection() as db:
+            remaining = {row[0] for row in db.execute("SELECT command_id FROM coordinator_commands").fetchall()}
+        self.assertTrue({"open:codex", "initialized:codex", "uncertain-1"} <= remaining)
+        self.assertLessEqual(len(remaining), 9)
+
+        # Capacity rejection schedules asynchronous maintenance without making extra synchronous RPC calls.
+        with patch.object(self.client, "call", side_effect=ProviderCommandRejected("Transport receipt capacity reached")):
+            with self.assertRaises(ProviderCommandRejected):
+                self.projection.write("codex", {"id": 99, "method": "turn/start", "params": {}})
+        self.assertTrue(self.projection._receipt_maintenance_requested)
+
 
 if __name__ == "__main__":
     unittest.main()

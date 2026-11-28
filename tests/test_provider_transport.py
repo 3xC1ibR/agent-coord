@@ -521,6 +521,90 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([tuple(row) for row in self.owner.journal.db.execute(
             "SELECT * FROM commands WHERE command_id IN ('old-write','old-close') ORDER BY command_id")], receipts)
 
+    def test_retire_receipts_keeps_store_bounded_and_preserves_safety_invariants(self):
+        self.open()
+        self.command("initialized:provider", "write", {"data": "init\n"})
+        self.command("pending-on-coord", "write", {"data": "pending\n"})
+        with self.owner.journal.db:
+            self.owner.journal.db.execute(
+                "INSERT INTO commands VALUES ('in-flight','provider','write','sha256:aa','writing',NULL)"
+            )
+            self.owner.journal.db.execute(
+                "INSERT INTO commands VALUES ('uncertain-old','provider','write','sha256:bb','uncertain','{}')"
+            )
+        self.owner.journal.receipt_count = self.owner.journal.db.execute("SELECT count(*) FROM commands").fetchone()[0]
+        self.owner.journal.max_receipt_rowid = self.owner.journal.db.execute("SELECT MAX(rowid) FROM commands").fetchone()[0]
+
+        with patch("agent_coord.provider_transport.MAX_RECEIPTS", 12):
+            for idx in range(25):
+                status = self.owner.dispatch({"action": "status"})
+                self.assertEqual(status["receipt_retirement"], 1)
+                if status["retention"]["receipt_count"] >= 10:
+                    retired = self.owner.dispatch({
+                        "action": "retire_receipts",
+                        "up_to_rowid": status["retention"]["max_receipt_rowid"],
+                        "retain_count": 3,
+                        "exclude_command_ids": ["pending-on-coord"],
+                        "limit": 4,
+                        **self.claim,
+                    })
+                    self.assertGreater(retired["retired"], 0)
+                result = self.command(f"write-{idx}", "write", {"data": f"msg-{idx}\n"})
+                self.assertEqual(result["outcome"], "written")
+
+            # Even at exact capacity, retire_receipts still succeeds so maintenance can unblock writes.
+            while self.owner.journal.receipt_count < 12:
+                idx += 1
+                self.command(f"fill-{idx}", "write", {"data": f"fill-{idx}\n"})
+            with self.assertRaisesRegex(ProviderCommandRejected, "receipt capacity"):
+                self.command("blocked", "write", {"data": "blocked\n"})
+
+            # Stale coordinator cannot retire receipts.
+            with self.assertRaisesRegex(TransportError, "fenced"):
+                self.owner.dispatch({
+                    "action": "retire_receipts",
+                    "up_to_rowid": self.owner.journal.max_receipt_rowid,
+                    "retain_count": 2,
+                    "epoch": 0,
+                    "coordinator": "stale",
+                })
+
+            final_retire = self.owner.dispatch({
+                "action": "retire_receipts",
+                "up_to_rowid": self.owner.journal.max_receipt_rowid,
+                "retain_count": 2,
+                "exclude_command_ids": ["pending-on-coord"],
+                "limit": 32,
+                **self.claim,
+            })
+            self.assertGreater(final_retire["retired"], 0)
+            self.assertEqual(self.command("unblocked", "write", {"data": "ok\n"})["outcome"], "written")
+
+        remaining = {
+            row[0] for row in self.owner.journal.db.execute("SELECT command_id FROM commands").fetchall()
+        }
+        self.assertTrue(
+            {"open", "initialized:provider", "pending-on-coord", "in-flight", "uncertain-old", "unblocked"}
+            <= remaining
+        )
+
+        # Once the channel is closed, open/initialized receipts become eligible for retirement.
+        self.command("close", "close", {})
+        self.owner.dispatch({
+            "action": "retire_receipts",
+            "up_to_rowid": self.owner.journal.max_receipt_rowid,
+            "retain_count": 0,
+            "exclude_command_ids": ["pending-on-coord"],
+            "limit": 64,
+            **self.claim,
+        })
+        after_close = {
+            row[0] for row in self.owner.journal.db.execute("SELECT command_id FROM commands").fetchall()
+        }
+        self.assertNotIn("open", after_close)
+        self.assertNotIn("initialized:provider", after_close)
+        self.assertEqual(after_close, {"pending-on-coord", "in-flight", "uncertain-old"})
+
     def test_large_history_frame_is_not_truncated_at_the_old_eight_megabyte_limit(self):
         import os
         size = 9 * 1024 * 1024
