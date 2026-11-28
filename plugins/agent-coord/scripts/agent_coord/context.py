@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+try:
+    import pwd
+except ImportError:  # pragma: no cover - non-POSIX
+    pwd = None
 import shlex
 import shutil
 import tempfile
@@ -19,6 +23,30 @@ request_session: ContextVar[str | None] = ContextVar("agent_coord_request_sessio
 
 def cli_path() -> Path:
     return Path(__file__).resolve().parents[1] / "agent-coord"
+
+
+def current_username() -> str | None:
+    """Return the current process UID's account name, if available."""
+    if pwd is None or not hasattr(os, "getuid"):
+        return None
+    try:
+        name = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        return None
+    return name if isinstance(name, str) and name.strip() else None
+
+
+def normalize_user_environment(environment):
+    """Ensure USER and LOGNAME reflect the current UID when missing or mismatched."""
+    username = current_username()
+    if not username:
+        return environment
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    for key in ("USER", "LOGNAME"):
+        current = environment.get(key)
+        if not isinstance(current, str) or not current.strip() or (uid != 0 and current.strip() == "root"):
+            environment[key] = username
+    return environment
 
 
 request_environment: ContextVar[dict | None] = ContextVar("agent_coord_request_environment", default=None)
@@ -93,6 +121,7 @@ def client_environment(environment, database_path, client, *, session_id=None):
     # A child must never inherit the parent's identity or Claude shell exports.
     for key in ("AGENT_COORD_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_ENV_FILE", "AGENT_COORD_APP_PROMPT"):
         env.pop(key, None)
+    normalize_user_environment(env)
     env.update(AGENT_COORD_DB=str(database_path), AGENT_COORD_CLIENT=client)
     env["PATH"] = str(cli_path().parent) + os.pathsep + env.get("PATH", os.defpath)
     if session_id:

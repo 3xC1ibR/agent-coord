@@ -168,7 +168,10 @@ def scripts_directory() -> Path:
 
 
 def supervisor_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    from .context import normalize_user_environment
+
     env = dict(os.environ if environment is None else environment)
+    normalize_user_environment(env)
     scripts = str(scripts_directory())
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = scripts if not existing else scripts + os.pathsep + existing
@@ -177,9 +180,12 @@ def supervisor_environment(environment: dict[str, str] | None = None) -> dict[st
 
 def command_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
     """The job command must never inherit the owner's agent identity."""
+    from .context import normalize_user_environment
+
     env = dict(os.environ if environment is None else environment)
     for key in _IDENTITY_KEYS:
         env.pop(key, None)
+    normalize_user_environment(env)
     return env
 
 

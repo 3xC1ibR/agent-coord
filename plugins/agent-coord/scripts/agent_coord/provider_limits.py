@@ -203,6 +203,43 @@ def _read_json(path):
                          state="sign_in_required") from None
 
 
+def _has_claude_oauth(data) -> bool:
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    return isinstance(oauth, dict) and isinstance(oauth.get("accessToken"), str) and bool(oauth["accessToken"])
+
+
+def _query_claude_keychain(account: str | None = None) -> dict:
+    command = ["security", "find-generic-password", "-s", "Claude Code-credentials"]
+    if account:
+        command += ["-a", account]
+    command.append("-w")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=8, check=False)
+        parsed = json.loads(result.stdout) if result.returncode == 0 else {}
+        return parsed if isinstance(parsed, dict) else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {}
+
+
+def _claude_keychain_credential() -> dict:
+    from .context import current_username
+
+    candidates: list[str] = []
+    pw_user = current_username()
+    if pw_user:
+        candidates.append(pw_user)
+    env_user = (os.environ.get("USER") or "").strip()
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    if env_user and env_user != "unknown" and not (uid != 0 and env_user == "root") and env_user not in candidates:
+        candidates.append(env_user)
+    for account in candidates:
+        data = _query_claude_keychain(account)
+        if _has_claude_oauth(data):
+            return data
+    fallback = _query_claude_keychain()
+    return fallback if _has_claude_oauth(fallback) else {}
+
+
 def _claude_credential():
     # ClaudeConnection removes inherited API keys to use the user's CLI login.
     # Match that behavior, while preserving explicit alternate provider routing.
@@ -217,18 +254,12 @@ def _claude_credential():
     if path.is_file():
         data = _read_json(path)
     elif sys.platform == "darwin" and not os.environ.get("CLAUDE_CONFIG_DIR"):
-        try:
-            result = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-                                    capture_output=True, text=True, timeout=8, check=False)
-            data = json.loads(result.stdout) if result.returncode == 0 else {}
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            data = {}
+        data = _claude_keychain_credential()
     else:
         data = {}
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str) or not oauth["accessToken"]:
+    if not _has_claude_oauth(data):
         raise QuotaError("Sign in to Claude Code on this Mac to see its limits.", state="sign_in_required")
-    return oauth
+    return data["claudeAiOauth"]
 
 
 class ProviderLimits:

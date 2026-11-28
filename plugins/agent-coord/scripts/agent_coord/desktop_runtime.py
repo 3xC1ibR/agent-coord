@@ -540,10 +540,13 @@ def payload_command(payload):
 
 
 def payload_environment(payload):
+    from .context import normalize_user_environment
+
     environment = dict(os.environ)
     for name in list(environment):
         if name.startswith(("AGENT_COORD_", "ZELLIJ", "RIBBON_RUNTIME_")) or name in {"CODEX_THREAD_ID", "PYTHONHOME"}:
             environment.pop(name)
+    normalize_user_environment(environment)
     environment.update(PYTHONPATH=str(payload / "backend"), PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
     return environment
 
@@ -1372,9 +1375,12 @@ class Runtime:
         return "committed", True
 
     def serve(self):
+        from .context import normalize_user_environment
         from .store import CoordinationStore
         from .ui import make_ui_server
         from . import launch_metrics, runtime_update
+
+        normalize_user_environment(os.environ)
 
         edge = ensure_edge(self.directory, self.database, self.payload)
         self.edge_url = edge["url"]

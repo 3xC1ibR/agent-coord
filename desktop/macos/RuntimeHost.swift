@@ -121,6 +121,16 @@ final class Backend {
             environment.removeValue(forKey: key)
         }
         environment.removeValue(forKey: "PYTHONHOME")
+        let username = NSUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !username.isEmpty {
+            let nonRoot = getuid() != 0
+            for key in ["USER", "LOGNAME"] {
+                let current = (environment[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if current.isEmpty || (nonRoot && current == "root") {
+                    environment[key] = username
+                }
+            }
+        }
         environment["PATH"] = config.toolPath
         environment["PYTHONPATH"] = resources.appendingPathComponent("backend").path
         environment["PYTHONNOUSERSITE"] = "1"

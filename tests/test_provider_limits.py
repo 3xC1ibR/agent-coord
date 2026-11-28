@@ -194,6 +194,96 @@ class CollectorTests(unittest.TestCase):
         http.assert_not_called()
         self.assertEqual(result["providers"][1]["state"], "sign_in_required")
 
+    def test_claude_keychain_queries_current_user_and_ignores_mcpoauth_only_entries(self):
+        from agent_coord import context
+
+        calls = []
+
+        def fake_security(cmd, **_kwargs):
+            calls.append(cmd)
+            if "-a" in cmd:
+                account = cmd[cmd.index("-a") + 1]
+                if account == "walle":
+                    return SimpleNamespace(
+                        returncode=0,
+                        stdout=json.dumps({"claudeAiOauth": {"accessToken": "real-token", "subscriptionType": "max"}}),
+                    )
+                return SimpleNamespace(returncode=44, stdout="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"mcpOAuth": {"server": {"accessToken": "mcp-only"}}}),
+            )
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(limits.os.environ, {}, clear=True), \
+             patch.object(limits.Path, "home", return_value=Path(directory)), \
+             patch.object(limits.sys, "platform", "darwin"), \
+             patch.object(context, "current_username", return_value="walle"), \
+             patch.object(limits.subprocess, "run", side_effect=fake_security):
+            cred = limits._claude_credential()
+        self.assertEqual(cred["accessToken"], "real-token")
+        self.assertEqual(calls, [["security", "find-generic-password", "-s", "Claude Code-credentials", "-a", "walle", "-w"]])
+
+    def test_claude_keychain_rejects_mcpoauth_only_fallback_as_sign_in_required(self):
+        from agent_coord import context
+
+        calls = []
+
+        def fake_security(cmd, **_kwargs):
+            calls.append(cmd)
+            if "-a" in cmd:
+                return SimpleNamespace(returncode=44, stdout="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"mcpOAuth": {"server": {"accessToken": "mcp-only"}}}),
+            )
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(limits.os.environ, {}, clear=True), \
+             patch.object(limits.Path, "home", return_value=Path(directory)), \
+             patch.object(limits.sys, "platform", "darwin"), \
+             patch.object(context, "current_username", return_value="walle"), \
+             patch.object(limits.subprocess, "run", side_effect=fake_security):
+            with self.assertRaises(limits.QuotaError) as raised:
+                limits._claude_credential()
+        self.assertEqual(raised.exception.state, "sign_in_required")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("-a", calls[0])
+        self.assertNotIn("-a", calls[1])
+
+    def test_spawn_environment_normalizes_missing_user_and_root_logname_for_non_root_uid(self):
+        from agent_coord import context, desktop_runtime, jobs
+
+        fake_pw = SimpleNamespace(pw_name="walle")
+        with patch.object(context.os, "getuid", return_value=501), \
+             patch.object(context.pwd, "getpwuid", return_value=fake_pw):
+            normalized = context.normalize_user_environment({"LOGNAME": "root", "PATH": "/usr/bin"})
+            self.assertEqual(normalized["USER"], "walle")
+            self.assertEqual(normalized["LOGNAME"], "walle")
+
+            preserved = context.normalize_user_environment({"USER": "custom", "LOGNAME": "custom"})
+            self.assertEqual(preserved["USER"], "custom")
+            self.assertEqual(preserved["LOGNAME"], "custom")
+
+            with patch.dict(context.os.environ, {"LOGNAME": "root", "PATH": "/usr/bin"}, clear=True):
+                claude_env = context.client_environment(
+                    context.os.environ, Path("/tmp/state.sqlite3"), "claude", session_id="session-1"
+                )
+                self.assertEqual(claude_env["USER"], "walle")
+                self.assertEqual(claude_env["LOGNAME"], "walle")
+                payload_env = desktop_runtime.payload_environment(Path("/tmp/payload"))
+                self.assertEqual(payload_env["USER"], "walle")
+                self.assertEqual(payload_env["LOGNAME"], "walle")
+                sup_env = jobs.supervisor_environment()
+                self.assertEqual(sup_env["USER"], "walle")
+                self.assertEqual(sup_env["LOGNAME"], "walle")
+
+        with patch.object(context.os, "getuid", return_value=0), \
+             patch.object(context.pwd, "getpwuid", return_value=SimpleNamespace(pw_name="root")):
+            root_env = context.normalize_user_environment({"LOGNAME": "root"})
+            self.assertEqual(root_env["USER"], "root")
+            self.assertEqual(root_env["LOGNAME"], "root")
+
 
 class UsageHTTPTests(unittest.TestCase):
     def setUp(self):
